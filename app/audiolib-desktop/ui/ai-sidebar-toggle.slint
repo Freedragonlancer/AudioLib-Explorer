@@ -1,0 +1,89 @@
+// app/audiolib-desktop/ui/ai-sidebar-toggle.slint
+import { Theme } from "theme.slint";
+
+// The chevron points in the drawer's direction of travel; text makes the action explicit.
+export component AiSidebarToggle inherits Rectangle {
+    in property <bool> collapsed: false;
+    in property <bool> docked: false;
+    in property <bool> chinese: false;
+    in property <bool> enabled: true;
+    private property <length> control-width: (root.collapsed ? 96px : 76px) * Theme.ui-scale;
+    private property <length> control-height: 30px * Theme.ui-scale;
+    private property <string> action-label: root.collapsed
+        ? (root.chinese ? "展开 AI 侧栏" : "Expand AI sidebar")
+        : (root.chinese ? "收起 AI 侧栏" : "Collapse AI sidebar");
+    callback clicked();
+
+    width: root.control-width;
+    height: root.control-height;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    border-radius: 5px * Theme.ui-scale;
+    border-width: 1px;
+    border-color: toggle-focus.has-focus || root.collapsed ? Theme.accent : Theme.strong-border;
+    background: hit.has-hover ? Theme.hover : root.collapsed ? Theme.panel : Theme.raised;
+    opacity: root.enabled ? 1 : 0.45;
+    accessible-role: button;
+    accessible-label: root.action-label;
+    accessible-description: root.collapsed
+        ? (root.chinese ? "展开右侧 AI 搜索面板" : "Show the AI search sidebar on the right")
+        : (root.chinese ? "收起右侧 AI 搜索面板" : "Hide the AI search sidebar on the right");
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    forward-focus: toggle-focus;
+
+    Image {
+        x: 10px * Theme.ui-scale;
+        y: (parent.height - self.height) / 2;
+        width: 20px * Theme.ui-scale;
+        height: self.width;
+        source: root.collapsed
+            ? @image-url("icons/ai-sidebar-expand.svg")
+            : @image-url("icons/ai-sidebar-collapse.svg");
+        colorize: root.collapsed || hit.has-hover || toggle-focus.has-focus ? Theme.accent : Theme.dim;
+        image-fit: contain;
+        accessible-role: none;
+    }
+    Text {
+        x: 36px * Theme.ui-scale;
+        y: 0px;
+        width: max(0px, parent.width - 46px * Theme.ui-scale);
+        height: parent.height;
+        text: root.collapsed ? (root.chinese ? "展开 AI" : "Show AI") : (root.chinese ? "收起" : "Hide");
+        color: Theme.ink; font-size: Theme.font(12);
+        horizontal-alignment: left;
+        vertical-alignment: center; overflow: elide;
+        accessible-role: none;
+    }
+    toggle-focus := FocusScope {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        enabled: root.enabled; focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    hit := TouchArea {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        enabled: root.enabled; mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    Tooltip {
+        Rectangle {
+            width: (root.chinese ? 132px : 164px) * Theme.ui-scale;
+            height: 32px * Theme.ui-scale;
+            background: Theme.tooltip;
+            border-radius: 5px * Theme.ui-scale;
+            border-width: 1px; border-color: Theme.strong-border;
+            Text {
+                x: 10px * Theme.ui-scale; y: 0px;
+                width: parent.width - 20px * Theme.ui-scale; height: parent.height;
+                text: root.action-label; color: Theme.ink; font-size: Theme.font(11);
+                vertical-alignment: center;
+            }
+        }
+    }
+}

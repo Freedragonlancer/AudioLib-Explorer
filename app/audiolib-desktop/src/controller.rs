@@ -65,6 +65,8 @@ struct ScanTerminal {
     admitted: bool,
     result: audiolib_core::Result<audiolib_core::ScanProgress>,
 }
+#[path = "ai_search.rs"]
+mod ai_search;
 #[cfg(test)]
 #[path = "client_review_tests.rs"]
 mod client_review_tests;
@@ -80,6 +82,8 @@ mod result_window;
 mod search_tasks;
 #[path = "search_v2_ux.rs"]
 mod search_v2_ux;
+#[path = "status_feedback.rs"]
+mod status_feedback;
 #[path = "waveform_selection.rs"]
 mod waveform_selection;
 
@@ -379,6 +383,65 @@ struct SearchJob {
     path_probe: Option<Arc<dyn DataProvider>>,
     window: Option<result_window::WindowPlan>,
     backward_before: Option<usize>,
+}
+
+/// Multiple provider pages must belong to one revision before their rows can be joined.
+struct SearchRevisionGuard {
+    initial: Option<u64>,
+    queries: std::cell::Cell<usize>,
+    invalidated: std::cell::Cell<bool>,
+}
+
+impl SearchRevisionGuard {
+    fn new(initial: Option<u64>) -> Self {
+        Self {
+            initial,
+            queries: std::cell::Cell::new(0),
+            invalidated: std::cell::Cell::new(false),
+        }
+    }
+
+    fn search(
+        &self,
+        revision: impl FnOnce() -> Option<u64>,
+        query: impl FnOnce() -> audiolib_core::Result<audiolib_core::SearchPage>,
+    ) -> audiolib_core::Result<audiolib_core::SearchPage> {
+        if self.queries.get() > 0 && self.initial.is_some() {
+            let current = revision();
+            if current != self.initial {
+                // An unavailable observer cannot prove a changed revision. Keep
+                // rejecting the unsafe join, but do not retry a persistent error.
+                if current.is_some() {
+                    self.invalidated.set(true);
+                }
+                return Err(audiolib_core::Error::Cancelled);
+            }
+        }
+        self.queries.set(self.queries.get() + 1);
+        query()
+    }
+
+    fn requires_refresh(&self, after: Option<u64>) -> bool {
+        if self.queries.get() > 1
+            && self.initial.is_some()
+            && after.is_some()
+            && after != self.initial
+        {
+            self.invalidated.set(true);
+        }
+        self.invalidated.get()
+    }
+
+    fn finish<T>(
+        &self,
+        after: Option<u64>,
+        result: audiolib_core::Result<T>,
+    ) -> audiolib_core::Result<T> {
+        if result.is_ok() && self.queries.get() > 1 && self.initial.is_some() && after.is_none() {
+            return Err(audiolib_core::Error::Cancelled);
+        }
+        result
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -717,6 +780,7 @@ impl MetadataState {
 const REMOTE_CLOSE_GRACE: Duration = Duration::from_secs(15);
 
 pub struct Controller {
+    ai: ai_search::Runtime,
     ui: slint::Weak<AppWindow>,
     sqlite: RwLock<Arc<SqliteProvider>>,
     library_generation: AtomicU64,
@@ -765,7 +829,7 @@ pub struct Controller {
     close_completion: Mutex<Option<Result<(), String>>>,
     /// After a rejected close, keep the recovery/status line until the user saves again.
     /// A late Metadata / LibraryChanged publication must not hide the close-owned message.
-    close_retains_status: AtomicBool,
+    close_retains_status: Arc<AtomicBool>,
     tree: Mutex<TreeState>,
     tree_generation: AtomicU64,
     selection_generation: AtomicU64,
@@ -839,6 +903,9 @@ pub struct Controller {
     remote_plays_wake: Condvar,
     remote_cancel: Mutex<audiolib_remote::SyncControl>,
     remote_audio_cancel: Mutex<Arc<AtomicBool>>,
+    /// Each remote wait owns a UI status epoch; stale callbacks cannot affect a
+    /// newer selection, source, or representation of the same selected record.
+    remote_audition_status_epoch: Arc<AtomicU64>,
     /// The selected record whose Load has not been confirmed. Local or server
     /// cancellation may leave the previous record in the engine, so Play reloads
     /// the selection until a current Load succeeds.
@@ -1017,6 +1084,7 @@ impl Controller {
         ui.set_source_pair(playback.source_pair.to_string().into());
         ui.set_asio_enabled(cfg!(all(windows, feature = "asio")));
         let controller = Arc::new(Self {
+            ai: ai_search::Runtime::default(),
             ui: ui.as_weak(),
             sqlite: RwLock::new(sqlite),
             library_generation: AtomicU64::new(0),
@@ -1069,7 +1137,7 @@ impl Controller {
             metadata_recovery_notice: Mutex::new(None),
             closing: AtomicBool::new(false),
             close_completion: Mutex::new(None),
-            close_retains_status: AtomicBool::new(false),
+            close_retains_status: Arc::new(AtomicBool::new(false)),
             tree: Mutex::new(TreeState::default()),
             tree_generation: AtomicU64::new(0),
             selection_generation: AtomicU64::new(0),
@@ -1132,6 +1200,7 @@ impl Controller {
             remote_plays_wake: Condvar::new(),
             remote_cancel: Mutex::new(audiolib_remote::SyncControl::new()),
             remote_audio_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
+            remote_audition_status_epoch: Arc::new(AtomicU64::new(0)),
             audio_reload: Mutex::new(None),
             remote_stream: Mutex::new(None),
             remote_retained_stream: Mutex::new(None),
@@ -1166,6 +1235,7 @@ impl Controller {
 
     fn bind(self: &Arc<Self>, ui: &AppWindow) {
         self.bind_search_tasks(ui);
+        self.bind_ai_search(ui);
         self.bind_artwork(ui);
         self.bind_search_v2_ux(ui);
         self.bind_wave_selection(ui);
@@ -2288,6 +2358,7 @@ impl Controller {
     }
 
     fn invalidate_library_reads(&self) {
+        self.clear_remote_audition_status();
         self.cancel_all_slices();
         self.cancel_artwork();
         self.artwork_album_hints.lock().unwrap().clear();
@@ -3473,19 +3544,15 @@ impl Controller {
                         continue;
                     }
                     let chinese = c.chinese.load(Ordering::Acquire);
-                    let query_count = std::cell::Cell::new(0);
+                    let revision_guard = SearchRevisionGuard::new(revision_before);
                     let result = survive_panic(
                         || {
                             c.probe_migrating_path(&job)?;
                             let search = |request: &SearchRequest| {
-                                if query_count.get() > 0
-                                    && revision_before.is_some()
-                                    && provider.search_revision().ok().flatten() != revision_before
-                                {
-                                    return Err(audiolib_core::Error::Cancelled);
-                                }
-                                query_count.set(query_count.get() + 1);
-                                provider.search_cancellable(request, cancel.clone())
+                                revision_guard.search(
+                                    || provider.search_revision().ok().flatten(),
+                                    || provider.search_cancellable(request, cancel.clone()),
+                                )
                             };
                             let backward_before = job
                                 .window
@@ -3521,19 +3588,13 @@ impl Controller {
                         !plan
                             .coverage
                             .matches_revision(revision_before, revision_after)
-                    }) {
+                    }) || revision_guard.requires_refresh(revision_after)
+                    {
                         crate::gui_search_benchmark::worker_completed(job.generation, false);
                         c.queue_window_refresh(job.generation);
                         continue;
                     }
-                    let result = if query_count.get() > 1
-                        && revision_before.is_some()
-                        && revision_after != revision_before
-                    {
-                        Err(audiolib_core::Error::Cancelled)
-                    } else {
-                        result
-                    };
+                    let result = revision_guard.finish(revision_after, result);
                     let workspace_revision =
                         revision_before.filter(|revision| Some(*revision) == revision_after);
                     crate::gui_search_benchmark::worker_completed(job.generation, false);
@@ -3999,7 +4060,13 @@ impl Controller {
                             && !job.cancel.load(Ordering::Acquire)
                             && c.waveform_generation.load(Ordering::Acquire) == job.generation
                         {
-                            c.status(error);
+                            let cancel = job.cancel.clone();
+                            let generation = job.generation;
+                            c.status_when(error, move |controller| {
+                                !cancel.load(Ordering::Acquire)
+                                    && controller.waveform_generation.load(Ordering::Acquire)
+                                        == generation
+                            });
                         }
                         continue;
                     }
@@ -4053,7 +4120,13 @@ impl Controller {
                         result.and_then(|data| job.source.check_local_version().map(|_| data));
                     match result {
                         Ok(data) => c.publish_waveform(&job, &data, 1.0),
-                        Err(error) => c.status(error),
+                        Err(error) => {
+                            c.status_when(error, move |controller| {
+                                !job.cancel.load(Ordering::Acquire)
+                                    && controller.waveform_generation.load(Ordering::Acquire)
+                                        == job.generation
+                            });
+                        }
                     }
                 }
             })
@@ -4066,12 +4139,11 @@ impl Controller {
             .spawn(move || {
                 let mut playback_history = PlaybackHistoryTracker::default();
                 let mut external_wave_generation = None;
-                let mut last_audition = None;
-                let mut last_playback_error = None;
-                let mut playback_progress = PlaybackProgress::default();
+                let playback_ui = Arc::new(Mutex::new(PlaybackUiState::default()));
                 // Network audition waiting for data: since when, and whether the hint shows.
                 let mut buffering_since: Option<Instant> = None;
                 let mut buffering_shown = false;
+                let mut buffering_source = None;
                 let mut last_wave_progress = Instant::now() - Duration::from_secs(1);
                 while !c.shutdown.load(Ordering::Acquire) {
                     if c.library_busy.load(Ordering::Acquire) {
@@ -4145,18 +4217,20 @@ impl Controller {
                     }
                     // The engine pauses itself while a network stream runs dry; the hint
                     // shows only if that lasts (the short prebuffer at each start is silent).
+                    let source = (source_generation, library_generation, status.generation);
+                    if buffering_source != Some(source) {
+                        buffering_source = Some(source);
+                        buffering_since = None;
+                        buffering_shown = false;
+                    }
                     if status.buffering && status.state == PlaybackState::Playing {
                         let since = *buffering_since.get_or_insert_with(Instant::now);
                         if !buffering_shown && since.elapsed() >= BUFFERING_HINT_AFTER {
                             buffering_shown = true;
-                            c.buffering_hint(true);
                         }
                     } else {
                         buffering_since = None;
-                        if buffering_shown {
-                            buffering_shown = false;
-                            c.buffering_hint(false);
-                        }
+                        buffering_shown = false;
                     }
                     // A zoomed Waveform pages along with playback unless the user panned away.
                     if status.state == PlaybackState::Playing
@@ -4174,11 +4248,8 @@ impl Controller {
                             c.queue_waveform(&file);
                         }
                     }
-                    let audition_changed = last_audition != Some(status.audition);
-                    let error_changed = last_playback_error != status.error;
-                    last_playback_error = status.error.clone();
-                    let progress_continues = playback_progress.observe(&status);
-                    last_audition = Some(status.audition);
+                    let playback_error =
+                        (source_generation, status.generation, status.error.clone());
                     c.playback.lock().unwrap().audition = status.audition;
                     // Server mode plays a cache copy: show the record's own file name.
                     let playback_name = status
@@ -4193,9 +4264,23 @@ impl Controller {
                         .map(|path| c.playback_source_path(path));
                     let buffering = buffering_shown;
                     let c2 = c.clone();
+                    let playback_ui = playback_ui.clone();
                     post(c.ui.clone(), move |ui| {
                         if c2.library_generation.load(Ordering::Acquire) != library_generation
+                            || c2.source_generation.load(Ordering::Acquire) != source_generation
                             || c2.library_busy.load(Ordering::Acquire)
+                        {
+                            return;
+                        }
+                        // A queued failure can outlive its cancelled stream or the
+                        // recovery command. Never publish an older engine source or
+                        // error after a successful Load/Play has already replaced it.
+                        let current = c2.audio.status();
+                        if current.generation != status.generation
+                            || current.transport_revision != status.transport_revision
+                            || current.file_path != status.file_path
+                            || current.error != status.error
+                            || current.audition != status.audition
                         {
                             return;
                         }
@@ -4209,8 +4294,14 @@ impl Controller {
                                 ui.set_local_waveform_progress(text.into());
                             }
                         }
+                        let mut publication = playback_ui.lock().unwrap();
+                        let progress_continues = publication.progress.observe(&status);
                         publish_playback_progress(&ui, &status, progress_continues);
                         publish_player_state(&ui, &status, buffering);
+                        let protected_status = ui.get_closing()
+                            || c2.closing.load(Ordering::Acquire)
+                            || c2.close_retains_status.load(Ordering::Acquire);
+                        publish_audio_buffering_status(&ui, &current, buffering, protected_status);
                         let ready = !matches!(
                             status.state,
                             PlaybackState::Empty | PlaybackState::Loading | PlaybackState::Error
@@ -4226,12 +4317,29 @@ impl Controller {
                             ui.set_playback_path(playback_path.into());
                         }
                         c2.publish_confirmed_volume(&ui, status.volume);
-                        if audition_changed {
+                        if publication.audition != Some(status.audition) {
                             publish_audition(&ui, status.audition);
+                            publication.audition = Some(status.audition);
                         }
                         ui.set_output_summary(output_summary(&status).into());
-                        if error_changed && let Some(error) = status.error {
-                            ui.set_status(error.into());
+                        if !protected_status && publication.error.as_ref() != Some(&playback_error)
+                        {
+                            if let Some(error) = &status.error {
+                                ui.set_status(error.as_str().into());
+                            } else if let Some(previous) = publication
+                                .error
+                                .as_ref()
+                                .and_then(|(_, _, error)| error.as_deref())
+                                && ui.get_status().as_str() == previous
+                            {
+                                // Recovery owns only its previous error text. Search,
+                                // Metadata and other later feedback retain their turn.
+                                ui.set_status("".into());
+                            }
+                            // Only an accepted UI snapshot consumes this transition.
+                            // A superseded recovery must leave the old error owned
+                            // until another current snapshot can clear it.
+                            publication.error = Some(playback_error);
                         }
                     });
                     std::thread::sleep(Duration::from_millis(65));
@@ -4284,9 +4392,15 @@ impl Controller {
     /// Revision changes invalidate raw ordinals. Refresh the displayed request
     /// through the ordinary query/facet path rather than joining a stale window.
     fn queue_window_refresh(self: &Arc<Self>, generation: u64) {
+        let source_generation = self.source_generation.load(Ordering::Acquire);
+        let library_generation = self.library_generation.load(Ordering::Acquire);
         let c = self.clone();
         post(self.ui.clone(), move |ui| {
-            if c.search_generation.load(Ordering::Acquire) == generation && c.available() {
+            if c.search_generation.load(Ordering::Acquire) == generation
+                && c.source_generation.load(Ordering::Acquire) == source_generation
+                && c.library_generation.load(Ordering::Acquire) == library_generation
+                && c.available()
+            {
                 c.refresh_result_window(&ui);
             }
         });
@@ -4304,7 +4418,15 @@ impl Controller {
             .unwrap()
             .get((scroll / height).floor() as usize)
             .map(|file| (file.id, (scroll % height) / height));
-        self.request_search(ui, true, false);
+        // An internal revision refresh retains close-recovery feedback just as
+        // the original resumed query does, including its immediate status text.
+        let retained_status = self
+            .search_publication
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|state| state.retained_status.clone());
+        self.resume_search(ui, retained_status);
         if let Some(state) = self.search_publication.lock().unwrap().as_mut() {
             state.viewport_anchor = anchor;
         }
@@ -5133,8 +5255,8 @@ impl Controller {
                         }
                     };
                     if let Some(retained_status) = ready_status {
-                        c2.search_task_directory_ready(&ui);
                         ui.set_searching(false);
+                        c2.search_task_directory_ready(&ui);
                         ui.set_status(
                             retained_status
                                 .unwrap_or_else(|| {
@@ -5199,6 +5321,7 @@ impl Controller {
         // Explicit selection may reveal its row; range publication only reindexes it.
         ui.set_preserve_result_scroll(false);
         let generation = self.selection_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.clear_remote_audition_status();
         self.invalidate_waveform();
         self.remote_audio_cancel
             .lock()
@@ -5227,6 +5350,7 @@ impl Controller {
             && Arc::ptr_eq(&job.provider, &self.provider())
         {
             job.generation = self.selection_generation.fetch_add(1, Ordering::AcqRel) + 1;
+            self.clear_remote_audition_status();
             self.invalidate_waveform();
             *remembered = Some(job.clone());
             *self.selection_job.lock().unwrap() = Some(job);
@@ -5435,7 +5559,17 @@ impl Controller {
             Err(error) => {
                 if !download_cancel.load(Ordering::Acquire) {
                     loading.selection_request_completed(generation);
-                    loading.status(error);
+                    let controller = loading.clone();
+                    post(loading.ui.clone(), move |ui| {
+                        if controller.available()
+                            && !ui.get_closing()
+                            && !controller.close_retains_status.load(Ordering::Acquire)
+                            && !download_cancel.load(Ordering::Acquire)
+                            && controller.selection_generation.load(Ordering::Acquire) == generation
+                        {
+                            ui.set_status(error.into());
+                        }
+                    });
                 }
                 return;
             }
@@ -5453,13 +5587,22 @@ impl Controller {
             loading.list_waveforms.note_audition_start();
             loading.audio.enqueue_with_ack(AudioCommand::Load(path))
         };
-        match completion.and_then(|completion| completion.wait(Duration::from_secs(4))) {
+        match completion.and_then(|completion| {
+            loading.wait_audio_confirmation(
+                &completion,
+                &download_cancel,
+                generation,
+                status_feedback::AudioActivity::Loading,
+                |_| true,
+            )
+        }) {
             Ok(_) => {
                 // Hold the remembered-request lock through dispatch: recovery cannot
                 // observe a consumed Play before it has actually entered the queue.
                 let mut remembered = loading.latest_selection.lock().unwrap();
                 if loading.selection_generation.load(Ordering::Acquire) != generation
                     || loading.closing.load(Ordering::Acquire)
+                    || download_cancel.load(Ordering::Acquire)
                 {
                     return;
                 }
@@ -5477,16 +5620,38 @@ impl Controller {
                 drop(remembered);
                 let confirmed = loading.clone();
                 post(loading.ui.clone(), move |ui| {
-                    if confirmed.selection_generation.load(Ordering::Acquire) == generation {
+                    if confirmed.available()
+                        && !ui.get_closing()
+                        && !download_cancel.load(Ordering::Acquire)
+                        && confirmed.selection_generation.load(Ordering::Acquire) == generation
+                    {
                         ui.set_audio_ready(true);
                     }
                 });
             }
             Err(error) => {
                 // A load interrupted by Stop is not a failure worth reporting.
-                if !download_cancel.load(Ordering::Acquire) {
+                if !download_cancel.load(Ordering::Acquire)
+                    && !matches!(error, audiolib_core::Error::Cancelled)
+                    && !error.is_read_interrupted()
+                {
                     loading.selection_request_completed(generation);
-                    loading.status(error.to_string());
+                    let failed = loading.audio.status();
+                    let controller = loading.clone();
+                    post(loading.ui.clone(), move |ui| {
+                        let current = controller.audio.status();
+                        if controller.available()
+                            && !ui.get_closing()
+                            && !controller.close_retains_status.load(Ordering::Acquire)
+                            && !download_cancel.load(Ordering::Acquire)
+                            && controller.selection_generation.load(Ordering::Acquire) == generation
+                            && current.generation == failed.generation
+                            && current.transport_revision == failed.transport_revision
+                            && current.error == failed.error
+                        {
+                            ui.set_status(error.to_string().into());
+                        }
+                    });
                 }
             }
         }
@@ -5941,6 +6106,7 @@ impl Controller {
         self.cancel_pending_task_restore_for_close(ui);
         self.cancel_remote();
         tracing::info!(barrier, "Desktop close requested; draining Metadata");
+        self.ai.cancel();
         self.invalidate_library_reads();
         ui.set_searching(false);
         ui.set_close_recovery_available(false);
@@ -5965,8 +6131,12 @@ impl Controller {
             // Cover edits accepted before closing own their original destination.
             // Drain them off the event loop and retain any persistence failure.
             let artwork_result = c.wait_artwork_actions();
+            let ai_result = c.ai.wait_saves();
             c.wait_slice_workers();
-            let metadata_result = metadata_result.and(artwork_result);
+            let metadata_result =
+                metadata_result
+                    .and(artwork_result)
+                    .and(if recover { Ok(()) } else { ai_result });
             // The finish interrupt was only there so Metadata could take the writer.
             // If the window stays open, clear it before a later rollup observes it.
             // Shutdown still aborts that statement instead of starting it over.
@@ -6946,10 +7116,8 @@ impl Controller {
         });
         let Some(file) = file else {
             self.audio
-                .send_and_wait(
-                    AudioCommand::Configure(playback.clone()),
-                    Duration::from_secs(4),
-                )
+                .enqueue_with_ack(AudioCommand::Configure(playback.clone()))
+                .and_then(|completion| completion.wait_until_completed())
                 .map_err(|error| error.to_string())?;
             *self.playback.lock().unwrap() = playback;
             return Ok(());
@@ -7125,8 +7293,9 @@ impl Controller {
     fn status(&self, message: String) {
         let retain = self.closing.load(Ordering::Acquire)
             || self.close_retains_status.load(Ordering::Acquire);
+        let retained_status = self.close_retains_status.clone();
         post(self.ui.clone(), move |ui| {
-            if retain || ui.get_closing() {
+            if retain || ui.get_closing() || retained_status.load(Ordering::Acquire) {
                 return;
             }
             ui.set_status(message.into());
@@ -7497,6 +7666,10 @@ impl Controller {
 
     /// Stop background workers before the desktop event loop is dropped.
     pub fn shutdown(&self) {
+        self.ai.cancel();
+        if let Err(error) = self.ai.wait_saves() {
+            tracing::warn!(%error, "Save AI settings during shutdown");
+        }
         self.cancel_all_slices();
         self.wait_slice_workers();
         self.cancel_vendor_for_transition();
@@ -8432,6 +8605,40 @@ pub(crate) fn zoom_waveform_at_pointer(
     let fraction = f64::from(fraction).clamp(0.0, 1.0);
     let anchor = start + (end - start) * fraction;
     view.zoom_at_anchor(f64::from(factor), anchor, fraction, duration);
+}
+
+/// UI publication state advances only after a current playback snapshot is accepted.
+#[derive(Default)]
+struct PlaybackUiState {
+    audition: Option<AuditionSettings>,
+    error: Option<(u64, u64, Option<String>)>,
+    progress: PlaybackProgress,
+}
+
+/// Publish only the current audition's delayed wait hint, preserving general feedback.
+fn publish_audio_buffering_status(
+    ui: &AppWindow,
+    status: &audiolib_audio::PlaybackStatus,
+    delayed: bool,
+    protected: bool,
+) {
+    let text = if delayed
+        && status.buffering
+        && status.state == PlaybackState::Playing
+        && status.error.is_none()
+        && !protected
+    {
+        if ui.get_chinese() {
+            "正在缓冲音频…（网络较慢，数据到达后自动继续）"
+        } else {
+            "Buffering audio… (slow network; playback resumes by itself)"
+        }
+    } else {
+        ""
+    };
+    if ui.get_audio_buffering_status().as_str() != text {
+        ui.set_audio_buffering_status(text.into());
+    }
 }
 
 /// A transport discontinuity invalidates prediction even between two Playing snapshots.

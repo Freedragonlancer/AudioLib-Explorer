@@ -1,5 +1,6 @@
 // app/audiolib-desktop/src/search_task_scope_paging_tests.rs
 //! Actual controller restoration and provider-backed continuation regressions.
+use super::super::resolve_task;
 use super::*;
 use audiolib_core::{SearchScope, search_workspace::SearchTaskDefinition};
 
@@ -43,6 +44,137 @@ fn select_task(fixture: &Fixture, id: &str, count: usize) {
 #[test]
 fn scopes_survive_task_switches_favorites_and_workspace_storage() {
     isolated("scope_paging::child_scopes_survive_task_switches");
+}
+
+#[test]
+fn all_mode_main_fallback_batches_cache_the_executed_scope() {
+    isolated("scope_paging::child_all_main_fallback_batch_cache");
+}
+
+#[test]
+#[ignore = "isolated real controller fallback cache and index-publication regression"]
+fn child_all_main_fallback_batch_cache() {
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    let controller = &fixture.controller;
+    let terms = audiolib_ai::reference::ReferenceIndex::embedded()
+        .local_plan("科幻爆炸", true)
+        .unwrap()
+        .queries
+        .into_iter()
+        .map(|query| query.text)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let file = fixture
+        .provider
+        .search(&SearchRequest::default())
+        .unwrap()
+        .results
+        .into_iter()
+        .find(|file| file.filename == "gore one.wav")
+        .unwrap();
+    fixture
+        .provider
+        .update_metadata(
+            file.id,
+            &MetadataPatch {
+                notes: Some(terms),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    // Retain an owned pending directory update throughout the whole batch.
+    // As during a scan, defer the optional preparation prompt without starting
+    // another writer or changing the admitted Main fallback.
+    *controller.scan_cancel.lock().unwrap() = Some(ScanCancellation::default());
+    let conn = rusqlite::Connection::open(fixture.provider.database_path()).unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO audiolib_dir_dirty(dir_id,segment,files) VALUES(?1,0,1)",
+        [file.folder_id.unwrap()],
+    )
+    .unwrap();
+    drop(conn);
+    assert!(!fixture.provider.path_search_ready().unwrap());
+    ui.set_search_scope_index(0);
+    search(&fixture, "", 4);
+    assert_eq!(controller.request.lock().unwrap().scope, SearchScope::Main);
+    let original = active_id(ui);
+    ui.set_ai_auto_search(false);
+    ui.invoke_ai_action(0, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    ui.set_ai_prompt("科幻爆炸".into());
+    ui.invoke_ai_action(2, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert_eq!(ui.get_ai_quick_rows().row_count(), 5);
+    ui.invoke_ai_action(20, 0);
+    wait_for(ui, |ui| {
+        ui.get_search_tasks().row_count() == 6
+            && !ui.get_ai_batch_searching()
+            && !ui.get_task_restoring()
+            && !ui.get_searching()
+    });
+    assert!(!fixture.provider.path_search_ready().unwrap());
+    controller.capture_search_task(ui);
+    let (task, cache) = {
+        let state = controller.task_workspace.lock().unwrap();
+        for task in &state.workspace.session.tasks[1..] {
+            let cache = state
+                .caches
+                .get(&task.id)
+                .expect("every fallback query must finish before the batch ends");
+            assert_eq!(task.definition.scope, SearchScope::All);
+            assert_eq!(cache.executed_scope, SearchScope::Main);
+            assert!(!cache.records.is_empty());
+        }
+        let task = state.workspace.session.tasks[1].clone();
+        let cache = state.caches[&task.id].clone();
+        assert_eq!(
+            state.workspace.session.active_task_id.as_ref(),
+            Some(&task.id)
+        );
+        (task, cache)
+    };
+    assert_eq!(controller.request.lock().unwrap().scope, SearchScope::Main);
+    assert!(
+        resolve_task(&fixture.provider, task.clone(), Some(cache.clone()))
+            .unwrap()
+            .1
+            .is_some(),
+        "a still-unindexed library may restore its validated Main cache"
+    );
+    fixture.provider.rebuild_directory_search().unwrap();
+    assert!(fixture.provider.path_search_ready().unwrap());
+    // Model a previously admitted Main request finishing after publication:
+    // a current database revision alone does not prove execution as full All.
+    let revision = fixture.provider.search_revision().unwrap().unwrap();
+    let mut current_revision_cache = cache;
+    current_revision_cache.revision = revision;
+    current_revision_cache
+        .window_coverage
+        .as_mut()
+        .unwrap()
+        .revision = Some(revision);
+    assert!(
+        resolve_task(
+            &fixture.provider,
+            task.clone(),
+            Some(current_revision_cache)
+        )
+        .unwrap()
+        .1
+        .is_none(),
+        "Main rows must not be reinterpreted as All when the index is ready"
+    );
+    select_task(&fixture, &original, 4);
+    select_task(&fixture, &task.id, 1);
+    controller.capture_search_task(ui);
+    assert_eq!(controller.request.lock().unwrap().scope, SearchScope::All);
+    assert_eq!(
+        controller.task_workspace.lock().unwrap().caches[&task.id].executed_scope,
+        SearchScope::All
+    );
+    controller.scan_cancel.lock().unwrap().take();
+    finish(&fixture);
 }
 
 #[test]

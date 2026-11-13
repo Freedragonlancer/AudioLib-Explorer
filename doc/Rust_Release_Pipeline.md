@@ -76,6 +76,8 @@ pwsh tools/check-release-licenses.ps1 -Profile Server -Target aarch64-apple-darw
 
 源码检查按实际改动选择，不因为管线名称包含 release 就全量重跑。将选好的阶段写入私有 `checks.json`，通过 `-ChecksFile` 前置执行；`tools/release-plans/checks.example.json` 仅示范受影响 Windows 客户端的单次 ASIO 检查。不要直接把示例当每次发布的必选清单。专项数据安全回归可作为额外阶段调用原脚本，参数与原入口一致。未传 `-ChecksFile` 时摘要明确记录 `source_checks=not-requested`，不宣称功能测试通过；已在别处完成的验证保留原身份，按 Testing Strategy 判断有效性。
 
+稳定且未受影响模块按 [回归精简规则](Testing_Strategy.md#稳定模块的回归精简) 省略检查阶段，已有阶段可继续使用 `reuse: inputs`。单个搜索集成测试的阶段参数可用 `{"Package":["audiolib-db"],"Test":"search_fragments"}`；桌面模块可用 `{"Package":["audiolib-desktop"],"Bin":"AudioLibExplorer","TestFilter":"controller::search_tasks::tests::","Asio":"${Asio}"}`。选中测试缩小执行范围，`input_paths` 仍须覆盖其实现、消费者契约、依赖和测试输入，不能只留测试文件来强行复用。`check-local.ps1` 不再隐式检查 workspace，旧私有阶段若未选包需补 `Package` 或明确的 `Workspace: true`。这不改变新 payload 的构建、包验收和固定安装要求。
+
 ```powershell
 pwsh tools/release-pipeline.ps1 -Action Run -Tag v0.9.0 -ChecksFile .rust-validation/checks.json
 pwsh tools/release-pipeline.ps1 -Action Run -Tag v0.9.0 -PlanFile tools/release-plans/server.json

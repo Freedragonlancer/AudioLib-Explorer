@@ -44,6 +44,12 @@ fn reconcile_paging_view(view: &mut SearchTaskView, preferences: &AudioTablePref
     }
 }
 
+// All retains its saved preference while an unavailable directory index admits
+// Main. Other scope changes are not interchangeable cache identities.
+fn task_scope_matches_execution(requested: SearchScope, executed: SearchScope) -> bool {
+    requested == executed || (requested == SearchScope::All && executed == SearchScope::Main)
+}
+
 #[cfg(test)]
 #[path = "search_task_tests.rs"]
 mod tests;
@@ -63,6 +69,9 @@ use album_bindings::{album_filter_unavailable, reconcile_workspace_albums, resol
 struct TaskCache {
     provider: Weak<SqliteProvider>,
     revision: u64,
+    /// The admitted scope which produced these rows, including All -> Main fallback.
+    /// This is runtime cache identity, never a persisted task preference.
+    executed_scope: SearchScope,
     tree: TreeState,
     records: Vec<AudioFile>,
     /// Raw positions and continuations belonging to exactly these visible records.
@@ -1008,13 +1017,17 @@ impl Controller {
                 && state.folders_revision == Some(*revision)
                 && !ui.get_searching()
                 && displayed_range
-                && search_scope_from_index(ui.get_search_scope_index()) == request.scope
+                && task_scope_matches_execution(
+                    search_scope_from_index(ui.get_search_scope_index()),
+                    request.scope,
+                )
         }) {
             state.caches.insert(
                 id,
                 TaskCache {
                     provider: Arc::downgrade(&self.provider()),
                     revision,
+                    executed_scope: request.scope,
                     tree,
                     records,
                     window_coverage,
@@ -1032,6 +1045,7 @@ impl Controller {
 
     pub(super) fn persist_search_task(&self, ui: &AppWindow) {
         self.capture_search_task(ui);
+        self.invalidate_ai_suggestions_for_conditions(ui);
         self.publish_search_tasks(ui);
         self.queue_workspace_save();
     }
@@ -1075,13 +1089,7 @@ impl Controller {
                 crate::SearchTaskRow {
                     id: task.id.as_str().into(),
                     name: display.name.into(),
-                    keywords: ModelRc::new(VecModel::from(
-                        display
-                            .keywords
-                            .into_iter()
-                            .map(slint::SharedString::from)
-                            .collect::<Vec<_>>(),
-                    )),
+                    keywords: display.keywords.join(" · ").into(),
                     folder: display.folder.into(),
                     summary: display.summary.into(),
                     searched: display.searched,
@@ -1177,13 +1185,29 @@ impl Controller {
     }
 
     pub(super) fn switch_search_task(self: &Arc<Self>, id: &str) {
+        let was_ai_batch = if let Some(ui) = self.ui.upgrade() {
+            let was_ai_batch = ui.get_ai_batch_searching();
+            self.cancel_ai_task_batch(&ui);
+            was_ai_batch
+        } else {
+            false
+        };
+        self.switch_search_task_impl(id, was_ai_batch);
+    }
+
+    /// Automatic batches share normal restore/capture without cancelling their own queue.
+    pub(super) fn switch_ai_batch_task(self: &Arc<Self>, id: &str) {
+        self.switch_search_task_impl(id, false);
+    }
+
+    fn switch_search_task_impl(self: &Arc<Self>, id: &str, cancel_ai_restore: bool) {
         if !self.available() {
             return;
         }
         let Some(ui) = self.ui.upgrade() else { return };
         {
             let state = self.task_workspace.lock().unwrap();
-            if state.loading
+            if (state.loading && !(cancel_ai_restore && state.restoring))
                 || state.workspace.session.active_task_id.as_deref() == Some(id)
                 || !state
                     .workspace
@@ -1207,6 +1231,176 @@ impl Controller {
             .session
             .active_task_id = Some(id.to_owned());
         self.restore_search_task(id);
+    }
+
+    /// Create an AI query task with the displayed task's library scope and filters.
+    pub(super) fn open_ai_query(self: &Arc<Self>, ui: &AppWindow, query: &str) {
+        let _ = self.open_ai_queries(ui, &[query.to_owned()]);
+    }
+
+    /// Create at most five tasks from one captured scope, then activate the first.
+    /// Return the new IDs so AI batching can prime their ordinary result caches.
+    pub(super) fn open_ai_queries(
+        self: &Arc<Self>,
+        ui: &AppWindow,
+        queries: &[String],
+    ) -> Vec<String> {
+        if queries.is_empty()
+            || queries.len() > 5
+            || queries
+                .iter()
+                .any(|q| audiolib_core::ai_search::validate_ai_query(q).is_err())
+        {
+            return Vec::new();
+        }
+        if !self.available() || !self.workspace_mutations_allowed(ui) {
+            return Vec::new();
+        }
+        if self.task_workspace.lock().unwrap().loading {
+            return Vec::new();
+        }
+        if let Err(error) = self.enqueue_current_metadata(ui) {
+            ui.set_status(error.into());
+            return Vec::new();
+        }
+        self.capture_search_task(ui);
+        let mut state = self.task_workspace.lock().unwrap();
+        if state.workspace.session.tasks.len() + queries.len()
+            > self.max_search_tasks.load(Ordering::Acquire) as usize
+        {
+            let message = self.localized(
+                "剩余任务名额不足，请先关闭部分任务；未创建新任务",
+                "Not enough task slots; close some tasks first. No new tasks were created",
+            );
+            ui.set_status(message.clone());
+            ui.set_ai_status(message);
+            return Vec::new();
+        }
+        let Some(current) = state
+            .workspace
+            .session
+            .tasks
+            .iter()
+            .find(|t| Some(&t.id) == state.workspace.session.active_task_id.as_ref())
+        else {
+            return Vec::new();
+        };
+        let current_definition = current.definition.clone();
+        let id = unique_id();
+        let mut ids = Vec::with_capacity(queries.len());
+        for (index, query) in queries.iter().enumerate() {
+            let task_id = if index == 0 { id.clone() } else { unique_id() };
+            ids.push(task_id.clone());
+            let mut definition = current_definition.clone();
+            definition.query = query.clone();
+            state.workspace.session.tasks.push(SearchTask {
+                id: task_id,
+                title: query.chars().take(60).collect(),
+                title_is_custom: true,
+                definition,
+                view: SearchTaskView::default(),
+                saved_search_id: None,
+            });
+        }
+        state.workspace.session.active_task_id = Some(id.clone());
+        drop(state);
+        self.restore_search_task(&id);
+        ids
+    }
+
+    /// Query-only batch readiness; no provider I/O is performed on the event loop.
+    /// None means navigation, identity validation or workspace protection stopped it.
+    pub(super) fn ai_task_batch_ready(&self, id: &str) -> Option<bool> {
+        let state = self.task_workspace.lock().unwrap();
+        if state.protected
+            || state.restore_failed
+            || state.workspace.session.active_task_id.as_deref() != Some(id)
+            || !state
+                .workspace
+                .session
+                .tasks
+                .iter()
+                .any(|task| task.id == id)
+            || (!state.loading
+                && !state.restoring
+                && (state.unavailable_folder.is_some() || state.unavailable_album.is_some()))
+        {
+            return None;
+        }
+        Some(
+            !state.loading
+                && !state.restoring
+                && state.page_complete
+                && state.page_revision.is_some()
+                && state.page_revision == state.folders_revision
+                && state
+                    .caches
+                    .get(id)
+                    .is_some_and(|cache| Some(cache.revision) == state.page_revision),
+        )
+    }
+
+    /// Inspect a published task cache without issuing another provider query.
+    pub(super) fn ai_task_batch_has_results(&self, id: &str) -> Option<bool> {
+        self.task_workspace
+            .lock()
+            .unwrap()
+            .caches
+            .get(id)
+            .map(|cache| !cache.records.is_empty())
+    }
+
+    /// Capture valid editor conditions, then reuse their admitted provider request.
+    /// Unavailable identities and unsubmitted invalid drafts cannot seed AI probes.
+    pub(super) fn ai_search_probe_request(&self, ui: &AppWindow) -> Option<SearchRequest> {
+        self.capture_search_task(ui);
+        self.ai_condition_request(false)
+    }
+
+    /// Validate the captured condition editors while ignoring a query-only draft.
+    pub(super) fn ai_captured_condition_request(&self) -> Option<SearchRequest> {
+        self.ai_condition_request(true)
+    }
+
+    fn ai_condition_request(&self, ignore_query_draft: bool) -> Option<SearchRequest> {
+        {
+            let state = self.task_workspace.lock().unwrap();
+            if state.loading
+                || state.restoring
+                || state.restore_failed
+                || state.unavailable_folder.is_some()
+                || state.unavailable_album.is_some()
+            {
+                return None;
+            }
+        }
+        let request = self.request.lock().unwrap().clone();
+        let state = self.task_workspace.lock().unwrap();
+        let mut task = state
+            .workspace
+            .session
+            .tasks
+            .iter()
+            .find(|task| Some(&task.id) == state.workspace.session.active_task_id.as_ref())
+            .cloned()?;
+        if ignore_query_draft {
+            task.view
+                .raw_inputs
+                .insert("query".into(), task.definition.query.clone());
+        }
+        if !task_inputs_valid(&task) {
+            return None;
+        }
+        let expected = task.definition.to_request(request.limit, request.offset);
+        (request.query == expected.query
+            && (request.scope == expected.scope
+                || (expected.scope == SearchScope::All && request.scope == SearchScope::Main))
+            && request.folder_id == expected.folder_id
+            && request.include_subfolders == expected.include_subfolders
+            && request.filters == expected.filters
+            && request.order_by == expected.order_by
+            && request.descending == expected.descending)
+            .then_some(request)
     }
 
     pub(super) fn close_search_task(self: &Arc<Self>, id: &str) {
@@ -1530,6 +1724,7 @@ impl Controller {
         {
             let mut remembered = self.latest_selection.lock().unwrap();
             self.selection_generation.fetch_add(1, Ordering::AcqRel);
+            self.clear_remote_audition_status();
             *remembered = None;
             *self.selection_job.lock().unwrap() = None;
             *self.selection_audio_job.lock().unwrap() = None;
@@ -1688,7 +1883,7 @@ impl Controller {
         self.result_pages.lock().unwrap().clear();
         self.window_coverage.lock().unwrap().take();
         apply_task_controls(ui, &task);
-        *self.request.lock().unwrap() = task.definition.to_request(
+        let mut request = task.definition.to_request(
             cache.as_ref().map_or_else(
                 || {
                     task_result_window_limit_with_policy(
@@ -1705,6 +1900,12 @@ impl Controller {
             ),
             task.view.offset,
         );
+        if let Some(cache) = &cache {
+            // resolve_task validated this execution scope on its background worker.
+            // Do not reinterpret fallback Main rows as the saved All preference.
+            request.scope = cache.executed_scope;
+        }
+        *self.request.lock().unwrap() = request;
         let stats = self.tree.lock().unwrap().stats.clone();
         *self.tree.lock().unwrap() = cache.as_ref().map_or_else(
             || TreeState {
@@ -2370,6 +2571,29 @@ fn resolve_task(
         .map(|reference| resolve_audio(reference).map(|file| file.as_ref().map(audio_ref)))
         .transpose()?
         .flatten();
+    let expected_scope = if cache.is_some() {
+        match task.definition.scope {
+            SearchScope::All | SearchScope::Path => {
+                let ready = provider
+                    .path_search_ready()
+                    .map_err(|error| error.to_string())?;
+                match task.definition.scope {
+                    SearchScope::All => Some(if ready {
+                        SearchScope::All
+                    } else {
+                        SearchScope::Main
+                    }),
+                    SearchScope::Path if ready => Some(SearchScope::Path),
+                    // A cold restore owns unavailable-path handling and any probe.
+                    // Never reuse previously indexed path rows while it is absent.
+                    _ => None,
+                }
+            }
+            scope => Some(scope),
+        }
+    } else {
+        None
+    };
     let revision = provider
         .search_revision()
         .map_err(|error| error.to_string())?;
@@ -2378,6 +2602,7 @@ fn resolve_task(
             && !album_missing
             && cache.provider.ptr_eq(&Arc::downgrade(provider))
             && Some(cache.revision) == revision
+            && Some(cache.executed_scope) == expected_scope
             && cache.window_coverage.as_ref().is_some_and(|coverage| {
                 coverage.revision == Some(cache.revision)
                     && coverage.positions.len() == cache.records.len()

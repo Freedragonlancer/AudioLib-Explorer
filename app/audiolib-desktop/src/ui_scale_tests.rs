@@ -277,13 +277,11 @@ fn search_and_library_actions_remain_reachable_with_long_source_labels() {
                         let libraries = Rc::new(RefCell::new(Vec::new()));
                         let observed = libraries.clone();
                         ui.on_library_action(move |action| observed.borrow_mut().push(action));
-                        let search_label =
-                            match (ui.global::<crate::Theme>().get_modern_style(), chinese) {
-                                (false, false) => "Search",
-                                (false, true) => "搜索",
-                                (true, false) => "Run search",
-                                (true, true) => "执行搜索",
-                            };
+                        let search_label = if chinese {
+                            "执行搜索"
+                        } else {
+                            "Run search"
+                        };
                         ElementHandle::find_by_accessible_label(&ui, search_label)
                             .find(|element| {
                                 element.accessible_role() == Some(AccessibleRole::Button)

@@ -691,6 +691,23 @@ fn published_selection_stop_fixture(fail_old_load: bool) {
     use std::cell::Cell;
     use std::rc::Rc;
 
+    struct PreparationGate {
+        release: std::sync::mpsc::SyncSender<()>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Drop for PreparationGate {
+        fn drop(&mut self) {
+            let _ = self.release.try_send(());
+            if let Some(worker) = self.worker.take() {
+                let result = worker.join();
+                if !std::thread::panicking() {
+                    assert!(result.is_ok(), "preparation gate failed");
+                }
+            }
+        }
+    }
+
     fn block_next_engine_open(
         path: &Path,
         fail_first: bool,
@@ -784,6 +801,40 @@ fn published_selection_stop_fixture(fail_old_load: bool) {
     controller.selection_audio_wake.notify_one();
     old_entered.recv_timeout(Duration::from_secs(4)).unwrap();
     controller.select_id(metal.id, false);
+    // Cancelling A now abandons its acknowledgment promptly. Hold preparation
+    // before the UI publishes B, so B may dequeue but cannot admit its Load
+    // before Stop; the fixture does not depend on the worker's queue timing.
+    let (prepare_entered_tx, prepare_entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (prepare_release_tx, prepare_release_rx) = std::sync::mpsc::sync_channel(1);
+    let preparing = controller.clone();
+    let preparation_gate = PreparationGate {
+        release: prepare_release_tx,
+        worker: Some(std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let _prepare = loop {
+                match preparing.remote_audio_prepare.try_lock() {
+                    Ok(guard) => break guard,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "cancelled A retained preparation"
+                        );
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("preparation gate: {error}"),
+                }
+            };
+            prepare_entered_tx.send(()).unwrap();
+            match prepare_release_rx.recv_timeout(Duration::from_secs(8)) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+                Err(error) => panic!("preparation gate release: {error}"),
+            }
+        })),
+    };
+    prepare_entered_rx
+        .recv_timeout(Duration::from_secs(3))
+        .unwrap();
+    let release_preparation = preparation_gate.release.clone();
     let phase = Rc::new(Cell::new(0));
     let next = phase.clone();
     let c = controller.clone();
@@ -803,18 +854,18 @@ fn published_selection_stop_fixture(fail_old_load: bool) {
                     return false;
                 }
                 assert!(
-                    c.selection_audio_job
+                    c.latest_selection
                         .lock()
                         .unwrap()
                         .as_ref()
-                        .is_some_and(|job| job.file.id == id)
+                        .is_some_and(|job| job.id == id)
                 );
                 assert_eq!(*c.audio_reload.lock().unwrap(), Some(id));
                 ui.invoke_stop_requested();
                 assert!(c.selection_audio_job.lock().unwrap().is_none());
                 assert_eq!(*c.audio_reload.lock().unwrap(), Some(id));
-                // An already cancelled sentinel proves the bounded worker processed
-                // A's ACK/error before we inspect B's marker; it cannot issue a Load.
+                // Drain cancelled queued work before inspecting B's marker. The
+                // Stopped engine state below separately proves A and Stop finished.
                 *c.selection_audio_job.lock().unwrap() = Some(SelectionAudioJob {
                     file: metal.clone(),
                     play: false,
@@ -823,6 +874,7 @@ fn published_selection_stop_fixture(fail_old_load: bool) {
                     cancel: Arc::new(AtomicBool::new(true)),
                 });
                 c.selection_audio_wake.notify_one();
+                release_preparation.send(()).unwrap();
                 old_release.send(()).unwrap();
                 next.set(1);
                 false
@@ -891,6 +943,7 @@ fn published_selection_stop_fixture(fail_old_load: bool) {
         }
     });
     assert_eq!(phase.get(), 4);
+    drop(preparation_gate);
     controller.shutdown();
     ui.hide().unwrap();
     audiolib_audio::unregister_stream_source(&wind_path);

@@ -25,7 +25,7 @@ component TaskTabIcon inherits Rectangle {
 // Closing a background task never selects it; starring lives above the sound list.
 export component SearchTaskTab inherits Rectangle {
     in property <string> name;
-    in property <[string]> keywords;
+    in property <string> keywords;
     in property <string> folder;
     in property <string> summary;
     in property <bool> searched: false;
@@ -83,29 +83,27 @@ export component SearchTaskTab inherits Rectangle {
         // Directory context yields to long keywords; the tooltip stays complete.
         keyword-label := Text {
             x: 0px;
-            width: directory-label.visible && root.keywords.length > 0 ? min(parent.width, self.preferred-width) : parent.width;
-            height: parent.height; visible: root.keywords.length > 0;
-            text: (root.keywords.length > 0 ? root.keywords[0] : "")
-                + (root.keywords.length > 1 ? " · " + root.keywords[1] : "")
-                + (root.keywords.length > 2 ? " …" : "");
+            width: directory-label.visible && root.keywords != "" ? min(parent.width, self.preferred-width) : parent.width;
+            height: parent.height; visible: root.keywords != "";
+            text: root.keywords;
             color: Theme.accent-hover; font-size: Theme.font(11);
             horizontal-alignment: left; vertical-alignment: center; overflow: elide;
         }
         directory-separator := Text {
-            visible: directory-label.visible && (root.keywords.length > 0 || root.folder != "");
-            x: root.keywords.length > 0 ? keyword-label.width + 6px * Theme.ui-scale : 0px;
+            visible: directory-label.visible && (root.keywords != "" || root.folder != "");
+            x: root.keywords != "" ? keyword-label.width + 6px * Theme.ui-scale : 0px;
             width: self.preferred-width; height: parent.height;
             text: ">"; color: Theme.dim; font-size: Theme.font(11);
             horizontal-alignment: left; vertical-alignment: center;
         }
         directory-label := Text {
-            visible: root.keywords.length == 0 || parent.width >= keyword-label.preferred-width + directory-separator.preferred-width + min(96px * Theme.ui-scale, self.preferred-width) + 12px * Theme.ui-scale;
-            width: root.keywords.length == 0 ? max(0px, parent.width - self.x) : min(96px * Theme.ui-scale, self.preferred-width);
-            x: root.keywords.length > 0 ? keyword-label.preferred-width + directory-separator.preferred-width + 12px * Theme.ui-scale
+            visible: root.keywords == "" || parent.width >= keyword-label.preferred-width + directory-separator.preferred-width + min(96px * Theme.ui-scale, self.preferred-width) + 12px * Theme.ui-scale;
+            width: root.keywords == "" ? max(0px, parent.width - self.x) : min(96px * Theme.ui-scale, self.preferred-width);
+            x: root.keywords != "" ? keyword-label.preferred-width + directory-separator.preferred-width + 12px * Theme.ui-scale
                 : (root.folder != "" ? directory-separator.preferred-width + 6px * Theme.ui-scale : 0px);
             height: parent.height;
-            text: root.folder != "" ? root.folder : (root.keywords.length > 0 ? (root.chinese ? "全部目录" : "All folders") : (root.chinese ? "筛选" : "Filters"));
-            color: root.folder != "" || root.keywords.length > 0 ? Theme.warning : Theme.accent-hover;
+            text: root.folder != "" ? root.folder : (root.keywords != "" ? (root.chinese ? "全部目录" : "All folders") : (root.chinese ? "筛选" : "Filters"));
+            color: root.folder != "" || root.keywords != "" ? Theme.warning : Theme.accent-hover;
             font-size: Theme.font(11); horizontal-alignment: left; vertical-alignment: center; overflow: elide;
         }
     }

@@ -78,7 +78,7 @@ cargo clippy -p audiolib-db --all-targets --locked -- -D warnings
 cargo test -p audiolib-db --test search_fragments --locked
 ```
 
-纯文档只需检查差异、链接和 `git diff --check`；UI 文案和布局改动检查编译及受影响界面。用 `./tools/check-local.ps1 -Package audiolib-desktop,audiolib-cli -Asio` 检查受影响客户端包，或使用更窄的既有测试命令；仅影响广泛或不明确时省略 `-Package`。`-Asio` 选择 Windows 发布特性，同一套检查只跑一遍；无 ASIO 条件分支仅在受改动影响时定向补测。相关源码、feature、工具链和环境未变时复用通过结果；专项回归和性能测量按实际行为变化触发。详见[验证范围](AGENTS.md#development-checks-by-change-scope)和[阶段职责](doc/Testing_Strategy.md#本地验证与云端最小检查)。
+纯文档只需检查差异、链接和 `git diff --check`；UI 文案和布局改动检查编译及受影响界面。稳定且未受影响的模块沿用已有通过基线，不重复回归。用 `./tools/check-local.ps1 -Package <packages>` 显式选择受影响包；单包可加 `-Lib`、`-Bin <name>` 或 `-Test <integration-target>`，并以 `-TestFilter <substring>` 进一步选择测试。仅影响广泛或不明确时使用 `-Workspace`；遗漏范围参数会在执行前报错。`-Asio` 选择 Windows 发布特性，同一套检查只跑一遍；无 ASIO 条件分支仅在受改动影响时定向补测。相关源码、依赖、feature、工具链和环境未变时复用通过结果；专项回归和性能测量按实际行为变化触发。详见[验证范围](AGENTS.md#development-checks-by-change-scope)、[稳定模块的回归精简](doc/Testing_Strategy.md#稳定模块的回归精简)和[阶段职责](doc/Testing_Strategy.md#本地验证与云端最小检查)。
 
 ## 使用
 

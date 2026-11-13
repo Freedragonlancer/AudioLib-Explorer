@@ -348,11 +348,36 @@ pub struct CommandCompletion {
 }
 
 impl CommandCompletion {
-    /// Wait for this command's result on a worker thread, never the GUI thread.
+    /// Wait briefly for this command's exact result, retaining the receiver when
+    /// it is still pending (`Ok(None)`). Worker-thread owners can retry a pending
+    /// wait while checking their cancellation/source-generation state between
+    /// slices; neither timing out nor dropping this observer cancels the command.
+    ///
+    /// `Ok(Some(status))` is a confirmed success. A command execution failure,
+    /// including [`Error::Cancelled`], is returned unchanged. A disconnected
+    /// acknowledgment channel is a terminal observation error. Call only from a
+    /// worker thread, and retry only `Ok(None)`; a terminal result is consumed once.
+    pub fn wait_slice(&self, timeout: Duration) -> Result<Option<PlaybackStatus>> {
+        match self.acknowledgment.recv_timeout(timeout) {
+            Ok(result) => result.map(Some),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(Error::Audio(
+                "Audio acknowledgment channel disconnected before a result".into(),
+            )),
+        }
+    }
+
+    /// Wait within one observation budget on a worker thread, never the GUI thread.
+    /// Exhausting the budget only means the acknowledgment is still pending: the
+    /// queued command may still complete. This consumes the observer; GUI workers
+    /// that need a definitive result with cancellation should retry [`Self::wait_slice`].
     pub fn wait(self, timeout: Duration) -> Result<PlaybackStatus> {
-        self.acknowledgment
-            .recv_timeout(timeout)
-            .map_err(|error| Error::Audio(format!("Audio acknowledgment: {error}")))?
+        self.wait_slice(timeout)?.ok_or_else(|| {
+            Error::Audio(format!(
+                "Audio acknowledgment is still pending after {} ms; the queued command may still complete",
+                timeout.as_millis()
+            ))
+        })
     }
 
     /// Wait for a definitive result before disposing transactional source resources.
@@ -360,9 +385,9 @@ impl CommandCompletion {
     /// the owner, and disconnection still returns an error. A timeout cannot prove
     /// whether a queued source replacement committed, so it cannot safely roll back.
     pub fn wait_until_completed(self) -> Result<PlaybackStatus> {
-        self.acknowledgment
-            .recv()
-            .map_err(|error| Error::Audio(format!("Audio acknowledgment: {error}")))?
+        self.acknowledgment.recv().map_err(|_| {
+            Error::Audio("Audio acknowledgment channel disconnected before a result".into())
+        })?
     }
 }
 
@@ -2336,6 +2361,108 @@ mod tests {
             load.wait(Duration::from_secs(4)),
             Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
         ));
+    }
+
+    fn delayed_command_completion(
+        outcome: Result<PlaybackStatus>,
+    ) -> (CommandCompletion, mpsc::Sender<()>, JoinHandle<()>) {
+        let (sender, acknowledgment) = mpsc::sync_channel(1);
+        let (release, pending) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            pending.recv().unwrap();
+            sender.send(outcome).unwrap();
+        });
+        (CommandCompletion { acknowledgment }, release, worker)
+    }
+
+    #[test]
+    fn command_completion_pending_slices_preserve_a_late_success() {
+        let (completion, release, worker) = delayed_command_completion(Ok(PlaybackStatus {
+            generation: 42,
+            transport_revision: 7,
+            state: PlaybackState::Ready,
+            ..Default::default()
+        }));
+        for _ in 0..3 {
+            assert!(
+                completion
+                    .wait_slice(Duration::from_millis(1))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        release.send(()).unwrap();
+        let confirmed = completion
+            .wait_slice(Duration::from_secs(2))
+            .unwrap()
+            .expect("the original receiver survives every pending slice");
+        assert_eq!(confirmed.generation, 42);
+        assert_eq!(confirmed.transport_revision, 7);
+        assert_eq!(confirmed.state, PlaybackState::Ready);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn command_completion_pending_slices_preserve_execution_errors_and_cancellation() {
+        for error in [
+            Error::Validation("owned invalid command".into()),
+            Error::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "owned denied source",
+            )),
+            Error::Cancelled,
+        ] {
+            let kind = std::mem::discriminant(&error);
+            let message = error.to_string();
+            let (completion, release, worker) = delayed_command_completion(Err(error));
+            assert!(
+                completion
+                    .wait_slice(Duration::from_millis(1))
+                    .unwrap()
+                    .is_none()
+            );
+            release.send(()).unwrap();
+            let actual = completion.wait_slice(Duration::from_secs(2)).unwrap_err();
+            assert_eq!(std::mem::discriminant(&actual), kind);
+            assert_eq!(actual.to_string(), message);
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn command_completion_disconnect_is_terminal_not_pending() {
+        let (sender, acknowledgment) = mpsc::sync_channel(1);
+        let completion = CommandCompletion { acknowledgment };
+        assert!(completion.wait_slice(Duration::ZERO).unwrap().is_none());
+        drop(sender);
+        assert!(matches!(
+            completion.wait_slice(Duration::from_secs(2)),
+            Err(Error::Audio(message)) if message.contains("disconnected")
+        ));
+    }
+
+    #[test]
+    fn bounded_command_completion_wait_does_not_cancel_a_late_command() {
+        let (sender, acknowledgment) = mpsc::sync_channel(1);
+        let completion = CommandCompletion { acknowledgment };
+        let (release, pending) = mpsc::channel();
+        let executed = Arc::new(AtomicBool::new(false));
+        let completed = executed.clone();
+        let worker = std::thread::spawn(move || {
+            pending.recv().unwrap();
+            completed.store(true, Ordering::Release);
+            // A bounded observer has gone away, independently of execution.
+            assert!(sender.send(Ok(PlaybackStatus::default())).is_err());
+        });
+        assert!(matches!(
+            completion.wait(Duration::ZERO),
+            Err(Error::Audio(message))
+                if message.contains("still pending") && message.contains("may still complete")
+        ));
+        assert!(!executed.load(Ordering::Acquire));
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(executed.load(Ordering::Acquire));
     }
 
     pub(super) fn worker(status: PlaybackStatus) -> Worker {

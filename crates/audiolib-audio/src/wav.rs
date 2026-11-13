@@ -98,6 +98,12 @@ fn container_bounds(
         return Err(Error::Audio("Invalid WAV container size".into()));
     }
     if end > file_len {
+        // Some RIFF writers put the entire file length in the size field instead
+        // of excluding the first eight bytes. Accept only that exact mistake;
+        // the chunk walk below still rejects any payload or padding past EOF.
+        if &header[..4] == b"RIFF" && end - file_len == 8 {
+            return Ok((file_len, data_size));
+        }
         return Err(Error::Audio("Truncated WAV container".into()));
     }
     Ok((end, data_size))

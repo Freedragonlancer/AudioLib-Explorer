@@ -3278,6 +3278,469 @@ fn folder_context_menu_uses_window_coordinates_and_retains_its_original_path() {
 }
 
 #[test]
+fn native_status_footer_keeps_messages_and_actions_at_bottom_right() {
+    use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+    ui.set_remote_mode(true);
+    let cancelled = Rc::new(RefCell::new(0));
+    let observed = cancelled.clone();
+    ui.on_drag_cancel_requested(move || *observed.borrow_mut() += 1);
+    let opened = Rc::new(RefCell::new(0));
+    let observed = opened.clone();
+    ui.on_sm_open_requested(move |_| *observed.borrow_mut() += 1);
+    ui.show().unwrap();
+    let settle = || {
+        i_slint_backend_testing::mock_elapsed_time(Duration::ZERO);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(20));
+    };
+    for modern in [false, true] {
+        ui.global::<crate::Theme>().set_modern_style(modern);
+        for chinese in [false, true] {
+            ui.set_chinese(chinese);
+            for scale in [1.0, 1.5, 2.0] {
+                ui.global::<crate::Theme>().set_ui_scale(scale);
+                let status_label = if chinese {
+                    "当前状态"
+                } else {
+                    "Application status"
+                };
+                let source_text = if chinese {
+                    "服务器模式 · 测试资料库 · 已同步"
+                } else {
+                    "Server mode · Fixture library · Synced"
+                };
+                let status_text = if chinese {
+                    "就绪 · 选择声音查看 Metadata"
+                } else {
+                    "Ready · Select a sound for Metadata"
+                };
+                ui.set_data_source_label(source_text.into());
+                ui.set_status(status_text.into());
+                settle();
+                ui.invoke_scroll_main_to_end();
+                settle();
+                let source = ElementHandle::find_by_accessible_label(&ui, source_text)
+                    .next()
+                    .unwrap();
+                let status = ElementHandle::find_by_accessible_label(&ui, status_label)
+                    .next()
+                    .unwrap();
+                assert_eq!(
+                    status.accessible_description().as_deref(),
+                    Some(status_text)
+                );
+                let window_size = ui.window().size().to_logical(ui.window().scale_factor());
+                for element in [&source, &status] {
+                    let p = element.absolute_position();
+                    let s = element.size();
+                    assert!(s.width > 0.0 && s.height > 0.0);
+                    assert!(p.x >= 0.0 && p.x + s.width <= window_size.width + 1.0);
+                    assert!(
+                        p.y >= window_size.height - 48.0 * scale
+                            && p.y + s.height <= window_size.height + 1.0,
+                        "Status must stay in the native bottom lane after workbench scrolling"
+                    );
+                }
+                let right = (source.absolute_position().x + source.size().width)
+                    .max(status.absolute_position().x + status.size().width);
+                assert!(window_size.width - right <= 32.0 * scale);
+                let left = source
+                    .absolute_position()
+                    .x
+                    .min(status.absolute_position().x);
+                assert!(
+                    (left + right) / 2.0 > window_size.width / 2.0,
+                    "Short status messages must be grouped on the right"
+                );
+                let before = (source.absolute_position(), status.absolute_position());
+                let long_source = format!(
+                    "{source_text} · {} · Disk waking: owned-NAS-fixture",
+                    "fixture-library ".repeat(40)
+                );
+                let long_status =
+                    format!("{status_text} · {}", "fixture error context ".repeat(40));
+                ui.set_data_source_label(long_source.clone().into());
+                ui.set_status(long_status.clone().into());
+                settle();
+                let source = ElementHandle::find_by_accessible_label(&ui, &long_source)
+                    .next()
+                    .unwrap();
+                let status = ElementHandle::find_by_accessible_label(&ui, status_label)
+                    .next()
+                    .unwrap();
+                assert_eq!(
+                    status.accessible_description().as_deref(),
+                    Some(long_status.as_str())
+                );
+                assert_eq!(source.absolute_position().y, before.0.y);
+                assert_eq!(status.absolute_position().y, before.1.y);
+                for element in [&source, &status] {
+                    assert!(element.size().width > 0.0);
+                    assert!(
+                        element.absolute_position().x >= 0.0
+                            && element.absolute_position().x + element.size().width
+                                <= window_size.width + 1.0,
+                        "Long status strings must elide inside the native window"
+                    );
+                }
+                assert!(
+                    source.absolute_position().x + source.size().width
+                        <= status.absolute_position().x
+                        || status.absolute_position().x + status.size().width
+                            <= source.absolute_position().x,
+                    "Source and current status must not overlap"
+                );
+                let waking = if chinese {
+                    "正在唤醒音效库磁盘… 12 秒（fixture_long_remote_audio_filename.wav）"
+                } else {
+                    "Waking the library disk… 12 s (fixture_long_remote_audio_filename.wav)"
+                };
+                ui.set_remote_audition_status(waking.into());
+                // Ordinary completion notifications must not hide an active
+                // remote first-byte wait, including after workbench scrolling.
+                ui.set_status("Background search completed".into());
+                settle();
+                let status = ElementHandle::find_by_accessible_label(&ui, status_label)
+                    .next()
+                    .unwrap();
+                assert_eq!(status.accessible_description().as_deref(), Some(waking));
+                assert!(
+                    status.size().width >= 140.0 * scale,
+                    "The remote waiting prefix must remain visible beside a long source label"
+                );
+                assert!(status.absolute_position().x + status.size().width <= window_size.width);
+                if let Some(directory) = std::env::var_os("AUDIOLIB_MULTI_SEARCH_SNAPSHOT_DIR") {
+                    std::fs::create_dir_all(&directory).unwrap();
+                    let pixels = ui.window().take_snapshot().unwrap();
+                    image::save_buffer(
+                        std::path::Path::new(&directory)
+                            .join(format!("remote-wake-footer-{modern}-{chinese}-{scale}.png")),
+                        pixels.as_bytes(),
+                        pixels.width(),
+                        pixels.height(),
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
+                }
+                ui.window().set_size(slint::LogicalSize::new(800.0, 600.0));
+                ui.set_scanning(true);
+                settle();
+                assert_eq!(status.accessible_description().as_deref(), Some(waking));
+                assert!(status.size().width >= 140.0 * scale);
+                assert!(status.absolute_position().x + status.size().width <= 800.0);
+                assert!(source.size().width >= 48.0 * scale);
+                assert!(source.absolute_position().x + source.size().width <= 800.0);
+                let count = *opened.borrow();
+                source.mock_single_click(slint::platform::PointerEventButton::Left);
+                assert_eq!(*opened.borrow(), count + 1);
+                assert!(ui.get_library_visible());
+                ui.set_library_visible(false);
+                ui.set_scanning(false);
+                ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+                settle();
+                ui.set_drag_preparing(true);
+                ui.set_drag_progress("Owned slice fixture: preparing".into());
+                settle();
+                assert_eq!(
+                    ElementHandle::find_by_accessible_label(&ui, status_label)
+                        .next()
+                        .unwrap()
+                        .accessible_description()
+                        .as_deref(),
+                    Some("Owned slice fixture: preparing")
+                );
+                let count = *cancelled.borrow();
+                ElementHandle::find_by_accessible_label(
+                    &ui,
+                    if chinese {
+                        "取消拖出"
+                    } else {
+                        "Cancel drag"
+                    },
+                )
+                .next()
+                .unwrap()
+                .mock_single_click(slint::platform::PointerEventButton::Left);
+                assert_eq!(*cancelled.borrow(), count + 1);
+                ui.set_drag_preparing(false);
+                ui.set_drag_progress("".into());
+                settle();
+                assert_eq!(
+                    ElementHandle::find_by_accessible_label(&ui, status_label)
+                        .next()
+                        .unwrap()
+                        .accessible_description()
+                        .as_deref(),
+                    Some(waking)
+                );
+                ui.set_remote_audition_status("".into());
+                settle();
+                assert_eq!(
+                    ElementHandle::find_by_accessible_label(&ui, status_label)
+                        .next()
+                        .unwrap()
+                        .accessible_description()
+                        .as_deref(),
+                    Some("Background search completed")
+                );
+                ui.set_data_source_label(source_text.into());
+                ui.set_status(status_text.into());
+                settle();
+                if let Some(directory) = std::env::var_os("AUDIOLIB_MULTI_SEARCH_SNAPSHOT_DIR") {
+                    std::fs::create_dir_all(&directory).unwrap();
+                    let pixels = ui.window().take_snapshot().unwrap();
+                    image::save_buffer(
+                        std::path::Path::new(&directory)
+                            .join(format!("status-footer-{modern}-{chinese}-{scale}.png")),
+                        pixels.as_bytes(),
+                        pixels.width(),
+                        pixels.height(),
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
+                }
+                let count = *opened.borrow();
+                ElementHandle::find_by_accessible_label(&ui, source_text)
+                    .next()
+                    .unwrap()
+                    .mock_single_click(slint::platform::PointerEventButton::Left);
+                assert_eq!(*opened.borrow(), count + 1);
+                assert!(ui.get_library_visible());
+                ui.set_library_visible(false);
+                settle();
+            }
+        }
+    }
+    ui.global::<crate::Theme>().set_modern_style(false);
+    ui.global::<crate::Theme>().set_ui_scale(1.0);
+    ui.set_chinese(true);
+    ui.window()
+        .set_size(slint::LogicalSize::new(1920.0, 1080.0));
+    ui.set_data_source_label("服务器模式 · 测试资料库 · 同步完成".into());
+    ui.set_status("就绪 · 选择声音查看 Metadata".into());
+    settle();
+    if let Some(directory) = std::env::var_os("AUDIOLIB_MULTI_SEARCH_SNAPSHOT_DIR") {
+        std::fs::create_dir_all(&directory).unwrap();
+        let pixels = ui.window().take_snapshot().unwrap();
+        image::save_buffer(
+            std::path::Path::new(&directory).join("status-footer-wide.png"),
+            pixels.as_bytes(),
+            pixels.width(),
+            pixels.height(),
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+    }
+    ui.hide().unwrap();
+}
+
+#[test]
+fn compressed_player_aligns_filename_and_preserves_selection_actions() {
+    use crate::waveform_view::{WaveView, render_waveform};
+    use audiolib_audio::{WaveformData, WaveformPeak};
+    use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};
+
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    let waveform = WaveformData {
+        sample_rate: 48_000,
+        channels: 2,
+        frames: 2_880_000,
+        samples_per_pixel: 6_000,
+        peaks: (0..2)
+            .map(|channel| {
+                (0..480)
+                    .map(|index| {
+                        let amplitude =
+                            0.1 + (index as f32 * 0.07 + channel as f32).sin().abs() * 0.6;
+                        WaveformPeak {
+                            min: -amplitude,
+                            max: amplitude,
+                            rms: amplitude * 0.5,
+                            ..Default::default()
+                        }
+                    })
+                    .collect()
+            })
+            .collect(),
+    };
+    let pixels = render_waveform(
+        &waveform,
+        960,
+        80,
+        WaveView {
+            spectral: false,
+            ..Default::default()
+        },
+    );
+    let waveform_image = slint::Image::from_rgba8(
+        slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&pixels, 960, 80),
+    );
+    let settle = || {
+        i_slint_backend_testing::mock_elapsed_time(Duration::ZERO);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(20));
+    };
+    let ui = AppWindow::new().unwrap();
+    ui.set_audio_ready(true);
+    ui.set_playback_state(3);
+    ui.set_playing(true);
+    ui.set_waveform_ready(true);
+    ui.set_waveform_image(waveform_image);
+    ui.set_wave_selection_identity("owned-player-fixture".into());
+    ui.set_playback_name("forest_day_ambience_01_60_loop.wav".into());
+    ui.set_play_duration(60.0);
+    ui.set_play_position(5.05);
+    ui.set_view_start(0.0);
+    ui.set_view_end(60.0);
+    ui.set_play_time("00:05.050".into());
+    ui.set_play_end("01:00.000".into());
+    let cleared = Rc::new(RefCell::new(0));
+    let observed = cleared.clone();
+    ui.on_wave_selection_cleared(move || *observed.borrow_mut() += 1);
+    let cancelled = Rc::new(RefCell::new(0));
+    let observed = cancelled.clone();
+    ui.on_wave_selection_cancel_requested(move || *observed.borrow_mut() += 1);
+    ui.show().unwrap();
+    for modern in [false, true] {
+        ui.global::<crate::Theme>().set_modern_style(modern);
+        ui.global::<crate::Theme>().set_modern_player(false);
+        for chinese in [false, true] {
+            ui.set_chinese(chinese);
+            for compact in [false, true] {
+                ui.window().set_size(if compact {
+                    slint::LogicalSize::new(1080.0, 700.0)
+                } else {
+                    slint::LogicalSize::new(1920.0, 1080.0)
+                });
+                settle();
+                let filename = ElementHandle::find_by_accessible_label(
+                    &ui,
+                    if chinese {
+                        "当前试听文件"
+                    } else {
+                        "Audition filename"
+                    },
+                )
+                .next()
+                .unwrap();
+                let time = ElementHandle::find_by_accessible_label(
+                    &ui,
+                    if chinese {
+                        "试听时间"
+                    } else {
+                        "Audition time"
+                    },
+                )
+                .next()
+                .unwrap();
+                let phase = ElementHandle::find_by_accessible_label(
+                    &ui,
+                    if chinese {
+                        "播放状态"
+                    } else {
+                        "Playback status"
+                    },
+                )
+                .next()
+                .unwrap();
+                let center = |element: &ElementHandle| {
+                    element.absolute_position().y + element.size().height / 2.0
+                };
+                assert!(
+                    (center(&filename) - center(&time)).abs() < 1.0,
+                    "Filename and time must share their row center"
+                );
+                assert!(
+                    (center(&filename) - center(&phase)).abs() < 1.0,
+                    "Filename and playback state must align"
+                );
+                assert!(
+                    filename.absolute_position().y + filename.size().height
+                        <= ui
+                            .window()
+                            .size()
+                            .to_logical(ui.window().scale_factor())
+                            .height
+                );
+                let feedback_label = if chinese {
+                    "波形选区操作"
+                } else {
+                    "Waveform selection controls"
+                };
+                assert!(
+                    ElementHandle::find_by_accessible_label(&ui, feedback_label)
+                        .next()
+                        .is_none(),
+                    "Idle player has no instructional row"
+                );
+                if let Some(directory) = std::env::var_os("AUDIOLIB_MULTI_SEARCH_SNAPSHOT_DIR") {
+                    let directory = std::path::Path::new(&directory);
+                    std::fs::create_dir_all(directory).unwrap();
+                    let pixels = ui.window().take_snapshot().unwrap();
+                    image::save_buffer(
+                        directory.join(format!(
+                            "player-compressed-{modern}-{chinese}-{compact}.png"
+                        )),
+                        pixels.as_bytes(),
+                        pixels.width(),
+                        pixels.height(),
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
+                }
+                ui.set_wave_selection_start(1.0);
+                ui.set_wave_selection_end(2.0);
+                ui.set_wave_selection_active(true);
+                settle();
+                let count = *cleared.borrow();
+                let control = ElementHandle::find_by_accessible_label(
+                    &ui,
+                    if chinese {
+                        "清除波形选区"
+                    } else {
+                        "Clear waveform selection"
+                    },
+                )
+                .next()
+                .unwrap();
+                control.mock_single_click(slint::platform::PointerEventButton::Left);
+                assert_eq!(*cleared.borrow(), count + 1);
+                ui.set_wave_selection_active(false);
+                ui.set_wave_selection_preparing(true);
+                settle();
+                let count = *cancelled.borrow();
+                ElementHandle::find_by_accessible_label(
+                    &ui,
+                    if chinese {
+                        "取消切片准备"
+                    } else {
+                        "Cancel slice preparation"
+                    },
+                )
+                .next()
+                .unwrap()
+                .mock_single_click(slint::platform::PointerEventButton::Left);
+                assert_eq!(*cancelled.borrow(), count + 1);
+                ui.set_wave_selection_preparing(false);
+                settle();
+            }
+        }
+    }
+    ui.hide().unwrap();
+}
+
+#[test]
 fn compact_window_keeps_audition_controls_and_time_inside_viewport() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();

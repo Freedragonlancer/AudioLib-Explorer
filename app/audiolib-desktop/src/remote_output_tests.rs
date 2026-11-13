@@ -147,7 +147,7 @@ fn child_remote_source_pair() {
             ..Default::default()
         });
         let first = controller
-            .playable_path(&file, &AtomicBool::new(false), 0)
+            .playable_path(&file, &Arc::new(AtomicBool::new(false)), 0)
             .unwrap();
         engine
             .handle()
@@ -333,7 +333,7 @@ fn child_stop_queued_route() {
         ..Default::default()
     });
     let first = controller
-        .playable_path(&file, &AtomicBool::new(false), 0)
+        .playable_path(&file, &Arc::new(AtomicBool::new(false)), 0)
         .unwrap();
     engine
         .handle()
@@ -592,7 +592,7 @@ fn child_raw_route_replacement() {
         });
         controller.set_remote_live_roots_for_test(vec![offline_root.clone()]);
         let first = controller
-            .playable_path(&file, &AtomicBool::new(false), 0)
+            .playable_path(&file, &Arc::new(AtomicBool::new(false)), 0)
             .unwrap();
         engine
             .handle()
@@ -675,7 +675,7 @@ fn child_raw_route_replacement() {
             assert!(!audiolib_audio::is_stream_source(&first));
             assert!(audiolib_audio::is_stream_source(&prepared));
             let reused = controller
-                .playable_path(&file, &AtomicBool::new(false), 0)
+                .playable_path(&file, &Arc::new(AtomicBool::new(false)), 0)
                 .unwrap();
             assert_eq!(reused, prepared);
             let previous = controller.remote_stream.lock().unwrap().clone().unwrap();

@@ -19,7 +19,7 @@ if ($taskState.FailPreparation) { throw 'Synthetic SDK preparation failed.' }
 '@ | Set-Content -LiteralPath (Join-Path $taskTools 'prepare-asio.ps1') -Encoding UTF8
 
 $taskCalls = [Collections.Generic.List[object]]::new()
-$taskState = @{ Prepared=0; FailPreparation=$false; FailAt=0 }
+$taskState = @{ Prepared=0; FailPreparation=$false; FailAt=0; TestOutput='test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' }
 @'
 param($Action,$Mode,$MaxGiB)
 . (Join-Path $PSScriptRoot 'build-cache.ps1')
@@ -46,6 +46,7 @@ function cargo {
         Flags=$env:CARGO_ENCODED_RUSTFLAGS
     })
     $global:LASTEXITCODE = if ($taskState.FailAt -eq $taskCalls.Count) { 17 } else { 0 }
+    if ($args[0] -eq 'test') { Write-Output $taskState.TestOutput }
 }
 if ((Get-Command cargo).CommandType -ne 'Function') { throw 'Synthetic Cargo is not active.' }
 
@@ -87,13 +88,32 @@ function Assert-SingleWorkspacePass([bool]$Asio = $false) {
 }
 
 try {
+    # Keep shared/exclusive lease tests inside the fixture, even while the real
+    # repository is building. Without a nested Git root, rev-parse finds its lock.
+    & git -C $taskArtifacts init --quiet
+    if ($LASTEXITCODE -ne 0) { throw 'Could not initialize the isolated pipeline fixture.' }
+    . (Join-Path $taskTools 'build-cache.ps1')
+    # Git may reject NAS ownership; the lease helper then uses the owned fallback.
+    $taskOwnedLeaseDirectories = @(
+        (Get-AudioLibCanonicalPath (Join-Path $taskArtifacts '.git')),
+        (Get-AudioLibCanonicalPath (Join-Path $taskArtifacts '.rust-validation'))
+    )
+    if ((Get-AudioLibBuildCommonDirectory $taskArtifacts) -notin $taskOwnedLeaseDirectories) {
+        throw 'Pipeline fixture did not isolate its build lease.'
+    }
     $env:CARGO_BUILD_TARGET = 'x86_64-pc-windows-msvc'
-    Invoke-PipelineCase 'check-local.ps1' @{}
+    Invoke-PipelineCase 'check-local.ps1' @{} 'Select -Package'
+    if ($taskCalls.Count -or $taskState.Prepared) { throw 'Missing scope started workspace checks.' }
+    Invoke-PipelineCase 'check-local.ps1' @{Package=@('audiolib-db');Workspace=$true} 'Select -Package'
+    if ($taskCalls.Count -or $taskState.Prepared) { throw 'Conflicting scope started checks.' }
+    Write-Host 'PASS: omitted or conflicting scope fails before Cargo or SDK work.'
+
+    Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true}
     Assert-SingleWorkspacePass
     if ($taskCalls.Count -ne 3 -or $taskState.Prepared -ne 0) { throw 'Default checks unexpectedly add ASIO work.' }
-    Write-Host 'PASS: default full workspace checks run once without SDK preparation.'
+    Write-Host 'PASS: explicit workspace checks run once without SDK preparation.'
 
-    Invoke-PipelineCase 'check-local.ps1' @{Asio=$true; Target='x86_64-pc-windows-msvc'}
+    Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true;Asio=$true; Target='x86_64-pc-windows-msvc'}
     Assert-SingleWorkspacePass $true
     if ($taskState.Prepared -ne 1) { throw 'ASIO SDK preparation was repeated.' }
     foreach ($taskCall in @($taskCalls | Select-Object -Skip 1)) {
@@ -125,25 +145,79 @@ try {
     if ($taskCalls.Count -or $taskState.Prepared) { throw 'Headless server checks prepared an irrelevant ASIO SDK.' }
     Write-Host 'PASS: scoped client/database/server checks run once with their selected features.'
 
-    Invoke-PipelineCase 'check-local.ps1' @{Target='aarch64-apple-darwin'}
+    foreach ($taskSelection in @(
+        @{Package=@('audiolib-db');Test='search_fragments'},
+        @{Package=@('audiolib-core');Lib=$true;TestFilter='batch_'},
+        @{Package=@('audiolib-desktop');Bin='AudioLibExplorer';TestFilter='controller::search_tasks::tests::';Asio=$true},
+        @{Package=@('audiolib-server');Lib=$true;NoDefaultFeatures=$true;Target='x86_64-unknown-linux-gnu'}
+    )) {
+        Invoke-PipelineCase 'check-local.ps1' $taskSelection
+        if ($taskCalls.Count -ne 3 -or $taskCalls[0].Arguments[0] -ne 'fmt' -or
+            $taskCalls[1].Arguments[0] -ne 'clippy' -or $taskCalls[1].Arguments -notcontains '--all-targets' -or
+            ($taskCalls[1].Arguments -join ' ') -notmatch '-- -D warnings$') { throw 'Targeted tests lost format or strict package Clippy.' }
+        $taskTestArguments = $taskCalls[2].Arguments
+        if ($taskTestArguments[0] -ne 'test' -or $taskTestArguments -contains '--all-targets' -or
+            $taskTestArguments -contains '--workspace' -or $taskTestArguments -notcontains '--locked') { throw 'Targeted tests expanded to unrelated targets.' }
+        foreach ($taskCall in @($taskCalls[1], $taskCalls[2])) {
+            if ((@(Get-SelectedPackages $taskCall) -join ',') -cne ($taskSelection.Package -join ',') -or
+                ($taskCall.Arguments -contains '--features') -ne [bool]$taskSelection.Asio -or
+                ($taskCall.Arguments -contains '--no-default-features') -ne [bool]$taskSelection.NoDefaultFeatures -or
+                $taskCall.Prepared -ne [int][bool]$taskSelection.Asio) { throw 'Targeted checks changed package or feature selection.' }
+            if ($taskSelection.Target) {
+                $taskTargetIndex = [array]::IndexOf($taskCall.Arguments, '--target')
+                if ($taskTargetIndex -lt 0 -or $taskCall.Arguments[$taskTargetIndex + 1] -cne $taskSelection.Target) { throw 'Targeted checks lost the native target.' }
+            }
+        }
+        [string[]]$taskExpectedTarget = if ($taskSelection.Lib) { @('--lib') } elseif ($taskSelection.Bin) { @('--bin', $taskSelection.Bin) } else { @('--test', $taskSelection.Test) }
+        $taskExpectedSuffix = $taskExpectedTarget
+        if ($taskSelection.TestFilter) { $taskExpectedSuffix += @('--', $taskSelection.TestFilter) }
+        if (($taskTestArguments[($taskTestArguments.Count - $taskExpectedSuffix.Count)..($taskTestArguments.Count - 1)] -join '|') -cne ($taskExpectedSuffix -join '|')) { throw 'Target/filter was not forwarded literally.' }
+    }
+    Write-Host 'PASS: integration, library and binary tests stay targeted with matching features and strict Clippy.'
+
+    foreach ($taskInvalidSelection in @(
+        @{Package=@('audiolib-db');Lib=$true;Test='search_fragments'},
+        @{Workspace=$true;Lib=$true},
+        @{Package=@('audiolib-db','audiolib-core');Lib=$true},
+        @{Package=@('audiolib-db');TestFilter='search'},
+        @{Package=@('audiolib-db');Lib=$true;TestFilter='--ignored'},
+        @{Package=@('audiolib-db');Lib=$true;TestFilter='   '},
+        @{Package=@('audiolib-*');Lib=$true},
+        @{Package=@('audiolib-db');Test='search_*'},
+        @{Package=@('audiolib-desktop');Bin='AudioLibExplore?'},
+        @{Package=@('audiolib-db');Test='search_[abc]'}
+    )) {
+        Invoke-PipelineCase 'check-local.ps1' $taskInvalidSelection 'Select only one|exactly one -Package|requires -Lib|nonblank names|literal package and target names'
+        if ($taskCalls.Count -or $taskState.Prepared) { throw 'Invalid test selection started work.' }
+    }
+    $taskPassedOutput = $taskState.TestOutput
+    foreach ($taskEmptyOutput in @('', 'test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out;', 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out;')) {
+        $taskState.TestOutput = $taskEmptyOutput
+        Invoke-PipelineCase 'check-local.ps1' @{Package=@('audiolib-db');Test='search_fragments';TestFilter='missing'} 'did not report any passed tests'
+        if ($taskCalls.Count -ne 3 -or $taskState.Cleaned) { throw 'Empty targeted results were accepted or repeated.' }
+    }
+    $taskState.TestOutput = $taskPassedOutput
+    Write-Host 'PASS: ambiguous scopes, wildcard targets, option-like filters, missing summaries and zero executed tests are rejected.'
+
+    Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true;Target='aarch64-apple-darwin'}
     Assert-SingleWorkspacePass
     if ($taskCalls.Count -ne 3 -or $taskCalls[2].Arguments -notcontains 'aarch64-apple-darwin') { throw 'Native non-Windows routing changed.' }
-    Invoke-PipelineCase 'check-local.ps1' @{Asio=$true; Target='aarch64-apple-darwin'} 'Windows MSVC'
+    Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true;Asio=$true; Target='aarch64-apple-darwin'} 'Windows MSVC'
     if ($taskCalls.Count -or $taskState.Prepared) { throw 'Invalid ASIO target started work.' }
     $env:CARGO_BUILD_TARGET = 'aarch64-apple-darwin'
-    Invoke-PipelineCase 'check-local.ps1' @{Asio=$true} 'Windows MSVC'
+    Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true;Asio=$true} 'Windows MSVC'
     if ($taskCalls.Count -or $taskState.Prepared) { throw 'An incompatible environment target started ASIO work.' }
     $env:CARGO_BUILD_TARGET = 'x86_64-pc-windows-msvc'
     Write-Host 'PASS: native target checks work and incompatible ASIO targets fail before starting.'
 
     foreach ($taskFailAt in 1..3) {
         $taskState.FailAt = $taskFailAt
-        Invoke-PipelineCase 'check-local.ps1' @{Asio=$true} 'cargo exited with code 17'
+        Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true;Asio=$true} 'cargo exited with code 17'
         if ($taskCalls.Count -ne $taskFailAt) { throw 'Validation continued after a failed stage.' }
     }
     $taskState.FailAt = 0
     $taskState.FailPreparation = $true
-    Invoke-PipelineCase 'check-local.ps1' @{Asio=$true} 'Synthetic SDK preparation failed'
+    Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true;Asio=$true} 'Synthetic SDK preparation failed'
     if ($taskCalls.Count -ne 1) { throw 'ASIO checks continued after SDK preparation failed.' }
     Invoke-PipelineCase 'build-release.ps1' @{} 'Synthetic SDK preparation failed'
     if ($taskCalls.Count) { throw 'Build continued after SDK preparation failed.' }
@@ -151,15 +225,19 @@ try {
     Write-Host 'PASS: every failed check or SDK preparation stops later stages and restores the environment.'
 
     if ($PSVersionTable.PSVersion -ge [version]'7.3') {
-        Invoke-PipelineCase 'check-local.ps1' @{CleanBuildArtifacts=$true}
+        $taskState.TestOutput = 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out;'
+        Invoke-PipelineCase 'check-local.ps1' @{Package=@('audiolib-db');Test='search_fragments';TestFilter='missing';CleanBuildArtifacts=$true} 'did not report any passed tests'
+        if ($taskState.Cleaned) { throw 'Empty targeted results cleaned their diagnostic cache.' }
+        $taskState.TestOutput = $taskPassedOutput
+        Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true;CleanBuildArtifacts=$true}
         Assert-SingleWorkspacePass
         if ($taskState.Cleaned -ne 1) { throw 'Successful checks did not run post-check maintenance.' }
         $taskState.FailAt = 2
-        Invoke-PipelineCase 'check-local.ps1' @{CleanBuildArtifacts=$true} 'cargo exited with code 17'
+        Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true;CleanBuildArtifacts=$true} 'cargo exited with code 17'
         if ($taskState.Cleaned -ne 1) { throw 'Failed checks cleaned their build/diagnostic cache.' }
         $taskState.FailAt = 0
     } else {
-        Invoke-PipelineCase 'check-local.ps1' @{CleanBuildArtifacts=$true} 'pwsh 7.3'
+        Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true;CleanBuildArtifacts=$true} 'pwsh 7.3'
         if ($taskCalls.Count -or $taskState.Cleaned) { throw 'Unsupported cleanup started work.' }
     }
     Write-Host 'PASS: optional cleanup runs only after successful checks and after releasing the build lease.'
