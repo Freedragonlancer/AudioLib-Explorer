@@ -194,3 +194,287 @@ fn favorite_toggle_persists_without_saving_tags_and_the_filter_is_folder_local()
     assert!(favorites_in(doors).is_empty());
     controller.shutdown();
 }
+
+#[test]
+fn favorite_survives_new_controller_on_same_sqlite_without_tag_or_note_drafts() {
+    i_slint_backend_testing::init_no_event_loop();
+    let root = tempfile::tempdir().unwrap();
+    let library = root.path().join("library");
+    for (folder, file) in [
+        ("doors", "door.wav"),
+        ("doors", "creak.wav"),
+        ("wind", "gust.wav"),
+    ] {
+        let directory = library.join(folder);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(file), tiny_wav()).unwrap();
+    }
+    let preferences = root.path().join("preferences");
+    let config = AppConfig::load_in(preferences.clone()).unwrap();
+    let database = config.paths.database.clone();
+    let provider = Arc::new(SqliteProvider::open(&database).unwrap());
+    ScanService::new(provider.clone())
+        .scan(
+            &library,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+    let playback = PlaybackConfig::default();
+    let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+    let ui = AppWindow::new().unwrap();
+    let controller = Controller::new(
+        &ui,
+        provider.clone(),
+        engine.handle(),
+        config,
+        playback.clone(),
+    );
+    let files = provider
+        .search(&SearchRequest {
+            scope: SearchScope::All,
+            ..Default::default()
+        })
+        .unwrap()
+        .results;
+    let door = files
+        .iter()
+        .find(|file| file.filename == "door.wav")
+        .expect("missing door.wav")
+        .clone();
+    ui.set_selected_id(door.id.to_string().into());
+    ui.set_edit_tags("draft-tag".into());
+    ui.set_edit_notes("draft-note".into());
+    ui.set_metadata_dirty(true);
+    controller.capture_metadata(&ui);
+    controller.set_favorite(door.id, true);
+    let sequence = controller.metadata.lock().unwrap().sequence;
+    assert!(controller.wait_metadata(sequence, true).is_ok());
+    controller.shutdown();
+    drop(controller);
+    drop(provider);
+    drop(engine);
+    drop(ui);
+
+    let config = AppConfig::load_in(preferences.clone()).unwrap();
+    let provider = Arc::new(SqliteProvider::open(&database).unwrap());
+    let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+    let ui = AppWindow::new().unwrap();
+    let controller = Controller::new(&ui, provider.clone(), engine.handle(), config, playback);
+    let saved = provider.get_audio(door.id).unwrap();
+    assert!(
+        saved.favorite,
+        "favorite must remain after a new Controller reopens the same SQLite file"
+    );
+    assert!(
+        saved.tags.is_empty(),
+        "unsaved tag drafts must still be absent after reopen"
+    );
+    assert!(
+        saved.notes.is_empty(),
+        "unsaved note drafts must still be absent after reopen"
+    );
+    controller.shutdown();
+}
+
+#[test]
+fn favorites_only_stays_on_after_select_folder_id_and_scopes_to_that_folder() {
+    i_slint_backend_testing::init_no_event_loop();
+    let root = tempfile::tempdir().unwrap();
+    let library = root.path().join("library");
+    for (folder, file) in [
+        ("doors", "door.wav"),
+        ("doors", "creak.wav"),
+        ("wind", "gust.wav"),
+    ] {
+        let directory = library.join(folder);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(file), tiny_wav()).unwrap();
+    }
+    let config = AppConfig::load_in(root.path().join("preferences")).unwrap();
+    let provider = Arc::new(SqliteProvider::open(&config.paths.database).unwrap());
+    ScanService::new(provider.clone())
+        .scan(
+            &library,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+    let playback = PlaybackConfig::default();
+    let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+    let ui = AppWindow::new().unwrap();
+    let controller = Controller::new(&ui, provider.clone(), engine.handle(), config, playback);
+    let files = provider
+        .search(&SearchRequest {
+            scope: SearchScope::All,
+            ..Default::default()
+        })
+        .unwrap()
+        .results;
+    let by_name = |name: &str| {
+        files
+            .iter()
+            .find(|file| file.filename == name)
+            .unwrap_or_else(|| panic!("missing {name}"))
+            .clone()
+    };
+    let door = by_name("door.wav");
+    let creak = by_name("creak.wav");
+    let gust = by_name("gust.wav");
+    let doors = door.folder_id.expect("door folder");
+    let wind = gust.folder_id.expect("wind folder");
+    assert_eq!(creak.folder_id, Some(doors));
+    assert_ne!(doors, wind);
+    controller.set_favorite(door.id, true);
+    controller.set_favorite(gust.id, true);
+    let sequence = controller.metadata.lock().unwrap().sequence;
+    assert!(controller.wait_metadata(sequence, true).is_ok());
+
+    ui.set_favorites_only(true);
+    controller.select_folder_id(doors);
+    assert!(
+        ui.get_favorites_only(),
+        "select_folder_id must not clear the current-folder favorites filter"
+    );
+    assert_eq!(controller.tree.lock().unwrap().selected, Some(doors));
+    assert_eq!(controller.request.lock().unwrap().folder_id, Some(doors));
+    let favorites_in = |folder: i64| {
+        let mut names = provider
+            .search(&SearchRequest {
+                folder_id: Some(folder),
+                scope: SearchScope::All,
+                filters: SearchFilters {
+                    favorites_only: ui.get_favorites_only(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap()
+            .results
+            .into_iter()
+            .map(|file| file.filename.clone())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    assert_eq!(favorites_in(doors), vec!["door.wav".to_string()]);
+    assert!(
+        !favorites_in(doors).contains(&"creak.wav".to_string())
+            && !favorites_in(doors).contains(&"gust.wav".to_string())
+    );
+
+    controller.select_folder_id(wind);
+    assert!(
+        ui.get_favorites_only(),
+        "changing folder must keep favorites_only until the user resets filters"
+    );
+    assert_eq!(controller.tree.lock().unwrap().selected, Some(wind));
+    assert_eq!(controller.request.lock().unwrap().folder_id, Some(wind));
+    assert_eq!(favorites_in(wind), vec!["gust.wav".to_string()]);
+    assert!(!favorites_in(wind).contains(&"door.wav".to_string()));
+    controller.shutdown();
+}
+
+#[test]
+fn favorite_survives_child_process_reopen_of_same_sqlite() {
+    if let Ok(database) = std::env::var("AUDIOLIB_ACCEPT_RESTART_DB") {
+        let id: i64 = std::env::var("AUDIOLIB_ACCEPT_RESTART_ID")
+            .expect("AUDIOLIB_ACCEPT_RESTART_ID")
+            .parse()
+            .expect("audio id");
+        let provider = SqliteProvider::open(std::path::Path::new(&database)).unwrap();
+        let saved = provider.get_audio(id).unwrap();
+        assert!(
+            saved.favorite,
+            "favorite must remain when a new process reopens the same SQLite file"
+        );
+        assert!(
+            saved.tags.is_empty(),
+            "unsaved tag drafts must still be absent in the child process"
+        );
+        assert!(
+            saved.notes.is_empty(),
+            "unsaved note drafts must still be absent in the child process"
+        );
+        return;
+    }
+
+    i_slint_backend_testing::init_no_event_loop();
+    let root = tempfile::tempdir().unwrap();
+    let library = root.path().join("library");
+    for (folder, file) in [
+        ("doors", "door.wav"),
+        ("doors", "creak.wav"),
+        ("wind", "gust.wav"),
+    ] {
+        let directory = library.join(folder);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(file), tiny_wav()).unwrap();
+    }
+    let preferences = root.path().join("preferences");
+    let config = AppConfig::load_in(preferences.clone()).unwrap();
+    let database = config.paths.database.clone();
+    let provider = Arc::new(SqliteProvider::open(&database).unwrap());
+    ScanService::new(provider.clone())
+        .scan(
+            &library,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+    let playback = PlaybackConfig::default();
+    let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+    let ui = AppWindow::new().unwrap();
+    let controller = Controller::new(
+        &ui,
+        provider.clone(),
+        engine.handle(),
+        config,
+        playback.clone(),
+    );
+    let files = provider
+        .search(&SearchRequest {
+            scope: SearchScope::All,
+            ..Default::default()
+        })
+        .unwrap()
+        .results;
+    let door = files
+        .iter()
+        .find(|file| file.filename == "door.wav")
+        .expect("missing door.wav")
+        .clone();
+    ui.set_selected_id(door.id.to_string().into());
+    ui.set_edit_tags("draft-tag".into());
+    ui.set_edit_notes("draft-note".into());
+    ui.set_metadata_dirty(true);
+    controller.capture_metadata(&ui);
+    controller.set_favorite(door.id, true);
+    let sequence = controller.metadata.lock().unwrap().sequence;
+    assert!(controller.wait_metadata(sequence, true).is_ok());
+    controller.shutdown();
+    drop(controller);
+    drop(provider);
+    drop(engine);
+    drop(ui);
+
+    let exe = std::env::current_exe().expect("test executable");
+    let output = std::process::Command::new(&exe)
+        .arg("favorite_survives_child_process_reopen_of_same_sqlite")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("AUDIOLIB_ACCEPT_RESTART_DB", &database)
+        .env("AUDIOLIB_ACCEPT_RESTART_ID", door.id.to_string())
+        .output()
+        .expect("spawn child process to reopen SQLite");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "child process failed to reopen SQLite and confirm favorite persistence\nstatus={:?}\nstdout={stdout}\nstderr={stderr}",
+        output.status
+    );
+}
