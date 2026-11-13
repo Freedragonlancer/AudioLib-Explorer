@@ -4,6 +4,16 @@
 
 按改动风险选择最小充分验证，并记录执行范围和结果。[Rust Validation](Rust_Validation.md) 中的历史结果是已执行证据，不是每次开发都要重跑的清单。保留现有正式测试；GitHub 常规 CI 只检查格式，所有功能测试在本地按范围执行，不增加测试依赖。
 
+### 日常开发的完成条件
+
+普通开发、修复、审查和 PR 任务以受影响的源码检查、交互验收及风险专项通过为完成条件。默认不构建 release、不打包、不跑完整 portable、不更新 `local_release/`，也不刷新 beta 环境；仅在用户明确要求本地试用、交付或发布时进入相应交付流程。已有明确交付要求时直接完成，不为每一步重复询问。
+
+上述默认精简不取消风险触发的必要检查：专项回归若需要当前源码的 release EXE 或包，仍构建所需的最小产物并执行对应检查，不能使用旧二进制或跳过数据安全边界。这不自动触发其余交付步骤、工作安装更新或部署。
+
+Rust 行为开发过程中先跑能验证当前行为的最小测试；准备结束任务时，对最终受影响源码补齐一次格式、严格 Clippy 和必要回归。失败后只重跑失败及被修复影响的阶段；更换测试 filter 不使原静态检查自动失效，修改 Rust 或测试代码则重新检查受影响范围。新 UI 行为用隔离数据的开发构建检查相关视图即可，不为这次观察先打包或安装。文档和脚本任务按下表验证，不因此新增 Cargo 检查。
+
+日常记录只需说明改动范围、已执行/复用的验证和实际限制。未受影响模块不再逐个列成大型验收清单；没有本地交付时说明安装未更新。数据安全、实际跨进程边界及受影响平台的必要回归仍按下表执行，不能用源码测试替代它们所验证的不同边界。
+
 | 改动范围 | 日常本地验证 |
 | --- | --- |
 | 纯文档、注释 | 检查内容、链接和 `git diff --check`；不运行 Cargo、发布构建或安装。 |
@@ -78,15 +88,23 @@ Clippy 已检查的目标不再额外跑相同配置的 `cargo check`；测试�
 
 完成实际编译/测试后使用 `check-local.ps1 -CleanBuildArtifacts` 或独立缓存维护命令，按默认 40 GiB 预算清理 debug；发布在交付完成后用管线同名开关维护。未超过预算不删除，纯文档或复用未变检查不重复扫描。构建/测试期间不清理，失败时保留缓存和诊断；详见[编译缓存维护](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md)。
 
+一个任务内的多个定向测试或单阶段补测共用一次最终缓存维护，不在每次 `-Stage Tests` 后扫描、清理缓存。只有本次任务实际编译/测试过 Rust 才触发维护；脚本使用 fake Cargo 的合成路由测试不属于 Rust 构建。
+
 GitHub 普通 CI 仅保留一个 Linux 作业，只运行 `cargo fmt --all -- --check`。相关 `main`、`beta`、`codex/**` 推送会触发，纯文档和截图推送跳过；所有 Pull Request 均须返回 required `Linux (fmt)` 结果。`.github/workflows/release.yml` 仅在手动触发时只读核对已发布 Release 的身份、精确资产集合与 SHA256，不构建、不打包、不上传，也不承担运行验收。
 
 开发与发布都按实际改动、直接消费者和发布配置选择验证范围，不因打标签自动扩大到全 workspace。`check-local.ps1` 必须显式选择 `-Package <packages>` 或 `-Workspace`，不再因遗漏参数运行全量检查。单包可用 `-Lib`、`-Bin <name>` 或 `-Test <integration-target>` 三选一，并以 `-TestFilter <substring>` 选择其中的模块或行为；格式、该包 all-targets 的严格 Clippy 仍各执行一次，测试仅执行所选范围。定向执行使用标准 Rust test harness；没有通过测试（包括 filter 未命中、全部 ignored 或缺少结果摘要）会失败。多个目标/过滤条件可直接使用 Cargo 并复用本轮格式/Clippy 结果，避免多次调用入口重复静态检查。
+
+默认 `-Stage All` 保留格式、严格 Clippy 和测试三步。已有仍有效的格式/Clippy 结果时，补测另一个目标或重跑测试使用 `-Stage Tests`；只需静态检查时用 `-Stage Clippy`。省略的阶段输出 `not-requested`，不会自动认定基线有效或报告整套通过。`-Stage Clippy` 拒绝测试选择参数，避免把未运行的测试误认为覆盖。新增/修改源码或测试时，补齐失效的静态检查和受影响测试；`-Stage` 不用于绕过已知失败。
 
 ```powershell
 # 仅改变桌面搜索任务行为：其他稳定模块及 CLI 测试不进入本轮。
 ./tools/check-local.ps1 -Package audiolib-desktop -Bin AudioLibExplorer -TestFilter controller::search_tasks::tests:: -Asio
 # 只改变数据库搜索片段行为：运行对应集成 target。
 ./tools/check-local.ps1 -Package audiolib-db -Test search_fragments
+# 同一源码再验证另一个受影响目标，复用上一步格式/Clippy；两项测试互不替代。
+./tools/check-local.ps1 -Package audiolib-db -Test search_paging -Stage Tests
+# 已有测试结果仍有效，本轮只补静态检查；不宣称重新跑过测试。
+./tools/check-local.ps1 -Package audiolib-db -Stage Clippy
 # 受影响的 Linux 服务端；按无播放设备的发布配置测试，不启动客户端矩阵。
 ./tools/check-local.ps1 -Package audiolib-server -NoDefaultFeatures -Target x86_64-unknown-linux-gnu
 # 工具链或全局构建配置改变、影响无法限定时才选择全工作区。
@@ -101,16 +119,18 @@ GitHub 普通 CI 仅保留一个 Linux 作业，只运行 `cargo fmt --all -- --
 | --- | --- |
 | Rust 开发/发布检查 | 对所选范围和实际交付配置执行一次；全 workspace 仅用于广泛或不确定的影响。 |
 | 专项回归 | 按上表风险追加，保留相关数据安全覆盖；不同专项验证不同边界。 |
-| 构建与打包 | 每份 payload 构建、打包一次；打包器检查实际文件边界、隐私、许可证及归档结构。 |
-| 包运行验收 | 每份实际 payload 验收一次：Windows 用 `validate-portable.ps1`；Mac 打包加 `-ValidateRuntime` 合并结构和原生验收，成功后不再单独运行验收器。 |
-| 本地安装 | 对已验收 payload 核对安装文件哈希、CLI 版本并隔离启动一次；身份与启动通过后不重跑完整 portable。 |
+| 构建与打包 | 明确要求试用、交付或发布时，每份 payload 构建、打包一次；日常任务仅在风险专项需要产物时构建所需范围。打包器检查实际文件边界、隐私、许可证；生成归档时另检查 ZIP 结构。 |
+| 包运行验收 | 为交付产生的每份实际 payload 验收一次：Windows 用 `validate-portable.ps1`；Mac 打包加 `-ValidateRuntime` 合并结构和原生验收，成功后不再单独运行验收器。 |
+| 本地安装 | 请求客户端交付或发布后同步时，对已验收 payload 核对安装文件哈希、CLI 版本并隔离启动一次；日常开发不更新固定安装。身份与启动通过后不重跑完整 portable。 |
 | 发布后远端核验 | 可选手动 workflow，仅核验 Release 身份、资产集合和摘要；不重复本地功能测试。 |
 
 Windows 客户端使用 `tools/build-release.ps1` 构建 desktop/CLI 两个包的 binaries，再运行 `tools/package-portable.ps1 -SkipBuild`。兼容手动入口 `tools/ci-release.ps1 -Tag <tag>` 将这两步和标签身份校验合在一起，并生成运行时为 `not-run` 的报告；二者选一，不串行再跑。它不代替完整 portable 验收。服务端使用专用 `tools/build-server-release.ps1`、打包器及 `tools/validate-server-package.ps1`；Windows 的服务包验收需要构造自有 fixture 时，显式执行 `cargo build -p audiolib-db --bin search-benchmark --release --locked`，不让普通发布构建顺带生成 benchmark。Mac 客户端构建证明保留原构建机路径前缀，便于在另一台 Mac 上核验隐私边界。
 
+Windows 本地快速试用可使用 `windows-local.json` 原生计划，或给打包步骤添加 `-SkipArchive`：不生成 ZIP，但保留一次完整 portable 验收及安装身份/启动检查。旧 latest ZIP 和摘要会被移除，不能把目录模式当成可发布归档；分享归档或发布仍使用正常打包。具体命令、增量缓存和失败续跑见[本地快速验收](Rust_Release_Pipeline.md#本地快速验收)。
+
 原云端 macOS 数据库/服务端生命周期测试、Linux 服务端 Clippy/测试改由匹配平台的本地环境按影响运行。例如在 macOS ARM64 使用 `cargo test -p audiolib-db --lib --tests --locked --target aarch64-apple-darwin`；在 Linux 服务端和数据库均受影响时使用 `cargo test -p audiolib-server -p audiolib-db --all-targets --locked --no-default-features --target x86_64-unknown-linux-gnu`。使用原生 Rust 工具链覆盖仓库默认 Windows target；缺少相应主机或音频硬件时，明确记录未验证，不能以云端冒烟通过代替。
 
-应用变更交付仍需从最新源代码构建、打包并更新固定的 `local_release/`；构建和打包保持同一 ASIO 选择。完整 portable 验证在包目录执行一次，安装后核对所有包内文件（含两份 EXE）的 SHA256、CLI 版本及一次隔离启动，避免对同一有效载荷重复整套检查。隔离启动须使用临时数据目录及显式设置，防止发现工作库或旧库；结束后恢复正常环境。保留正常数据目录、设置和工作库，不能以安装为由覆盖运行时数据。具体安装流程以仓库 [AGENTS.md](../AGENTS.md) 为准。
+明确请求 Windows 客户端本地试用、交付或发布时，仍需从对应最新源代码构建、打包并更新固定的 `local_release/`；日常开发通过不代表该安装已更新。构建和打包保持同一 ASIO 选择。完整 portable 验证在包目录执行一次，安装后核对所有包内文件（含两份 EXE）的 SHA256、CLI 版本及一次隔离启动，避免对同一有效载荷重复整套检查。隔离启动须使用临时数据目录及显式设置，防止发现工作库或旧库；结束后恢复正常环境。保留正常数据目录、设置和工作库，不能以安装为由覆盖运行时数据。具体安装流程以仓库 [AGENTS.md](../AGENTS.md) 为准。
 
 无 ASIO 的本地交付须在 build、package 和 `validate-portable.ps1` 三步都传 `-WithoutAsio`。默认验收仍要求 ASIO 许可证，不根据文件缺失推断构建特性。打包与 portable 验收共用 `validate-portable-licenses.ps1`，在替换有效包或启动应用前拒绝缺失许可证；其回归包含在 `test-package-boundary.ps1` 中。
 

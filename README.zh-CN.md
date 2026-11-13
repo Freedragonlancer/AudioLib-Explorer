@@ -80,6 +80,10 @@ cargo test -p audiolib-db --test search_fragments --locked
 
 纯文档只需检查差异、链接和 `git diff --check`；UI 文案和布局改动检查编译及受影响界面。稳定且未受影响的模块沿用已有通过基线，不重复回归。用 `./tools/check-local.ps1 -Package <packages>` 显式选择受影响包；单包可加 `-Lib`、`-Bin <name>` 或 `-Test <integration-target>`，并以 `-TestFilter <substring>` 进一步选择测试。仅影响广泛或不明确时使用 `-Workspace`；遗漏范围参数会在执行前报错。`-Asio` 选择 Windows 发布特性，同一套检查只跑一遍；无 ASIO 条件分支仅在受改动影响时定向补测。相关源码、依赖、feature、工具链和环境未变时复用通过结果；专项回归和性能测量按实际行为变化触发。详见[验证范围](AGENTS.md#development-checks-by-change-scope)、[稳定模块的回归精简](doc/Testing_Strategy.md#稳定模块的回归精简)和[阶段职责](doc/Testing_Strategy.md#本地验证与云端最小检查)。
 
+日常代码工作通过定向开发检查即可完成；发布构建、打包、完整 portable 验收和安装这一整套交付流程仅在明确要求本地试用、交付或发布时执行。风险专项需要当前 EXE 或包时仍构建所需产物，但不自动触发安装或部署。UI 改动可用隔离数据的开发构建检查。已有仍有效的格式/Clippy 结果时，用 `check-local.ps1 -Stage Tests` 补测选定用例；`-Stage Clippy` 只运行严格静态检查。默认仍为 `-Stage All`，未执行阶段明确记为 `not-requested`。详见[日常开发的完成条件](doc/Testing_Strategy.md#日常开发的完成条件)。
+
+明确要求本地快速试用时，用现有 Release 管线选择 `tools/release-plans/windows-local.json`：省略 ZIP 压缩，保留完整 portable 验收并安装到 `local_release/`，失败后续跑有效阶段。命令和源码身份要求见[本地快速验收](doc/Rust_Release_Pipeline.md#本地快速验收)。
+
 ## 使用
 
 ### 桌面客户端与 CLI
