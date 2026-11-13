@@ -10,7 +10,7 @@ use audiolib_ai::{
 };
 use audiolib_core::ai_search::{AiQueryPlan, validate_ai_query};
 
-const MAX_AI_RECOMMENDATIONS: usize = 5;
+pub(super) const MAX_AI_RECOMMENDATIONS: usize = 6;
 const MAX_AI_AUTO_TASKS: usize = 3;
 
 #[derive(Clone, PartialEq)]

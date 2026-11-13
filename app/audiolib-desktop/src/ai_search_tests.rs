@@ -185,7 +185,7 @@ fn child_replace_query_drafts() {
         .iter()
         .map(|row| row.text.to_string())
         .collect::<Vec<_>>();
-    assert_eq!(queries.len(), 5);
+    assert_eq!(queries.len(), 6);
     ui.invoke_ai_action(1, 0);
     let initial = fixture.controller.request.lock().unwrap().clone();
 
@@ -201,7 +201,7 @@ fn child_replace_query_drafts() {
             fixture.controller.request.lock().unwrap().query,
             initial.query
         );
-        assert_eq!(ui.get_ai_quick_rows().row_count(), 5);
+        assert_eq!(ui.get_ai_quick_rows().row_count(), 6);
     }
     ui.set_duration_min("".into());
     for (kind, index, draft) in [
@@ -232,7 +232,7 @@ fn child_replace_query_drafts() {
     ui.set_query("x".repeat(501).into());
     ui.invoke_ai_action(20, 0);
     wait_for(ui, |ui| {
-        ui.get_search_tasks().row_count() == 7
+        ui.get_search_tasks().row_count() == 8
             && !ui.get_ai_batch_searching()
             && !ui.get_task_restoring()
             && !ui.get_searching()
@@ -280,7 +280,7 @@ fn child_folder_filter_recommendations() {
         .iter()
         .map(|row| row.text.to_string())
         .collect::<Vec<_>>();
-    assert_eq!(recommendations.len(), 5);
+    assert_eq!(recommendations.len(), 6);
     ui.invoke_ai_action(16, 0);
     let ready = fixture.controller.clone();
     wait_for(ui, move |ui| {
@@ -376,7 +376,7 @@ fn child_folder_filter_recommendations() {
     let current = fixture.controller.request.lock().unwrap().clone();
     ui.invoke_ai_action(20, 0);
     wait_for(ui, |ui| {
-        ui.get_search_tasks().row_count() == 6
+        ui.get_search_tasks().row_count() == 7
             && !ui.get_ai_batch_searching()
             && !ui.get_task_restoring()
             && !ui.get_searching()
@@ -633,13 +633,13 @@ fn child_single_keyword_without_pair_hits() {
 }
 
 #[test]
-fn ai_five_verified_recommendations_prefer_single_and_default_to_manual() {
-    isolated("ai_search::child_five_verified_manual_default");
+fn ai_six_verified_recommendations_prefer_single_and_default_to_manual() {
+    isolated("ai_search::child_six_verified_manual_default");
 }
 
 #[test]
 #[ignore = "runs in an owned isolated child"]
-fn child_five_verified_manual_default() {
+fn child_six_verified_manual_default() {
     let fixture = fixture();
     let ui = &fixture.ui;
     assert!(!ui.get_ai_auto_search());
@@ -655,8 +655,8 @@ fn child_five_verified_manual_default() {
                 .update_metadata(
                     file.id,
                     &MetadataPatch {
-                        // More than five pairs match, while the first valid raw
-                        // single (plasma) occurs after those five in the plan.
+                        // Six pairs match, while the first valid raw single
+                        // (plasma) occurs after those pairs in the plan.
                         notes: Some("scifi explosion energy burst plasma explosion metal impact sub boom bass drop".into()),
                         ..Default::default()
                     },
@@ -702,14 +702,22 @@ fn child_five_verified_manual_default() {
             "scifi explosion",
             "energy burst",
             "plasma explosion",
-            "metal impact"
+            "metal impact",
+            "sub boom"
         ]
     );
-    assert_eq!(ui.get_ai_rows().row_count(), 5);
-    for query in &recommendations {
+    assert_eq!(ui.get_ai_rows().row_count(), 6);
+    assert!(scifi_queries().len() > recommendations.len());
+    // A seventh candidate also has real hits; it must stay outside the six-tag
+    // display cap rather than being filtered out as an invalid recommendation.
+    for query in recommendations
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once("bass drop"))
+    {
         assert!(query.split_whitespace().count() <= 2);
         let mut request = fixture.controller.request.lock().unwrap().clone();
-        request.query = query.clone();
+        request.query = query.to_owned();
         request.limit = 1;
         request.offset = 0;
         request.cursor = None;
@@ -723,11 +731,11 @@ fn child_five_verified_manual_default() {
                 .is_empty()
         );
     }
-    // All five toolbar choices are actionable, including the final one.
-    ui.invoke_ai_action(16, 4);
+    // The sixth toolbar choice is independently actionable, not just displayed.
+    ui.invoke_ai_action(16, 5);
     wait_for(ui, |ui| !ui.get_searching());
-    assert_eq!(ui.get_query(), "metal impact");
-    assert_eq!(ui.get_ai_selected(), 4);
+    assert_eq!(ui.get_query(), "sub boom");
+    assert_eq!(ui.get_ai_selected(), 5);
     assert_eq!(ui.get_search_tasks().row_count(), 1);
 
     fixture.controller.capture_search_task(ui);
@@ -736,7 +744,7 @@ fn child_five_verified_manual_default() {
         state.workspace.session.tasks[0].clone()
     };
     // Three free slots admit opted-in automation, but All must refuse the same
-    // capacity atomically rather than silently searching only three of five.
+    // capacity atomically rather than silently searching only three of six.
     fixture
         .controller
         .max_search_tasks
@@ -759,7 +767,7 @@ fn child_five_verified_manual_default() {
     });
     assert!(!ui.get_ai_generating());
     assert_eq!(ui.get_search_tasks().row_count(), 4);
-    assert_eq!(ui.get_ai_quick_rows().row_count(), 5);
+    assert_eq!(ui.get_ai_quick_rows().row_count(), 6);
     assert_cached_ai_queries(&fixture, 1, &recommendations[..3]);
     // Manual All searches every tag independently even with automation off.
     ui.set_ai_auto_search(false);
@@ -771,7 +779,7 @@ fn child_five_verified_manual_default() {
     wait_for(ui, |ui| {
         !ui.get_ai_batch_searching() && !ui.get_task_restoring() && !ui.get_searching()
     });
-    assert_eq!(ui.get_search_tasks().row_count(), 9);
+    assert_eq!(ui.get_search_tasks().row_count(), 10);
     assert_cached_ai_queries(&fixture, 4, &recommendations);
     {
         let state = fixture.controller.task_workspace.lock().unwrap();
@@ -785,6 +793,13 @@ fn child_five_verified_manual_default() {
             assert_eq!(task.definition, expected);
         }
     }
+    // The sixth tag's + action creates exactly one task using the same scope.
+    ui.invoke_ai_action(24, 5);
+    wait_for(ui, |ui| {
+        ui.get_search_tasks().row_count() == 11 && !ui.get_task_restoring() && !ui.get_searching()
+    });
+    assert_eq!(ui.get_query(), "sub boom");
+    assert_cached_ai_queries(&fixture, 10, &recommendations[5..]);
     finish(&fixture);
 }
 

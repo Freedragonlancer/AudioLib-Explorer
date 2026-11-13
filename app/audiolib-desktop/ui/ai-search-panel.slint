@@ -90,7 +90,7 @@ export component AiQuickSearch inherits Rectangle {
     preferred-width: 400px * Theme.ui-scale;
     horizontal-stretch: 1;
     height: 42px * Theme.ui-scale;
-    private property <int> count: min(5, root.rows.length);
+    private property <int> count: min(6, root.rows.length);
     private property <length> chip-width: clamp((root.width - max(0, root.count - 1) * 6px * Theme.ui-scale) / max(1, root.count), 90px * Theme.ui-scale, 240px * Theme.ui-scale);
     private property <length> content-width: root.count * root.chip-width + max(0, root.count - 1) * 6px * Theme.ui-scale;
     private property <bool> overflowing: root.content-width > root.width + 1px;
@@ -101,7 +101,7 @@ export component AiQuickSearch inherits Rectangle {
         vertical-scrollbar-policy: always-off;
         horizontal-scrollbar-policy: root.overflowing ? always-on : always-off;
         for row[index] in root.rows: Rectangle {
-            visible: index < 5;
+            visible: index < root.count;
             x: index * (root.chip-width + 6px * Theme.ui-scale);
             y: root.overflowing ? 0px : (root.height - self.height) / 2;
             width: root.chip-width;
@@ -267,7 +267,7 @@ export component AiSearchPanel inherits Rectangle {
                 Button { text: root.generating ? (root.chinese ? "生成中…" : "Generating…") : (root.chinese ? "生成查询建议" : "Suggest queries"); accessible-label: root.chinese ? "生成查询建议" : "Suggest queries"; enabled: !root.busy && root.prompt != ""; clicked => { root.action(2,0); } }
                 Button { text: root.chinese ? "取消" : "Cancel"; enabled: root.busy || root.batch-searching; clicked => { root.action(3,0); } }
             }
-            Text { text: root.chinese ? "每项 1–2 个词，含一个最强单词推荐。手动“查询全部”搜索最多 5 项；勾选自动搜索仅查询前 3 项。" : "Each suggestion uses 1–2 words, including the strongest single-word option. Search all opens up to 5 tasks; auto-search runs only the first 3."; color: Theme.dim; font-size: Theme.font(12); wrap: word-wrap; }
+            Text { text: root.chinese ? "每项 1–2 个词，含一个最强单词推荐。手动“查询全部”搜索最多 6 项；勾选自动搜索仅查询前 3 项。" : "Each suggestion uses 1–2 words, including the strongest single-word option. Search all opens up to 6 tasks; auto-search runs only the first 3."; color: Theme.dim; font-size: Theme.font(12); wrap: word-wrap; }
             Rectangle { vertical-stretch: 1; min-height: 16px * Theme.ui-scale; }
             Text { text: root.detail; color: Theme.dim; font-size: Theme.font(11); wrap: word-wrap; height: root.detail == "" ? 0px : min(78px * Theme.ui-scale, self.preferred-height); vertical-stretch: 0; overflow: elide; }
             }
@@ -279,7 +279,7 @@ export component AiSearchPanel inherits Rectangle {
                 if root.rows.length > 0 || root.batch-searching: Button { horizontal-stretch: 0; max-width: 120px * Theme.ui-scale;
                     text: root.batch-searching ? (root.chinese ? "搜索中 " : "Searching ") + root.batch-completed + "/" + root.batch-total : (root.chinese ? "查询全部" : "Search all");
                     accessible-label: root.chinese ? "查询全部推荐" : "Search all recommendations";
-                    accessible-description: root.chinese ? "为当前每个推荐创建独立搜索任务，最多 5 个，沿用当前目录和筛选条件" : "Create an independent search task for every current recommendation, up to 5, using the current directory and filters";
+                    accessible-description: root.chinese ? "为当前每个推荐创建独立搜索任务，最多 6 个，沿用当前目录和筛选条件" : "Create an independent search task for every current recommendation, up to 6, using the current directory and filters";
                     enabled: !root.busy && !root.batch-searching && root.rows.length > 0; clicked => { root.action(20,0); }
                 }
             }
