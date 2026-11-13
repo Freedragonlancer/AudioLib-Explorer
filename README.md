@@ -13,7 +13,7 @@
 - 扫描与试听 WAV/BWF、MP3、AIFF、FLAC、Ogg Vorbis 和 OGA/Ogg FLAC；提取内嵌 Metadata。Opus 仅支持标签探测，不支持播放。
 - 本地和服务器模式支持厂商 CSV/TSV/TXT/XLS/XLSX Metadata 导入：先预览和确认匹配，再提交，可回滚导入。
 - 可承载 10 TB 以上的大规模音效素材库。
-- v1.0.0 起，桌面端提供 AI 智能搜索：用自然语言描述声音，得到经当前资料库命中核验的英文关键词，当前 beta 最多 6 个（已发布的 v1.0.0 最多 5 个）。离线词表无需账号；云端模型需自备 HTTPS 供应商、API Key 和模型。详见 [AI 智能搜索](#ai-智能搜索)。
+- v1.0.0 起，桌面端提供 AI 智能搜索：用自然语言描述声音，得到经当前资料库命中核验的英文关键词，当前 beta 主声音最多 6 个，有有效分层素材时总计最多 8 个（已发布的 v1.0.0 最多 5 个）。离线词表无需账号；云端模型需自备 HTTPS 供应商、API Key 和模型。详见 [AI 智能搜索](#ai-智能搜索)。
 
 **AudioLib Explorer helps sound designers build a sound-effects library of their own.**
 
@@ -26,7 +26,7 @@ A free, open-source sound effects (SFX) library manager for sound design, game a
 - Scan and play WAV/BWF, MP3, AIFF, FLAC, Ogg Vorbis and OGA/Ogg FLAC, with embedded Metadata extraction. Opus supports tag probing only, without playback.
 - Import vendor CSV/TSV/TXT/XLS/XLSX Metadata locally or on the server: preview and confirm matches before committing, with import rollback.
 - Scales to sound libraries of 10 TB and more.
-- From v1.0.0, the desktop app can turn a plain-language sound description into English keyword queries that hit the current library: at most six in the current beta, or five in the published v1.0.0. The offline lexicon needs no account; a cloud model needs your own HTTPS provider, API key and model. See [AI search](#ai-search).
+- From v1.0.0, the desktop app can turn a plain-language sound description into English keyword queries that hit the current library: up to six main queries in the current beta, expanding to eight total when useful source layers are verified, or five in the published v1.0.0. The offline lexicon needs no account; a cloud model needs your own HTTPS provider, API key and model. See [AI search](#ai-search).
 
 ![AudioLib Explorer AI search / AI 智能搜索](resources/screenshot-main.png)
 
@@ -34,9 +34,9 @@ Desktop AI search with a sample description and keyword tags. The sound list is 
 
 ## AI search
 
-Desktop AI search shipped in [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0) with up to five verified tags. The current beta raises the tag and Search all limits to six; auto-search remains limited to three tasks. The server and `AudioLibCli` do not expose it. Behavior and limits: [AI 智能搜索](doc/Rust_AI_Search.md). [Research and design](doc/AI_Keyword_Search_Design.md) keeps notes and concepts that 1.0 does not ship. The SVG wireframes in that note are not application screenshots.
+Desktop AI search shipped in [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0) with up to five verified tags. The current beta keeps up to six main tags, or eight main and source-layer tags together when useful layers have verified hits. Color and Main/Layer markers distinguish their roles. Search all searches the current set; auto-search remains limited to three tasks. The server and `AudioLibCli` do not expose it. Behavior and limits: [AI 智能搜索](doc/Rust_AI_Search.md). [Research and design](doc/AI_Keyword_Search_Design.md) keeps notes and concepts that 1.0 does not ship. The SVG wireframes in that note are not application screenshots.
 
-Turn AI on in the desktop search bar and describe the sound in 1–500 characters. **Tag生成 / Generate Tags** asks the offline lexicon, or a configured model, for plain-text keywords, then searches the current folder, scope and filters. The current beta keeps at most six queries that have hits, from up to twelve raw candidates. Each query is one or two English words, and a space means AND. A verified single keyword is placed first when one exists. The tag text searches the current task. The tag **+** opens one new task with the same folder, scope and filters and does not call the model again. **Layers / 分层素材** starts checked and can add separate source-layer queries; clear it to ask only for a finished sound. **Search all / 查询全部** opens one task per verified tag, at most six, and rejects the whole batch when too few task slots remain. **Auto-search 3 tasks after generation / 生成后自动搜索 3 个任务** starts off and runs at most three recommendations when enabled.
+Turn AI on in the desktop search bar and describe the sound in 1–500 characters. **Tag生成 / Generate Tags** asks the offline lexicon, or a configured model, for plain-text keywords, then searches the current folder, scope and filters. The current beta verifies up to twelve raw candidates and keeps at most six main queries, or eight main and layer queries together when useful layers have hits; main queries remain capped at six. Each query is one or two English words, and a space means AND. A verified single keyword is placed first when one exists. The tag text searches the current task. The tag **+** opens one new task with the same folder, scope and filters and does not call the model again. **Allow layers / 允许分层** starts checked and lets the model assess whether independent components such as impact, bass or debris would help. It expands to eight only when useful layers have verified hits; ordinary requests stay at six. Clear it to ask only for the main sound. **Search all / 查询全部** opens one task per verified tag, up to six without layers or eight total with layers, and rejects the whole batch when too few task slots remain. **Auto-search 3 tasks after generation / 生成后自动搜索 3 个任务** starts off and runs at most three recommendations when enabled.
 
 Offline use needs no account, network or API key. The built-in lexicon is version `1.0.0-UCS8.2.1`: 431 keywords, 753 UCS 8.2.1 subcategories and 19 scene recipes. Offline search ranks those stored entries. A general language model runs only after you configure a cloud provider. Open **Settings → AI Search… / 设置 → AI智能搜索…** and choose **Local reference (offline) / 本地词表（离线）**.
 
@@ -48,9 +48,9 @@ The request sends the description, the selected prompt and a bounded reference e
 
 ## AI 智能搜索
 
-桌面端 AI 智能搜索随 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0) 发布，该正式版最多保留 5 个已核验标签。当前 beta 将标签与“查询全部”上限增至 6 个，自动搜索仍最多 3 项。服务端和 `AudioLibCli` 不提供该功能。行为与限制见 [AI 智能搜索](doc/Rust_AI_Search.md)。[研究与设计](doc/AI_Keyword_Search_Design.md) 保留了 1.0 未交付的概念；其中的 SVG 线框不是应用截图。
+桌面端 AI 智能搜索随 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0) 发布，该正式版最多保留 5 个已核验标签。当前 beta 主声音标签最多 6 个；允许分层且有有效分层素材时，总计最多 8 个，主声音和分层标签以颜色及“主／层”标识区分。“查询全部”搜索当前整组标签，自动搜索仍最多 3 项。服务端和 `AudioLibCli` 不提供该功能。行为与限制见 [AI 智能搜索](doc/Rust_AI_Search.md)。[研究与设计](doc/AI_Keyword_Search_Design.md) 保留了 1.0 未交付的概念；其中的 SVG 线框不是应用截图。
 
-在桌面搜索条打开 AI，用 1–500 个字符描述声音，再点 **Tag生成**。离线词表或已配置的模型给出纯文本关键词，再按当前目录、搜索范围和筛选做实际检索；当前 beta 从最多 12 条原始候选中保留有命中的查询，最多 6 条。每条是 1 或 2 个英文词，空格表示 AND。能核验出单词时把它放在第一位。点击标签正文在当前任务搜索；标签上的 **+** 用相同目录、范围和筛选新建一个任务，不再请求模型。**分层素材** 默认勾选，可同时给出素材层查询；取消后只请求成品声音。**查询全部** 为每个已核验标签各建一个任务，最多 6 个，任务名额不足时整批拒绝。**生成后自动搜索 3 个任务** 默认关闭，开启后仍最多搜索前 3 项。
+在桌面搜索条打开 AI，用 1–500 个字符描述声音，再点 **Tag生成**。离线词表或已配置的模型给出纯文本关键词，再按当前目录、搜索范围和筛选做实际检索；当前 beta 从最多 12 条原始候选中保留有命中的查询：无有效分层时最多 6 条；有有效分层时主声音与素材层总计最多 8 条，主声音本身仍最多 6 条。每条是 1 或 2 个英文词，空格表示 AND。能核验出单词时把它放在第一位。点击标签正文在当前任务搜索；标签上的 **+** 用相同目录、范围和筛选新建一个任务，不再请求模型。**允许分层** 默认勾选，允许按声音设计需求评估冲击、低频、碎片等独立素材层；需要分层且素材层通过命中核验时才扩展到 8 条。普通需求仍最多 6 条；取消后只推荐主声音。**查询全部** 为每个已核验标签各建一个任务，无分层最多 6 个、有分层总计最多 8 个，任务名额不足时整批拒绝。**生成后自动搜索 3 个任务** 默认关闭，开启后仍最多搜索前 3 项。
 
 离线词表版本 `1.0.0-UCS8.2.1`，含 431 条关键词、753 条 UCS 8.2.1 子类和 19 个场景配方，按条目排序，不是通用语言模型，也不需要账号、网络或 API Key。在 **设置 → AI智能搜索…** 选择 **本地词表（离线）**（英文界面为 **Local reference (offline)**）。
 

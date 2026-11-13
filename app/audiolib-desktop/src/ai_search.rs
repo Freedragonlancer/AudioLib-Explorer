@@ -8,9 +8,14 @@ use audiolib_ai::{
     reference::ReferenceIndex,
     storage::ProfileStore,
 };
-use audiolib_core::ai_search::{AiQueryPlan, validate_ai_query};
+use audiolib_core::ai_search::{
+    AiQueryKind, AiQueryPlan, MAX_AI_LAYERED_RECOMMENDATIONS, MAX_AI_MAIN_RECOMMENDATIONS,
+    validate_ai_query,
+};
 
-pub(super) const MAX_AI_RECOMMENDATIONS: usize = 6;
+// The admitted plan determines whether six main queries or eight mixed queries
+// are available; task admission still needs the largest supported batch bound.
+pub(super) const MAX_AI_RECOMMENDATIONS: usize = MAX_AI_LAYERED_RECOMMENDATIONS;
 const MAX_AI_AUTO_TASKS: usize = 3;
 
 #[derive(Clone, PartialEq)]
@@ -38,7 +43,7 @@ struct FormDraft {
 struct SearchControls {
     text: [slint::SharedString; 8],
     choices: [i32; 6],
-    flags: [bool; 3],
+    flags: [bool; 4],
 }
 
 impl SearchControls {
@@ -66,6 +71,7 @@ impl SearchControls {
                 ui.get_sort_descending(),
                 ui.get_favorites_only(),
                 ui.get_tagged_only(),
+                ui.get_ai_layers(),
             ],
         }
     }
@@ -780,6 +786,7 @@ impl Controller {
         context: &Context,
         cancel: &Arc<AtomicBool>,
         plan: &mut AiQueryPlan,
+        allow_layers: bool,
     ) -> audiolib_core::Result<()> {
         let cancelled = || {
             cancel.load(Ordering::Acquire)
@@ -814,7 +821,11 @@ impl Controller {
         };
         let mut seen = std::collections::HashSet::new();
         let mut verified = Vec::new();
-        let ranked_queries = std::mem::take(&mut plan.queries);
+        let mut ranked_queries = std::mem::take(&mut plan.queries);
+        ranked_queries.retain(|query| allow_layers || query.kind == AiQueryKind::Main);
+        // A repeated search is represented once as a main sound rather than as
+        // its component. Preserve provider ranking within each role.
+        ranked_queries.sort_by_key(|query| query.kind == AiQueryKind::Layer);
         for mut query in ranked_queries.iter().cloned() {
             if cancelled() {
                 return Err(audiolib_core::Error::Cancelled);
@@ -842,8 +853,8 @@ impl Controller {
                 verified.push(query);
             }
         }
-        // Provider/local order is the ranking. Prefer its strongest verified
-        // single word, preserving the relative order of the remaining schemes.
+        // Keep the role/rank order apart from its strongest verified single
+        // word, preserving the relative order of the remaining schemes.
         if let Some(index) = verified
             .iter()
             .position(|query| query.text.split_whitespace().count() == 1)
@@ -876,7 +887,24 @@ impl Controller {
         }
         let mut final_seen = std::collections::HashSet::new();
         verified.retain(|query| final_seen.insert(ai_query_key(&query.text)));
-        verified.truncate(MAX_AI_RECOMMENDATIONS);
+        let limit = if verified
+            .iter()
+            .any(|query| query.kind == AiQueryKind::Layer)
+        {
+            MAX_AI_LAYERED_RECOMMENDATIONS
+        } else {
+            MAX_AI_MAIN_RECOMMENDATIONS
+        };
+        let mut main_count = 0;
+        verified.retain(|query| {
+            if query.kind == AiQueryKind::Main {
+                main_count += 1;
+                main_count <= MAX_AI_MAIN_RECOMMENDATIONS
+            } else {
+                true
+            }
+        });
+        verified.truncate(limit);
         if cancelled() || provider.search_revision()? != Some(revision) {
             return Err(audiolib_core::Error::Cancelled);
         }
@@ -1229,6 +1257,10 @@ impl Controller {
         // One submission owns its automatic-search choice. Profile operations
         // and model probes never create tasks, even if the option is enabled.
         let generating = matches!(&job, Job::Local(..) | Job::Generate(..));
+        let allow_layers = match &job {
+            Job::Local(_, layers) | Job::Generate(_, _, layers, _) => *layers,
+            _ => false,
+        };
         let auto_search = generating && ui.get_ai_auto_search();
         if saving {
             *self.ai.saves.lock().unwrap() = true;
@@ -1411,6 +1443,7 @@ impl Controller {
                         &context,
                         &cancel,
                         &mut plan,
+                        allow_layers,
                     ) {
                         Ok(()) => Ok(Reply::Plan(plan, evidence)),
                         Err(audiolib_core::Error::Cancelled) => Err(AiError::Cancelled),
@@ -1453,12 +1486,18 @@ impl Controller {
                 }
                 match result {
                     Ok(Reply::Plan(plan, evidence)) => {
+                        let recommendation_limit = if plan.queries.iter().any(|query| query.kind == AiQueryKind::Layer) {
+                            MAX_AI_LAYERED_RECOMMENDATIONS
+                        } else {
+                            MAX_AI_MAIN_RECOMMENDATIONS
+                        };
                         let mut seen = std::collections::HashSet::new();
                         let rows = plan
                             .queries
                             .into_iter()
                             .filter(|q| seen.insert(ai_query_key(&q.text)))
                             .map(|q| crate::AiSuggestion {
+                                is_layer: q.kind == AiQueryKind::Layer,
                                 text: q.text.into(),
                                 detail: format!(
                                     "{} · {}\nUCS: {} · ref: {}",
@@ -1489,7 +1528,7 @@ impl Controller {
                         }
                         let verified_search = context.search;
                         *c.ai.context.lock().unwrap() = Some(context);
-                        let status: slint::SharedString = format!("{} {} {}", evidence, plan.cautions.join(" · "), if count < MAX_AI_RECOMMENDATIONS {
+                        let status: slint::SharedString = format!("{} {} {}", evidence, plan.cautions.join(" · "), if count < recommendation_limit {
                             c.localized(&format!("当前条件下仅有 {count} 个有结果的推荐方案"), &format!("Only {count} recommended queries have results under the current conditions"))
                         } else { "".into() }).trim().into();
                         *c.ai.verified_search.lock().unwrap() = Some(VerifiedSearch {

@@ -2,6 +2,119 @@
 //! Real controller callbacks with an owned library and no external provider traffic.
 use super::*;
 
+fn owned_ai_plan(
+    queries: &[(&str, audiolib_core::ai_search::AiQueryKind)],
+) -> audiolib_core::ai_search::AiQueryPlan {
+    audiolib_core::ai_search::AiQueryPlan {
+        schema_version: 1,
+        intent: "owned layered sound".into(),
+        queries: queries
+            .iter()
+            .map(|(text, kind)| audiolib_core::ai_search::AiQuery {
+                text: (*text).into(),
+                reason: format!("Owned recommendation for {text}"),
+                kind: *kind,
+                // The presentation label deliberately cannot distinguish roles.
+                layer: "owned shared label".into(),
+                source_ids: Vec::new(),
+                cat_ids: Vec::new(),
+            })
+            .collect(),
+        cautions: Vec::new(),
+    }
+}
+
+fn seed_owned_ai_terms(fixture: &Fixture, terms: &[&str]) {
+    let file = fixture
+        .provider
+        .search(&SearchRequest {
+            query: "gore one".into(),
+            ..Default::default()
+        })
+        .unwrap()
+        .results
+        .remove(0);
+    fixture
+        .provider
+        .update_metadata(
+            file.id,
+            &MetadataPatch {
+                notes: Some(terms.join(" ")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+}
+
+type AiResponseGate = (
+    std::sync::mpsc::SyncSender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+
+// A finite owned provider exercises parsing, actual-library verification and UI
+// publication together. The optional gate holds a reply after receiving its POST.
+fn install_owned_ai_provider(
+    fixture: &Fixture,
+    plans: Vec<audiolib_core::ai_search::AiQueryPlan>,
+    gate: Option<AiResponseGate>,
+) -> std::thread::JoinHandle<()> {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let worker = std::thread::spawn(move || {
+        for plan in plans {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let header = String::from_utf8(head).unwrap();
+            assert!(header.starts_with("POST /chat/completions HTTP/1.1"));
+            let length = header
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            let _: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if let Some((accepted, released)) = &gate {
+                accepted.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            let reply = serde_json::json!({
+                "choices": [{"finish_reason": "stop", "message": {
+                    "content": serde_json::to_string(&plan).unwrap()
+                }}]
+            })
+            .to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).unwrap();
+        }
+    });
+    let ui = &fixture.ui;
+    ui.invoke_ai_action(0, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    ui.invoke_ai_action(9, 0);
+    ui.set_ai_protocol(0);
+    ui.invoke_ai_action(12, 0);
+    ui.set_ai_endpoint(endpoint.into());
+    ui.set_ai_model("owned-layered-model".into());
+    ui.set_ai_key("owned-layered-key".into());
+    ui.invoke_ai_action(8, 0);
+    wait_for(ui, |ui| {
+        !ui.get_ai_busy() && ui.get_ai_provider_index() == 1
+    });
+    worker
+}
+
 fn scifi_queries() -> Vec<String> {
     audiolib_ai::reference::ReferenceIndex::embedded()
         .local_plan("科幻爆炸", true)
@@ -280,7 +393,7 @@ fn child_folder_filter_recommendations() {
         .iter()
         .map(|row| row.text.to_string())
         .collect::<Vec<_>>();
-    assert_eq!(recommendations.len(), 6);
+    assert_eq!(recommendations.len(), 8);
     ui.invoke_ai_action(16, 0);
     let ready = fixture.controller.clone();
     wait_for(ui, move |ui| {
@@ -374,9 +487,10 @@ fn child_folder_filter_recommendations() {
     assert_eq!(ui.get_query(), recommendations[1]);
     assert_plan(1);
     let current = fixture.controller.request.lock().unwrap().clone();
+    let expected_tasks = 1 + recommendations.len();
     ui.invoke_ai_action(20, 0);
-    wait_for(ui, |ui| {
-        ui.get_search_tasks().row_count() == 7
+    wait_for(ui, move |ui| {
+        ui.get_search_tasks().row_count() == expected_tasks
             && !ui.get_ai_batch_searching()
             && !ui.get_task_restoring()
             && !ui.get_searching()
@@ -633,6 +747,314 @@ fn child_single_keyword_without_pair_hits() {
 }
 
 #[test]
+fn ai_layered_limit_requires_verified_layers_and_has_no_fixed_role_quota() {
+    isolated("ai_search::child_layered_limit_admission");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_layered_limit_admission() {
+    use audiolib_core::ai_search::AiQueryKind::{Layer, Main};
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    let mains = [
+        "explosion",
+        "blast",
+        "plasma",
+        "energy",
+        "impact",
+        "whoosh",
+        "rumble",
+        "crackle",
+    ];
+    let layers = ["spark", "debris", "metal", "bass", "rattle", "tail"];
+    let terms = mains.iter().chain(&layers).copied().collect::<Vec<_>>();
+    seed_owned_ai_terms(&fixture, &terms);
+    search(&fixture, "", 4);
+    let main_queries = mains.iter().map(|text| (*text, Main)).collect::<Vec<_>>();
+    let main_only = owned_ai_plan(&main_queries);
+    let mut zero_hit_queries = main_queries.clone();
+    zero_hit_queries.extend([("layerzeroalpha", Layer), ("layerzerobeta", Layer)]);
+    let mut disabled_queries = main_queries;
+    disabled_queries.extend([("spark", Layer), ("debris", Layer)]);
+    let layer_heavy_queries = mains[..2]
+        .iter()
+        .map(|text| (*text, Main))
+        .chain(layers.iter().map(|text| (*text, Layer)))
+        .collect::<Vec<_>>();
+    let server = install_owned_ai_provider(
+        &fixture,
+        vec![
+            main_only,
+            owned_ai_plan(&zero_hit_queries),
+            owned_ai_plan(&disabled_queries),
+            owned_ai_plan(&layer_heavy_queries),
+        ],
+        None,
+    );
+    ui.set_ai_auto_search(false);
+    ui.set_ai_prompt("owned layered sound".into());
+    for (allow_layers, expected, expected_layers) in
+        [(true, 6, 0), (true, 6, 0), (false, 6, 0), (true, 8, 6)]
+    {
+        ui.set_ai_layers(allow_layers);
+        ui.invoke_ai_action(2, 0);
+        wait_for(ui, |ui| !ui.get_ai_busy());
+        assert!(!ui.get_ai_error(), "{}", ui.get_ai_status());
+        let rows = ui.get_ai_quick_rows().iter().collect::<Vec<_>>();
+        assert_eq!(rows.len(), expected);
+        assert_eq!(ui.get_ai_rows().row_count(), expected);
+        assert_eq!(
+            rows.iter().filter(|row| row.is_layer).count(),
+            expected_layers
+        );
+        assert!(rows.iter().filter(|row| !row.is_layer).count() <= 6);
+        assert_eq!(rows[0].text, "explosion");
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.text.to_string())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            expected
+        );
+        assert_eq!(ui.get_search_tasks().row_count(), 1);
+        assert!(!ui.get_ai_batch_searching());
+        if expected_layers == 0 {
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row.text.to_string())
+                    .collect::<Vec<_>>(),
+                mains[..6]
+            );
+        }
+    }
+    server.join().unwrap();
+    finish(&fixture);
+}
+
+#[test]
+fn ai_eight_typed_tags_support_last_actions_and_atomic_all_tasks() {
+    isolated("ai_search::child_eight_typed_tags");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_eight_typed_tags() {
+    use audiolib_core::ai_search::AiQueryKind::{Layer, Main};
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    let mains = [
+        "explosion",
+        "blast",
+        "plasma",
+        "energy",
+        "impact",
+        "whoosh",
+        "rumble",
+        "crackle",
+    ];
+    let mut queries = mains.iter().map(|text| (*text, Main)).collect::<Vec<_>>();
+    queries.extend([
+        ("spark", Layer),
+        ("debris", Layer),
+        // A duplicate layer must not recolor a verified main recommendation.
+        ("explosion", Layer),
+        ("blast", Main),
+    ]);
+    let terms = mains
+        .iter()
+        .copied()
+        .chain(["spark", "debris"])
+        .collect::<Vec<_>>();
+    seed_owned_ai_terms(&fixture, &terms);
+    choose_gore(&fixture);
+    ui.set_tag_filter("gore".into());
+    ui.set_search_scope_index(1);
+    search(&fixture, "gore", 3);
+    let server = install_owned_ai_provider(&fixture, vec![owned_ai_plan(&queries)], None);
+    ui.set_ai_auto_search(false);
+    ui.set_ai_layers(true);
+    ui.set_ai_prompt("owned layered sound".into());
+    ui.invoke_ai_action(2, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_error(), "{}", ui.get_ai_status());
+    let rows = ui.get_ai_quick_rows().iter().collect::<Vec<_>>();
+    let texts = rows
+        .iter()
+        .map(|row| row.text.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        [
+            "explosion",
+            "blast",
+            "plasma",
+            "energy",
+            "impact",
+            "whoosh",
+            "spark",
+            "debris"
+        ]
+    );
+    assert_eq!(ui.get_ai_rows().row_count(), 8);
+    for (index, row) in rows.iter().enumerate() {
+        assert_eq!(row.is_layer, index >= 6);
+        assert_eq!(
+            ui.get_ai_rows().row_data(index).unwrap().is_layer,
+            row.is_layer
+        );
+    }
+    assert_eq!(
+        texts.iter().collect::<std::collections::HashSet<_>>().len(),
+        8
+    );
+    assert_eq!(ui.get_search_tasks().row_count(), 1);
+    // The eighth body is fully actionable, preserving admitted conditions.
+    let before = fixture.controller.request.lock().unwrap().clone();
+    ui.invoke_ai_action(16, 7);
+    let ready = fixture.controller.clone();
+    wait_for(ui, move |ui| !ui.get_searching() && fully_published(&ready));
+    assert_eq!(ui.get_query(), "debris");
+    assert_eq!(ui.get_ai_selected(), 7);
+    assert_eq!(ui.get_search_tasks().row_count(), 1);
+    let after = fixture.controller.request.lock().unwrap().clone();
+    assert_eq!(after.folder_id, before.folder_id);
+    assert_eq!(after.filters, before.filters);
+    assert_eq!(after.scope, before.scope);
+    assert_eq!(ui.get_rows().row_count(), 1);
+    // The matching + action creates exactly one independently warmed task.
+    fixture
+        .controller
+        .max_search_tasks
+        .store(2, Ordering::Release);
+    ui.invoke_ai_action(24, 7);
+    wait_for(ui, |ui| {
+        ui.get_search_tasks().row_count() == 2 && !ui.get_task_restoring() && !ui.get_searching()
+    });
+    assert_eq!(ui.get_query(), "debris");
+    assert_cached_ai_queries(&fixture, 1, &texts[7..]);
+    let source = {
+        fixture.controller.capture_search_task(ui);
+        let state = fixture.controller.task_workspace.lock().unwrap();
+        state.workspace.session.tasks[1].clone()
+    };
+    // Seven slots cannot admit an eight-tag batch; zero tasks must be created.
+    fixture
+        .controller
+        .max_search_tasks
+        .store(9, Ordering::Release);
+    ui.invoke_ai_action(20, 0);
+    assert_eq!(ui.get_search_tasks().row_count(), 2);
+    assert_eq!(active_id(ui), source.id);
+    assert_eq!(ui.get_query(), source.definition.query);
+    assert!(!ui.get_ai_batch_searching());
+    assert!(ui.get_ai_status().contains("No new tasks"));
+    fixture
+        .controller
+        .max_search_tasks
+        .store(10, Ordering::Release);
+    ui.invoke_ai_action(20, 0);
+    wait_for(ui, |ui| {
+        ui.get_search_tasks().row_count() == 10
+            && !ui.get_ai_batch_searching()
+            && !ui.get_task_restoring()
+            && !ui.get_searching()
+    });
+    assert_cached_ai_queries(&fixture, 2, &texts);
+    {
+        let state = fixture.controller.task_workspace.lock().unwrap();
+        let batch = &state.workspace.session.tasks[2..];
+        assert_eq!(batch.len(), 8);
+        assert_eq!(
+            batch
+                .iter()
+                .map(|task| &task.id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            8
+        );
+        assert_eq!(
+            batch
+                .iter()
+                .map(|task| &task.definition.query)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            8
+        );
+        for task in batch {
+            let mut expected = source.definition.clone();
+            expected.query = task.definition.query.clone();
+            assert_eq!(task.definition, expected);
+        }
+    }
+    server.join().unwrap();
+    finish(&fixture);
+}
+
+#[test]
+fn ai_layer_permission_change_rejects_pending_generation_and_auto_tasks() {
+    isolated("ai_search::child_layer_permission_changed");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_layer_permission_changed() {
+    use audiolib_core::ai_search::AiQueryKind::{Layer, Main};
+    use std::sync::mpsc;
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    seed_owned_ai_terms(
+        &fixture,
+        &[
+            "explosion",
+            "blast",
+            "plasma",
+            "energy",
+            "impact",
+            "whoosh",
+            "spark",
+            "debris",
+        ],
+    );
+    search(&fixture, "", 4);
+    let plan = owned_ai_plan(&[
+        ("explosion", Main),
+        ("blast", Main),
+        ("plasma", Main),
+        ("energy", Main),
+        ("impact", Main),
+        ("whoosh", Main),
+        ("spark", Layer),
+        ("debris", Layer),
+    ]);
+    let (accepted, received) = mpsc::sync_channel(1);
+    let (release, released) = mpsc::sync_channel(1);
+    let server = install_owned_ai_provider(&fixture, vec![plan], Some((accepted, released)));
+    ui.set_ai_layers(true);
+    ui.set_ai_auto_search(true);
+    ui.set_ai_prompt("owned layered sound".into());
+    ui.invoke_ai_action(2, 0);
+    received.recv_timeout(Duration::from_secs(5)).unwrap();
+    // This also covers an unsent property change, without relying on the widget's
+    // explicit cancellation callback to invalidate the old layer permission.
+    ui.set_ai_layers(false);
+    release.send(()).unwrap();
+    wait_for(ui, |ui| {
+        !ui.get_ai_busy()
+            && !ui.get_ai_batch_searching()
+            && !ui.get_task_restoring()
+            && !ui.get_searching()
+    });
+    assert_eq!(ui.get_ai_rows().row_count(), 0);
+    assert_eq!(ui.get_ai_quick_rows().row_count(), 0);
+    assert_eq!(ui.get_search_tasks().row_count(), 1);
+    assert_eq!(ui.get_ai_batch_total(), 0);
+    assert!(ui.get_ai_status().contains("context changed"));
+    server.join().unwrap();
+    finish(&fixture);
+}
+
+#[test]
 fn ai_six_verified_recommendations_prefer_single_and_default_to_manual() {
     isolated("ai_search::child_six_verified_manual_default");
 }
@@ -640,6 +1062,7 @@ fn ai_six_verified_recommendations_prefer_single_and_default_to_manual() {
 #[test]
 #[ignore = "runs in an owned isolated child"]
 fn child_six_verified_manual_default() {
+    use audiolib_core::ai_search::AiQueryKind::Main;
     let fixture = fixture();
     let ui = &fixture.ui;
     assert!(!ui.get_ai_auto_search());
@@ -684,6 +1107,18 @@ fn child_six_verified_manual_default() {
     let original = ui.get_ai_quick_rows().row_data(1).unwrap();
     assert_eq!(fallback.detail, original.detail);
 
+    // This regression owns the ordinary six-tag contract, independent of how
+    // many explicitly typed layers an offline recipe now supplies.
+    let plan = owned_ai_plan(&[
+        ("scifi explosion", Main),
+        ("energy burst", Main),
+        ("plasma explosion", Main),
+        ("metal impact", Main),
+        ("sub boom", Main),
+        ("bass drop", Main),
+        ("plasma", Main),
+    ]);
+    let server = install_owned_ai_provider(&fixture, vec![plan.clone(), plan], None);
     ui.set_ai_layers(true);
     ui.invoke_ai_action(2, 0);
     assert!(ui.get_ai_generating());
@@ -800,6 +1235,7 @@ fn child_six_verified_manual_default() {
     });
     assert_eq!(ui.get_query(), "sub boom");
     assert_cached_ai_queries(&fixture, 10, &recommendations[5..]);
+    server.join().unwrap();
     finish(&fixture);
 }
 
