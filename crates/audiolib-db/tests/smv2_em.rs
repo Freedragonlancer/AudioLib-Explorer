@@ -220,15 +220,15 @@ fn em_03_corrupt_id3_comm_txxx_never_panics() {
 }
 
 #[test]
-fn em_04_legacy_encodings_decode_like_s8() {
+fn em_04_legacy_encodings_decode_gbk_shift_jis_and_latin1() {
     // GBK 爆炸, Shift-JIS 効果音, Latin-1 café.
-    let samples: [(&str, &[u8]); 3] = [
-        ("gbk", &[0xB1, 0xAC, 0xD5, 0xA8]),
-        ("shift_jis", &[0x8C, 0xF8, 0x89, 0xCA, 0x89, 0xB9]),
-        ("latin1", &[0x63, 0x61, 0x66, 0xE9]),
+    let samples: [(&str, &[u8], &str); 3] = [
+        ("gbk", &[0xB1, 0xAC, 0xD5, 0xA8], "爆炸"),
+        ("shift_jis", &[0x8C, 0xF8, 0x89, 0xCA, 0x89, 0xB9], "効果音"),
+        ("latin1", &[0x63, 0x61, 0x66, 0xE9], "café"),
     ];
     let mut out = serde_json::Map::new();
-    for (name, raw) in samples {
+    for (name, raw, expected) in samples {
         let bytes = riff(&[
             (b"bext", bext(raw, 602)),
             (b"LIST", info(&[(b"ICMT", raw)])),
@@ -237,6 +237,16 @@ fn em_04_legacy_encodings_decode_like_s8() {
         let path = dir.path().join("e.wav");
         fs::write(&path, &bytes).unwrap();
         let m = audiolib_audio::probe(&path).unwrap();
+        assert_eq!(m.bext_description, expected, "{name} bext");
+        assert_eq!(m.attributes["bwf_description"], expected, "{name} bwf");
+        assert_eq!(
+            m.attributes["wav_metadata"]["riff_info"]["ICMT"], expected,
+            "{name} INFO"
+        );
+        assert_eq!(
+            m.attributes["wav_metadata"]["fields"]["description"], expected,
+            "{name} field"
+        );
         out.insert(
             name.into(),
             json!({ "bext_description": m.bext_description, "attributes": m.attributes }),

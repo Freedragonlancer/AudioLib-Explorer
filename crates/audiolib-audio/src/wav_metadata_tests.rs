@@ -685,6 +685,97 @@ fn id3_artwork_restores_unsynchronisation_and_skips_frame_prefixes() {
 }
 
 #[test]
+fn unmarked_info_text_decodes_gbk_and_shift_jis_without_breaking_utf8_or_latin1() {
+    let gbk = |value: &str| encoding_rs::GBK.encode(value).0.into_owned();
+    let sjis = |value: &str| encoding_rs::SHIFT_JIS.encode(value).0.into_owned();
+    let latin = |value: &str| encoding_rs::WINDOWS_1252.encode(value).0.into_owned();
+
+    assert_eq!(gbk("爆炸"), [0xB1, 0xAC, 0xD5, 0xA8]);
+    assert_eq!(sjis("効果音"), [0x8C, 0xF8, 0x89, 0xCA, 0x89, 0xB9]);
+
+    let samples = [
+        (b"Hello".to_vec(), "Hello".to_string()),
+        ("爆炸".as_bytes().to_vec(), "爆炸".to_string()),
+        ("効果音".as_bytes().to_vec(), "効果音".to_string()),
+        (gbk("爆炸"), "爆炸".to_string()),
+        (gbk("门"), "门".to_string()),
+        (gbk("电"), "电".to_string()),
+        (gbk("人声"), "人声".to_string()),
+        (gbk("枪声"), "枪声".to_string()),
+        (sjis("効果音"), "効果音".to_string()),
+        (sjis("東京"), "東京".to_string()),
+        (sjis("日本語"), "日本語".to_string()),
+        (sjis("こんにちは"), "こんにちは".to_string()),
+        (sjis("サンプル"), "サンプル".to_string()),
+        (sjis("機械"), "機械".to_string()),
+        (sjis("ギター"), "ギター".to_string()),
+        (sjis("ｻﾝﾌﾟﾙ"), "ｻﾝﾌﾟﾙ".to_string()),
+        (b"Caf\xe9".to_vec(), "Café".to_string()),
+        (b"Caf\xe9 Foley".to_vec(), "Café Foley".to_string()),
+        (b"Caf\xe9\0garbage".to_vec(), "Café".to_string()),
+        (latin("Größe"), "Größe".to_string()),
+        (latin("GRÖßE"), "GRÖßE".to_string()),
+        (latin("äö"), "äö".to_string()),
+        (latin("ÄÖ"), "ÄÖ".to_string()),
+        (latin("it’s"), "it’s".to_string()),
+        (latin("a–b–c"), "a–b–c".to_string()),
+        (latin("Œuvre"), "Œuvre".to_string()),
+        (latin("€50"), "€50".to_string()),
+        (latin("±10"), "±10".to_string()),
+        (latin("±µ·°"), "±µ·°".to_string()),
+        (latin("naïve"), "naïve".to_string()),
+        (latin("well–known"), "well–known".to_string()),
+        (vec![0xFF, 0xFF], "ÿÿ".to_string()),
+        (vec![0x81], windows_1252(&[0x81])),
+    ];
+    for (bytes, expected) in samples {
+        assert_eq!(text(&bytes), expected, "{bytes:?}");
+    }
+
+    let mut mixed = b"Gunshot ".to_vec();
+    mixed.extend(gbk("枪声"));
+    assert_eq!(text(&mixed), "Gunshot 枪声");
+    let mut japanese = b"Pre ".to_vec();
+    japanese.extend(sjis("機械"));
+    japanese.extend(b" post");
+    assert_eq!(text(&japanese), "Pre 機械 post");
+}
+
+#[test]
+fn gbk_and_shift_jis_bext_and_info_round_trip_through_probe() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("legacy-text.wav");
+    wav(&path);
+    let gbk = encoding_rs::GBK.encode("爆炸").0.into_owned();
+    let sjis = encoding_rs::SHIFT_JIS.encode("効果音").0.into_owned();
+    let mut description = gbk.clone();
+    description.push(0);
+    let mut bext = vec![b' '; 602];
+    bext[..description.len()].copy_from_slice(&description);
+    add(&path, b"bext", &bext);
+    let mut info = b"INFO".to_vec();
+    let mut comment = sjis.clone();
+    comment.push(0);
+    info.extend(chunk(b"ICMT", &comment));
+    add(&path, b"LIST", &info);
+    let metadata = probe(&path).unwrap();
+    assert_eq!(metadata.bext_description, "爆炸");
+    assert_eq!(metadata.attributes["bwf_description"], "爆炸");
+    assert_eq!(
+        metadata.attributes["wav_metadata"]["riff_info"]["ICMT"],
+        "効果音"
+    );
+    assert_eq!(
+        metadata.attributes["wav_metadata"]["fields"]["description"],
+        "効果音"
+    );
+    assert_eq!(
+        metadata.attributes["wav_metadata"]["version"],
+        WAV_METADATA_VERSION
+    );
+}
+
+#[test]
 fn id3_artwork_skips_unsupported_invalid_and_oversized_pictures() {
     let image = b"\x89PNG\r\n\x1a\nvalid cover";
     for (version, flags) in [(3, 0xc0), (4, 0x0c)] {

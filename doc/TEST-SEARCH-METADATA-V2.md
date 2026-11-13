@@ -125,7 +125,7 @@ Symphonia 0.6.1 embedded readers 的恶意长度保护还依赖 FLAC ScopedStrea
 | EM-01 | BWF bext 损坏、长度字段越界 | 和 schema 8 行为一致，不 panic | U | P0 |
 | EM-02 | iXML 格式错误或编码错误 | 跳过 iXML，其他 chunk 照常提取 | U | P0 |
 | EM-03 | ID3 COMM/TXXX 损坏（wav.rs:218-238） | 不 panic | U | P0 |
-| EM-04 | GBK、Shift-JIS、Latin-1 编码的 INFO/bext 文本 | 解码结果和 schema 8 一致（不能新增乱码） | U：golden 样本 | P1 |
+| EM-04 | GBK、Shift-JIS、Latin-1 编码的 INFO/bext 文本 | GBK 与 Shift-JIS 解出原文；Latin-1 仍按 Windows-1252；非法字节回退 Windows-1252 | U：golden 样本 | P1 |
 | EM-05 | 超大 chunk（单个 chunk ≥100 MB 的声明长度） | 有上限，不 OOM | U | P0 |
 | EM-06 | 基线命中数（r824 快照）：`zildjian`=323、`electrovoice`=228、`sortilege`=2776、`personage`=5943 | schema 9 的命中数 ≥ 基线，且基线命中的结果全部还在（新增结果只能来自路径或 Vorbis 字段，并逐条列出） | C：命中数脚本 + ID 集合对比 | P0 |
 | EM-07 | UCS CatID/Category 拼接（schema.rs:1075，metadata.rs:94-127） | token 不变，按 CatID 搜索的命中数一致 | U + C | P0 |
