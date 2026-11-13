@@ -1,77 +1,78 @@
 # 1.0.0 发布准备
 
-状态：**未发布，beta 集成准备中**。程序版本 `1.0.0`；API `/api/v1/`；普通本地写 schema 8；专用服务端迁移 schema 9；客户端快照读取 `3..=9`。base / `audio_sources:1`（af1）完整格式沿用 [0.9.6](Rust_Release_0.9.6.md)，不引入资料库迁移。正式目标为 `v1.0.0`、标题 `AudioLib Explorer v1.0.0`，非 prerelease；当前尚未创建该正式发布身份。
+状态：**未发布，发布准备阶段**。截至 2026-11-13，应用候选为 beta `ecbe972b17774aeaabdba413ec60301d42c3e4af`，以正式 [v0.9.6](Rust_Release_0.9.6.md) 为发布基线。本轮只核对已完成修复、原始证据与发布步骤，不重新构建、打包、安装或部署；工作 checkout 中用户明确排除的 14 项未提交流程／文档改动全部保留，不纳入候选。
 
-## 来源与范围
+程序 `1.0.0`；API `/api/v1/`；普通本地写 schema 8；专用服务端迁移 schema 9；快照读取 `3..=9`。base / `audio_sources:1`（af1）完整格式不变。正式目标为 `v1.0.0`，标题 `AudioLib Explorer v1.0.0`，非 prerelease；当前没有完成最终 main/tag 的七份正式 payload 交付。
 
-本次整合 AI 分支 `90edcfac68bacd7033df14b1304d02076f15fb5b` 与 beta `0185f1f39a13305ce940e827ae38ec2ca557e3d7`，源分支合并提交为 `f1e37a430c4cef1ffdc413adc693a5f4d465a8be`，经 [#285](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/285) 合入 beta，实际候选为 `a01a19bcdbabf53de68284ef39114a7dff53c4cc`。后者包含已发布 `v0.9.6` 的分页偏好、会话搜索历史，以及之后的发布工具修正和 [#281](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/281) RIFF 兼容修复。该候选保留已验证的集成源码树，不能用两个父提交之一冒充集成结果。
+## 已纳入的修复
 
-- AI 使用本地关键词、UCS 和素材配方，支持多协议供应商、提示词、模型列表与保存前测试、会话草稿、Windows DPAPI 密钥及请求尝试上限。最多展示五项经过当前实际查询核验的推荐；手动五任务和可选自动三任务均先校验容量。详见 [AI 智能搜索](Rust_AI_Search.md)。
-- AI 结果绑定描述、供应商修订和资料库身份；目录过滤保留已完成推荐，过期生成仍拒绝。查询草稿与来源引用的审查修正、跨任务和历史恢复，以及侧栏、状态栏和紧凑播放器纳入本次集成。
-- RIFF 仅在子块结构完整时兼容将八字节头计入父 size 的文件；真实截断、内部越界、错误布局及 RF64/BW64 检查保留。
-- 发布工具支持固定安装目的地、版本清单及身份验证后的草稿续传。检查按影响范围选择，保留稳定模块原始通过证据；省略检查不计为通过。
-
-其他 fix 分支审查未发现遗漏的应用修复：#281 已在 beta；[#280](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/280) 的稳定模块工作流补丁与 AI 祖先 `031d397` 的 patch-id 同为 `9faa269f64f1f5c08e3ed492336422874b855a45`，四个核心工作流文件 blob 相同；其余历史 fix/review 分支已合并或存在等价补丁，不重复合并。
-
-## 已有证据及复用边界
-
-以下为本机已有结果的只读核对，保留原始来源；不是合并后重新执行的结果。私有原始证据位于工作 checkout 的 `.rust-validation/`，不作为发布资产。
-
-| 来源 | 已确认结果 | 对集成候选的适用边界 |
-|---|---|---|
-| AI `90edcfa`；`.rust-validation/ai-cr-push/final-validation.json` | 格式、AI 与桌面 ASIO strict Clippy；AI 15 项、桌面 18 项不同回归通过。原首轮 1 项失败和相关 3 项重跑通过均保留；四个最终源码文件哈希匹配原记录 | 保留原身份；合并所触及的搜索任务、分页、UI 与直接消费者另按下节补集成检查 |
-| AI `90edcfa`；`.rust-validation/ai-cr-push/final-delivery.json` | Windows ASIO release、许可证、打包、portable 通过；908 个固定安装文件核验、CLI 1.0.0 与隔离启动通过；原 CI run `43236216741` 成功 | 这是功能分支 payload，不能当作最终 beta 或 main/tag payload |
-| `.rust-validation/ai-delivery/review-fixes.log`、`close.log`，及 AI 文档中各次实际交互记录 | 原子配置、实例锁、关闭排空及隔离交叉进程回归已有通过基线；后续源码检查保留相关未变路径的复用理由 | 实例锁、持久化、Metadata/扫描契约未变时可复用；若集成修正触及这些边界，重新选择相关数据安全回归 |
-| `v0.9.6`，最终 main/tag `460629144d6a0df24af9c69303c9409c38efbde2` | 七份 payload、十四项线上资产和固定安装的历史验收记录 | 保留 [0.9.6 发布记录](Rust_Release_0.9.6.md)；版本号变化本身不重跑无关功能套件，旧包不能替代 v1.0 包 |
-| 2026-11-12 AI checkout 的只读版本预检 | `pwsh tools/check-release.ps1 -Tag v1.0.0 -BaseTag v0.9.6` 通过，写目标与快照范围未变 | 合并及最终身份冻结后按实际 checkout 再核对版本，不创建标签 |
-
-真实供应商账户、真实休眠 NAS、真实 ASIO 硬件和声学起音延迟没有新增验收。非 Windows 平台暂只支持会话密钥，不能宣称已实现跨平台持久密钥库。性能目标仍为 **P95 latency <500ms for 1M+ records**；本次 AI 网络耗时不算数据库查询延迟，未新增百万记录性能测量。
-
-## 集成候选的新验证（2026-11-12）
-
-以下为 `f1e37a430c4cef1ffdc413adc693a5f4d465a8be` 上新执行的验证，证据在隔离工作树 `.rust-validation/v1-preparation/`，与上一节复用记录分别保留。
-
-| 范围 | 本轮状态与证据 |
+| 来源 | 本次正式候选包含的行为 |
 |---|---|
-| 格式 | `cargo fmt --all -- --check` 通过；`format.log` |
-| 桌面 MSVC ASIO | 单次 strict Clippy 通过；`desktop-clippy.log` |
-| 桌面集成回归 | 分页、AI 缓存/范围、历史、恢复及页脚等定向范围通过：21 passed / 0 failed / 3 ignored / 803 filtered；实际测试执行 35.78 秒；`integration-tests.log`。ignored 与 filtered 不计为通过 |
-| UI 复用边界 | Slint 文件与原 AI 分支相同，复用其实际渲染基线，并由本轮集成交互测试补验；未宣称重新进行所有历史截图验收 |
-| 原生计划与资产契约 | 四份原生计划预览通过；精确七归档、十四资产契约已核对。这些是计划/集合检查，不是原生包验收 |
-| RIFF 与扫描直接消费者 | 当前 Rust 1.97.1 MSVC 下音频 ASIO strict Clippy、数据库边界测试目标 strict Clippy 通过；`riff_boundary_tests` 11 项、`scan_riff_boundaries` 3 项全过。证据为 `audio-clippy.log`、`riff-tests.log`、`scan-clippy.log`、`scan-tests.log`；原 #281 使用不同工具链的记录另保留 |
-| Windows 集成包交付 | 从 beta `a01a19b` 新执行 MSVC ASIO release 构建（1594.2 秒）、打包及隔离 portable 验收，均通过；固定 `local_release/` 的 908 个包文件 SHA256 一致（复制 11 个），CLI 1.0.0 与安装后隔离桌面启动通过。私有交付索引为隔离工作树 `.rust-validation/v1-preparation/final-delivery.json`；安装父 checkout 收据为 `.rust-validation/local-install/240f359617314ad996f4f3af43c80f90/report.json` |
+| [#285](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/285)，首次集成 `a01a19b` | AI 关键词／UCS／配方检索、多协议供应商和提示词、Windows DPAPI、推荐核验、五项手动／三项可选自动任务；保持资料库／修订边界。沿用 0.9.6 分页与会话历史，以及 #281 RIFF 完整子块兼容和已合并发布工具修正 |
+| `cda17c6`、`87d005c`、`d0840ed` | AI 设置与预设集中入口、合法已保存配置下侧栏默认收起；tag 正文搜索与右缘“+”独立新任务；Classic / Studio 缩放与交互反馈；取消旧播放请求不再报告失败 |
+| [#287](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/287)，`a10b288` | Jev 加入关键词／UCS／配方结构化召回、独立候选评分、自检及请求体预算；保留原失败和相关修复后的定向重跑 |
+| [#288](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/288)，`0019cbd` | 配方候选和最终查询共用真实模式及 12 条输出上限，避免请求展示不会执行的分层词；自检保持直接模式 |
+| 当前候选 `ecbe972` | GUI 等待实际音频确认，准备、NAS 首响应与缓冲各自拥有状态；旧素材／来源／关闭后的消息失效。保护 Metadata 关闭恢复提示；内部 revision 失效仅重新请求原作用域，普通取消与真实错误保持原义 |
 
-AI 后端业务及其输入未变，继续保留原 15 项测试基线；本轮不重复无关全工作区或百万记录套件。Mac beta-refresh、Windows beta-smoke 和最终 main/tag 七份正式 payload 的门禁仍未完成。
+历史 fix/review 分支没有额外遗漏的应用补丁：#281 已在 beta；#280 与 AI 祖先 `031d397` 的 patch-id 同为 `9faa269f64f1f5c08e3ed492336422874b855a45`，四个核心工作流文件 blob 相同；其余已合并或等价，不重复合并。当前功能边界见 [AI 智能搜索](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/ecbe972b17774aeaabdba413ec60301d42c3e4af/doc/Rust_AI_Search.md) 和 [状态生命周期审查](reviews/Status_Feedback_Review_2026-11-13.md)。
 
-安装后已调用一次 40 GiB debug 缓存预算维护；另一 debug 构建持有共享租约，维护返回 `blocked`，未删除缓存或终止进程。该次未测量逻辑容量，预算状态尚未核验；已通过的交付和安装收据保留。原始结果见同一私有目录 `cache.log`。
+## 原始验证证据及本轮复用
 
-### 跨平台源码复查与文档链接
+下表是本轮只读核对的**既有结果**，不是本轮重新执行。私有收据保留在原工作 checkout 的 `.rust-validation/`，不加入发布资产；不同阶段的测试有重叠，不相加成新的总数。
 
-2026-11-12 对上述 beta 候选作只读源码复查：AI 使用已有的 `ureq/platform-verifier` 依赖路径，Windows 专用依赖受 cfg 限制；非 Windows 密钥保存有会话守卫。关键词 JSONL、Slint 与 SVG 在编译时嵌入，不依赖安装包中的 `.agents` 或 Excel。客户端打包器沿用按实际 Cargo 依赖图生成 notices 的流程，新增本地 crate 使用工作区 GPL LICENSE。未发现新增的跨平台源码或运行资源阻塞；这不等于原生编译、许可证材料预检或启动验收通过。macOS AI 及直接消费者测试、原生客户端构建与签名启动，以及 macOS/Linux 对应依赖材料和 payload 验收仍按矩阵完成。
+| 原始源码与收据 | 已完成结果 | 当前适用范围 |
+|---|---|---|
+| `ecbe972`；`status-feedback-review/final-report.json` | MSVC 1.97.1 / ASIO 下 audio、desktop、CLI 的格式与 strict Clippy；28 项定向回归通过。CI [run 43336068023](https://github.com/Freedragonlancer/AudioLib-Explorer/actions/runs/43336068023) 的 `Linux (fmt)` 通过 | 最新音频确认、状态、选区／输出、共享 fixture、搜索及关闭恢复路径。保留修复前记录和受影响项重跑，未宣称整套 workspace 通过 |
+| 同一 `ecbe972` 原报告 | release build、便携包及 portable 7 检查通过；静音 fixture 的播放 IPC 20 检查、原生关闭 6 场景通过；固定 `local_release/` 与隔离 `beta_release/` 各 908 个包文件核验，固定安装隔离启动通过 | 原任务已完成的 Windows 候选交付；不是最终 main/tag payload，也不证明远程 beta 服务已部署或 smoke 通过 |
+| 同一 `ecbe972` 原报告及 `cache.log` | 缓存维护已通过：逻辑删除约 4.94 GiB，剩余约 35.84 GiB，40 GiB 预算达标 | 这是原任务结果。本轮纯准备不再扫描缓存；较早 `a01a19b` 的占用阻塞仅保留为历史 |
+| 检查源码 `8a1212cf1fe0c6800bd0787973ea145ee166f926`，集成 `0019cbd9c5821f343310935ef1a6087d36d404ff`；`jev-cr-0019cbd/final-delivery.json` | Jev 后端 31 项、桌面 AI 26 项回归及对应 strict Clippy 通过；原 Windows 包／安装身份单独保留 | `0019cbd..ecbe972` 的 `crates/audiolib-ai`、`crates/audiolib-core`、`ai_search.rs`、`ai_search_tests.rs` 和 `ai-search-panel.slint` 均无差异，因此复用该范围；替代更早仅 15 项的后端基线 |
+| `d0840ed`；上述状态审查引用的 `tag-button-polish-playback-status/` | Classic / Studio、100%／125%／200% 下 tag “+”实际渲染、独立点击及远程显式取消分类已有验收 | `ecbe972` 没有改变其按钮资源、命中区域和远程取消实现；不再使用“全部 Slint 与首次 AI 分支相同”作为当前依据 |
+| `.rust-validation/ai-delivery/review-fixes.log` 及既有配置／关闭证据 | 跨进程配置、数据保留和写入排空原有通过基线；本轮另核对实际输出确认、失败草稿、重复 Apply、关闭等待设置等 4 项回归通过 | 相对 `0019cbd`，Metadata FIFO／revision／drain、扫描／实例锁及原子偏好存储未变；Configure 只改为等待实际结果，随后仍走同一 `preferences.save`。新的关闭 6 场景补充 UI 保护与恢复，不替代 Metadata 数据安全基线 |
 
-本次文档补充将已打包 Markdown 中新增、但不在包清单内的 AI／发布准备页面链接固定到上述候选的 GitHub blob，保留源码页面内部相对导航。包规则、应用源码和资源不变，不复制 `.agents`、Excel 或私有验证证据。Windows 候选构建及验收身份仍为 `a01a19bcdbabf53de68284ef39114a7dff53c4cc`，文档补充复用该应用结果。
+`8ad0292..ecbe972` 的 Cargo.toml、Cargo.lock、schema、compatibility 与原生发布计划无差异。数据库格式、扫描协调和 Metadata 写入顺序不因本轮文档准备变化；无需为刷新证据日期重跑稳定模块、百万记录或完整数据安全套件。代码或相应依赖／feature／环境变化时，按实际影响重新选择检查。
 
-## 候选和最终交付的剩余工作
+### 首次集成历史
 
-1. 合并冲突审查和本轮选定源码检查已完成：格式、桌面/音频及扫描边界 strict Clippy、35 项定向测试通过，原始身份与 UI 复用边界见上节。Windows 使用与交付相同的 ASIO 配置，不追加无关全工作区套件。
-2. 合并后候选的 Windows build/package/portable 和固定 `local_release/` 安装已通过，原始身份见上节。工作库、偏好和源音频保留；缓存维护的占用阻塞单独记录，待租约可用后处理。
-3. 冻结 beta 候选，按 [Beta testing flow](../AGENTS.md#beta-testing-flow) 完成 Mac beta-refresh 的 served commit / health / roots，以及 Windows beta-smoke 的快照、流读取和预期 EXE 身份。当前未宣称这些门禁通过；后续执行沿用对应部署授权和数据边界。
-4. 门禁通过并进入正式发布任务后，经 PR 晋升 main，冻结最终 main/tag；以下每份 payload 从该最终身份构建、打包并验收一次。准备工作不创建 Release 或部署生产服务。
+AI `90edcfac68bacd7033df14b1304d02076f15fb5b` 与 beta `0185f1f39a13305ce940e827ae38ec2ca557e3d7` 经源分支提交 `f1e37a430c4cef1ffdc413adc693a5f4d465a8be` 和 #285 纳入 `a01a19bcdbabf53de68284ef39114a7dff53c4cc`。原 `.rust-validation/v1-preparation/` 保存格式、strict Clippy、21 项桌面／11 项 RIFF／3 项扫描边界测试，以及该 `a01a19b` 的 Windows 打包、portable 和 908 文件固定安装结果。原 AI 交付在 `.rust-validation/ai-cr-push/`。这些身份保持原样，不能写成最新 `ecbe972` 的重跑或最终正式包验收。
 
-## 正式 payload 矩阵
+## 剩余门禁与顺序
 
-以下各行的 v1.0 最终包均待交付；已有 Windows 功能分支候选和 0.9.6 历史证据按上表保留，不改写成新通过。实际主机、运行目录与最终提交须在执行时记录。
+1. **冻结 beta 候选并完成两端验收**：先确定真正参加晋升的 beta commit。获准进行 beta 环境验收后，按 [Beta testing flow](../AGENTS.md#beta-testing-flow) 完成 Mac `beta-refresh.sh` 的 served commit／health／根目录读取，以及 Windows `beta-smoke.ps1` 的快照、流读取和预期 EXE 身份。当前二者均未标为通过，固定 beta 安装不替代远程 smoke。候选相关 UI／平台风险按有效证据选择，不追加历史手工清单。
+2. **PR 晋升 main，再冻结 tag**：两端门禁与受影响检查通过后，经 beta→main PR；核对最终 main 身份、Cargo 1.0.0 和 `v1.0.0`。本轮准备不创建晋升 PR 或 tag；后续 tag 不能移动来迁就旧二进制。
+3. **从最终 main/tag 交付七份 payload**：使用下表原生计划，先预览，再在后续交付任务 Run；许可证预检、实际包和原生启动验收完整保留。复用仍有效的源码检查，最终 payload 必须来自最终提交，不能将 beta 候选包改名冒充正式包。
+4. **只在明确发布授权后发布**：核对七归档及各自 `.sha256`，精确十四资产、发布说明、标题和非 prerelease 身份。使用正式 `release-create.sh`；已有草稿先检查再安全续传，显式发布前再次核验。不在准备阶段创建或发布 Release，不部署生产。
+5. **发布后同步固定安装**：以正式下载包或已证实哈希匹配的本地 payload 更新同一 `local_release/`，核对包内文件、CLI 版本和一次隔离启动，保留资料库、偏好及源音频；已验收的同一 payload 不重复整套 portable。
 
-| payload | target / features | 原生主机与计划 | v1.0 剩余验收 |
-|---|---|---|---|
-| Windows x64 client | `x86_64-pc-windows-msvc`，ASIO SDK 2.3.4 | Windows；`windows-client.json` | 最终 build/package、portable、固定安装身份与隔离启动 |
-| macOS arm64 client | `aarch64-apple-darwin`，ad-hoc | 已登录桌面的 Mac；`macos-client.json` | AI/direct-consumer 平台检查；`package-macos-client.ps1 -ValidateRuntime` 合并结构与原生启动/Quit 验收；ad-hoc 不等于 Apple 公证 |
-| Windows x64 server | `x86_64-pc-windows-msvc`，无默认 feature | Windows；`server.json` | 最终包、独立构建的 `search-benchmark` fixture helper、包隐私/启动/health |
-| macOS arm64 server | `aarch64-apple-darwin` | Mac；`server-unix.json` | 独立 run/target/output；最终包启动/health |
-| Linux x64 server | `x86_64-unknown-linux-gnu` | 匹配 Linux 环境；`server-unix.json` | 独立 run/target/output；最终包启动/health；仿真执行须注明 |
-| Docker linux/amd64 | 已验收 Linux x64 包 | 对应 Linux/Docker 环境 | 镜像、离线归档及自有 fixture 验收 |
-| Docker linux/arm64 | 已验收 Linux arm64 内部包 | 对应 Linux arm64/Docker 环境 | arm64 独立原生计划后制作镜像；离线归档及自有 fixture 验收 |
+本轮文档合入后，若 beta 只增加这些文档，应用检查继续保留 `ecbe972` 的原始身份；两端验收仍须记录届时实际 beta HEAD，核对其 served commit，不能把旧服务提交当作新候选。
 
-精确发布集合为七个归档及各自 `.sha256`，共十四资产；内部 Linux arm64 原生包不单独发布。Mac 客户端的结构与原生验收由组合入口执行一次；Docker 可在其对应 Linux 包验收后开始，无需等待另一架构。共享 target 或 `dist/latest` 输出必须串行，Unix 两架构必须使用不同显式 RunDirectory。最终包的许可证、隐私、完整身份及本地启动验收不由 GitHub 的 format-only CI 替代。
+## 七份正式 payload
 
-执行使用 [Release pipeline](Rust_Release_Pipeline.md) 原生计划，先预览再 Run，失败仅续跑受影响阶段。全部 Rust 交付结束后集中维护一次已验证拥有的构建缓存。正式发布授权到位后，核验精确资产及 checksum，发布完成再同步固定安装与正式包身份；当前未执行正式 tag、七包交付、发布或生产部署。
+各项最终 main/tag 验收目前均为**未请求／未执行**（`not-requested`），不是通过。七归档各带同名 `.sha256`，共十四资产；Linux arm64 原生包仅为 Docker 内部输入，不单独发布。
+
+| 正式归档 | target / features | 原生主机与计划／剩余验收 |
+|---|---|---|
+| `AudioLibExplorer-v1.0.0-win-x64-portable.zip` | `x86_64-pc-windows-msvc`，ASIO SDK 2.3.4 | Windows；`windows-client.json`，build/package/portable/固定安装 |
+| `AudioLibExplorer-v1.0.0-macos-arm64.zip` | `aarch64-apple-darwin`，ad-hoc | 已登录桌面的 Mac；`macos-client.json`，受影响 AI/消费者检查及 `-ValidateRuntime`；ad-hoc 不是 Apple 公证 |
+| `AudioLibServer-v1.0.0-win-x64.zip` | `x86_64-pc-windows-msvc`，无默认 feature | Windows；`server.json`，独立 fixture helper、包隐私/启动/health |
+| `AudioLibServer-v1.0.0-macos-arm64.tar.gz` | `aarch64-apple-darwin` | Mac；`server-unix.json`，实际 target/suffix、包启动/health |
+| `AudioLibServer-v1.0.0-linux-x64.tar.gz` | `x86_64-unknown-linux-gnu` | 匹配 Linux 环境；`server-unix.json`，包启动/health，仿真须注明 |
+| `AudioLibServer-v1.0.0-docker-linux-amd64.tar.gz` | 已验收 Linux x64 包 | 对应 Linux/Docker 环境，镜像、离线归档和自有 fixture 验收 |
+| `AudioLibServer-v1.0.0-docker-linux-arm64.tar.gz` | 已验收内部 Linux arm64 包 | 独立 Linux arm64 run/target/output，随后镜像及 fixture 验收 |
+
+独立主机／输出可并行；共享 Cargo target 或 `dist/latest` 的任务串行，Unix 两架构使用不同显式 RunDirectory。Mac 客户端组合入口一次完成结构和原生验收；Docker 在对应 Linux 包通过后即可开始。完整门禁及恢复方式见 [Release pipeline](Rust_Release_Pipeline.md)。
+
+## 本轮准备检查
+
+本轮版本预检已通过：`v1.0.0`、程序 1.0.0、API v1、本地写 8／服务端写 9、快照 3..=9，相对 v0.9.6 无 schema 变化。四份原生计划预览已通过，源码检查均标为 `source_checks=not-requested`；精确七归档／十四资产集合已确认。`Plan` 不要求创建 tag，不执行构建或原生验收；本轮仅复用应用结果，不重跑 Cargo、安装或缓存维护。
+
+```powershell
+pwsh -NoProfile -File tools/check-release.ps1 -Tag v1.0.0 -BaseTag v0.9.6
+pwsh -NoProfile -File tools/verify-release-assets.ps1 -Tag v1.0.0 -ListExpectedAssets
+pwsh -NoProfile -File tools/release-pipeline.ps1 -Action Plan -Tag v1.0.0 -PlanFile tools/release-plans/windows-client.json
+pwsh -NoProfile -File tools/release-pipeline.ps1 -Action Plan -Tag v1.0.0 -PlanFile tools/release-plans/server.json
+pwsh -NoProfile -File tools/release-pipeline.ps1 -Action Plan -Tag v1.0.0 -PlanFile tools/release-plans/macos-client.json
+pwsh -NoProfile -File tools/release-pipeline.ps1 -Action Plan -Tag v1.0.0 -PlanFile tools/release-plans/server-unix.json
+git diff --check
+```
+
+上例 Unix 默认 Linux x64；后续 Mac server／Linux arm64 使用声明 Target、Suffix 的私有变量文件和各自运行目录，不能把默认预览当作其他 target 的验收。真实付费供应商、Jev 语义准确率／阈值校准、真实休眠 NAS、真实 ASIO 硬件和声学起音延迟仍保留原限制；非 Windows 密钥暂只支持会话。性能目标仍为 **P95 latency <500ms for 1M+ records**，AI 网络耗时另计，本轮没有新增性能测量。
