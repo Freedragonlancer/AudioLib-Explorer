@@ -4195,6 +4195,303 @@ mod tests {
     }
 
     #[test]
+    fn focus_loss_cancels_remote_audition_before_first_bytes() {
+        super::source_transition_tests::isolated_module(
+            "tests",
+            "child_focus_loss_cancels_remote_audition",
+        );
+    }
+
+    #[test]
+    #[ignore = "owned loopback regression run in an isolated process"]
+    fn child_focus_loss_cancels_remote_audition() {
+        use super::source_transition_tests::{
+            accept, configuration, indexed_sounds, request, root, run_until,
+        };
+        use std::io::Write;
+        use std::sync::mpsc;
+
+        struct GatedPlay {
+            path: PathBuf,
+            entered: Arc<AtomicBool>,
+            release: mpsc::SyncSender<()>,
+        }
+
+        impl GatedPlay {
+            fn new(path: &Path, audio: AudioHandle) -> Self {
+                let bytes = std::fs::read(path).unwrap();
+                let entered = Arc::new(AtomicBool::new(false));
+                let opened = entered.clone();
+                let (release, released) = mpsc::sync_channel(1);
+                let released = Mutex::new(released);
+                let first_ready_open = AtomicBool::new(true);
+                let opener: audiolib_audio::SourceOpener = Arc::new(move || {
+                    // Decoder preparation may open several times during Loading.
+                    // Gate Play's first reopen while still Ready, before any device
+                    // opens. Unrelated Waveform reads must not consume the gate.
+                    if std::thread::current().name() == Some("audio-control")
+                        && audio.status().state == PlaybackState::Ready
+                        && first_ready_open.swap(false, Ordering::AcqRel)
+                    {
+                        opened.store(true, Ordering::Release);
+                        released
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(10))
+                            .unwrap();
+                    }
+                    let source: Box<dyn audiolib_audio::ByteSource> =
+                        Box::new(std::io::Cursor::new(bytes.clone()));
+                    Ok((source, bytes.len() as u64))
+                });
+                audiolib_audio::register_stream_source(path, opener);
+                Self {
+                    path: path.to_owned(),
+                    entered,
+                    release,
+                }
+            }
+
+            fn release(&self) {
+                let _ = self.release.try_send(());
+            }
+        }
+
+        impl Drop for GatedPlay {
+            fn drop(&mut self) {
+                self.release();
+                audiolib_audio::unregister_stream_source(&self.path);
+            }
+        }
+
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let root = root();
+        let (provider, file) = indexed_sounds(&root);
+        let file_id = file.id;
+        let local_path = PathBuf::from(&file.file_path);
+        let body = std::fs::read(&file.file_path).unwrap();
+        let mut config = configuration(&root.join("preferences"));
+        config.paths.database = provider.database_path().into();
+        // Keep unrelated revision probes idle; the controlled request is audio only.
+        config.data_source.poll_interval_secs = 0;
+        let playback = PlaybackConfig {
+            volume: 0.0,
+            device_id: Some("owned-focus-loss-no-output".into()),
+            ..Default::default()
+        };
+        let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let controller = Controller::new(&ui, provider.clone(), engine.handle(), config, playback);
+        let weak = ui.as_weak();
+        run_until(&ui, move || {
+            weak.upgrade()
+                .is_some_and(|ui| !ui.get_searching() && !ui.get_task_restoring())
+        });
+        controller.remote_mode.store(true, Ordering::Release);
+        controller.remote.lock().unwrap().state = Some(CacheState {
+            library_id: "owned-focus-loss".into(),
+            database_file: "owned-snapshot.db".into(),
+            ..Default::default()
+        });
+        let generation = controller
+            .selection_generation
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
+        let job = SelectionJob {
+            id: file.id,
+            play: true,
+            generation,
+            barrier: 0,
+            provider,
+        };
+        *controller.latest_selection.lock().unwrap() = Some(job.clone());
+        let cancel = Arc::new(AtomicBool::new(false));
+        *controller.remote_audio_cancel.lock().unwrap() = cancel.clone();
+
+        // Disabled settings, a missing focus edge, navigation and a stale pending
+        // request must leave the current generation and cancellation token intact.
+        assert!(!controller.stop_on_focus_loss(Some(true), false).unwrap());
+        controller
+            .stop_playback_on_focus_loss
+            .store(true, Ordering::Release);
+        for (previous, foreground) in [(None, false), (Some(false), false), (Some(true), true)] {
+            assert!(!controller.stop_on_focus_loss(previous, foreground).unwrap());
+        }
+        controller
+            .latest_selection
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .play = false;
+        assert!(!controller.stop_on_focus_loss(Some(true), false).unwrap());
+        *controller.latest_selection.lock().unwrap() = Some(SelectionJob {
+            generation: generation - 1,
+            ..job.clone()
+        });
+        assert!(!controller.stop_on_focus_loss(Some(true), false).unwrap());
+        assert_eq!(
+            controller.selection_generation.load(Ordering::Acquire),
+            generation
+        );
+        assert!(!cancel.load(Ordering::Acquire));
+        *controller.latest_selection.lock().unwrap() = Some(job);
+
+        // The server accepts the real request, then withholds every response byte
+        // until after focus loss. No sleeps or actual foreground window are needed.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        controller.config.lock().unwrap().data_source.server_url =
+            format!("http://{}", listener.local_addr().unwrap());
+        let (accepted, request_received) = mpsc::channel();
+        let (release, send_response) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let mut socket = accept(&listener);
+            let head = request(&mut socket);
+            assert!(head.starts_with("GET /api/v1/audio/"), "{head}");
+            assert!(head.lines().next().unwrap().contains("/stream "), "{head}");
+            accepted.send(()).unwrap();
+            send_response.recv_timeout(Duration::from_secs(5)).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"owned-focus\"\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            // Cancellation may already have closed the client's connection.
+            let _ = socket.write_all(response.as_bytes());
+            let _ = socket.write_all(&body);
+        });
+        let before = controller.audio.status();
+        assert_eq!(before.state, PlaybackState::Empty);
+        let worker = {
+            let (controller, cancel) = (controller.clone(), cancel.clone());
+            std::thread::spawn(move || {
+                controller.load_selection_audio(SelectionAudioJob {
+                    file,
+                    play: true,
+                    remote: true,
+                    generation,
+                    cancel,
+                });
+            })
+        };
+        request_received
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(controller.audio.status().state, PlaybackState::Empty);
+        assert!(controller.stop_on_focus_loss(Some(true), false).unwrap());
+        assert!(cancel.load(Ordering::Acquire));
+        assert!(controller.latest_selection.lock().unwrap().is_none());
+        assert!(controller.selection_job.lock().unwrap().is_none());
+        assert!(controller.selection_audio_job.lock().unwrap().is_none());
+        release.send(()).unwrap();
+        server.join().unwrap();
+        worker.join().unwrap();
+        let after = controller
+            .audio
+            .send_and_wait(AudioCommand::Synchronize, Duration::from_secs(4))
+            .unwrap();
+        assert_eq!(
+            after.generation, before.generation,
+            "late response must not queue Load"
+        );
+        assert_eq!(after.play_session_id, before.play_session_id);
+        assert!(
+            after.file_path.is_none(),
+            "cancelled audition must never reach the engine"
+        );
+        assert_eq!(after.state, PlaybackState::Empty);
+        // Stop may retain completed remote bytes for reuse. A late response is
+        // harmless once the generation/cancel guard rejects its engine Load.
+        // Unregister the fixture explicitly before changing its source mode.
+        controller.stop_remote_stream();
+        assert!(controller.remote_stream.lock().unwrap().is_none());
+
+        // Drive the real selection worker through Load and Play. Gate Play's
+        // decoder reopen while the engine is still Ready, then make a newer
+        // navigation cancel the old selection observer. That does not cancel
+        // the already admitted Play, so its actual ACK must remain tracked.
+        controller.remote_mode.store(false, Ordering::Release);
+        let other_id = controller
+            .provider()
+            .search(&SearchRequest {
+                query: "wind".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .results[0]
+            .id;
+        for lose_focus in [false, true] {
+            let gate = GatedPlay::new(&local_path, controller.audio.clone());
+            controller.select_id(file_id, true);
+            let observed = gate.entered.clone();
+            run_until(&ui, move || observed.load(Ordering::Acquire));
+            let ready = controller.audio.status();
+            assert_eq!(ready.state, PlaybackState::Ready);
+            assert!(controller.latest_selection.lock().unwrap().is_none());
+            let consumed = controller.selection_generation.load(Ordering::Acquire);
+            controller.resume_source_selection(true);
+            assert!(controller.latest_selection.lock().unwrap().is_none());
+            assert_eq!(
+                controller.selection_generation.load(Ordering::Acquire),
+                consumed
+            );
+            controller.select_id(other_id, false);
+            let generation = controller.selection_generation.load(Ordering::Acquire);
+            assert!(generation > consumed);
+            assert!(controller.prune_pending_selection_plays());
+            assert_eq!(controller.audio.status().state, PlaybackState::Ready);
+            if lose_focus {
+                assert!(controller.stop_on_focus_loss(Some(true), false).unwrap());
+                assert!(
+                    controller
+                        .pending_selection_plays
+                        .lock()
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(controller.selection_generation.load(Ordering::Acquire) > generation);
+            } else {
+                assert!(!controller.stop_on_focus_loss(Some(false), false).unwrap());
+                assert_eq!(
+                    controller.selection_generation.load(Ordering::Acquire),
+                    generation
+                );
+            }
+            gate.release();
+            let completed = controller
+                .audio
+                .send_and_wait(AudioCommand::Synchronize, Duration::from_secs(4))
+                .unwrap();
+            if lose_focus {
+                assert_eq!(completed.state, PlaybackState::Stopped);
+                assert!(completed.error.is_none());
+            } else {
+                // The deliberately unavailable output rejects Play, completing
+                // its observer with an error; terminal errors must be pruned too.
+                assert!(completed.error.is_some());
+            }
+            assert!(!controller.prune_pending_selection_plays());
+            assert!(
+                controller
+                    .pending_selection_plays
+                    .lock()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(completed.generation, ready.generation);
+            assert_eq!(completed.play_session_id, 0);
+            // The non-playing newer navigation has not published on Slint yet.
+            // Cancel it before another test iteration drains queued callbacks.
+            controller
+                .enqueue_stop()
+                .unwrap()
+                .wait(Duration::from_secs(4))
+                .unwrap();
+        }
+        controller.shutdown();
+        ui.hide().unwrap();
+    }
+
+    #[test]
     fn remote_audition_wait_survives_background_status_and_rejects_stale_callbacks() {
         super::source_transition_tests::isolated_module(
             "tests",
