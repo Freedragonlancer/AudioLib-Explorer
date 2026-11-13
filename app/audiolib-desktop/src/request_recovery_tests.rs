@@ -393,9 +393,13 @@ fn child_server_history_routes_provider() {
     use audiolib_db::local_play_history::{LocalPlayHistory, local_library_id};
     let (provider, _engine, ui, controller) = fixture();
     let files = provider.search(&SearchRequest::default()).unwrap().results;
+    assert!(controller.played_this_session.lock().unwrap().is_empty());
+    assert!(!controller.decorate_list_waveforms(vec![audio_row(&files[0])])[0].played);
     controller
         .record_local_history(Path::new(&files[0].file_path))
         .unwrap();
+    assert!(controller.decorate_list_waveforms(vec![audio_row(&files[0])])[0].played);
+    assert!(!controller.decorate_list_waveforms(vec![audio_row(&files[1])])[0].played);
     let data_root = controller.config.lock().unwrap().data_root();
     let local_id = local_library_id(provider.database_path()).unwrap();
     let local = LocalPlayHistory::open(&data_root, &local_id, 5000).unwrap();
@@ -414,9 +418,11 @@ fn child_server_history_routes_provider() {
         ..Default::default()
     });
     controller.remote_mode.store(true, Ordering::Release);
+    assert!(!controller.decorate_list_waveforms(vec![audio_row(&files[0])])[0].played);
     controller
         .record_local_history(Path::new(&files[1].file_path))
         .unwrap();
+    assert!(controller.decorate_list_waveforms(vec![audio_row(&files[1])])[0].played);
     let remote = LocalPlayHistory::open(&data_root, &remote_scope, 5000).unwrap();
     assert_eq!(remote.page(50, 0).unwrap().len(), 1);
     // Old-source rows must be replaced even though no server history API is called.
@@ -713,6 +719,7 @@ fn child_history_write_failure() {
         controller.record_history_for_generation(Path::new(&file.file_path), library, source),
         Err(audiolib_core::Error::Cancelled)
     ));
+    assert!(!controller.decorate_list_waveforms(vec![audio_row(&file)])[0].played);
     // A filesystem object blocks creation of the owned history directory. This
     // failure must consume one queued session instead of retrying every status tick.
     std::fs::write(
@@ -730,6 +737,7 @@ fn child_history_write_failure() {
         })
         .unwrap();
     assert!(tracker.pending.is_empty());
+    assert!(controller.decorate_list_waveforms(vec![audio_row(&file)])[0].played);
     let after = controller.audio.status();
     assert_eq!(after.generation, before.generation);
     assert_eq!(after.play_session_id, before.play_session_id);

@@ -5,6 +5,8 @@
 /beta_release/
 /release-upload/
 /tools/.build-tools/
+/tools/build-portable-local.cmd
+/tools/run-latest-local.cmd
 /.rust-validation/
 
 # User libraries, source audio fixtures, and generated runtime state.

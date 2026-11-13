@@ -72,6 +72,34 @@ try {
     try { & $compatibilityValidator -Product Desktop -Entries @('LICENSE', 'license') } catch { $rejected = $_.Exception.Message -match 'Duplicate update compatibility entry' }
     if (!$rejected) { throw 'Old-updater file policy accepted case-alias duplicate names.' }
     & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio
+    $originalPortableHash = (Get-FileHash -LiteralPath (Join-Path $staleRoot 'AudioLibExplorer.exe')).Hash
+    $packageId = 'build-20261112-181304-8f21058c'
+    $namedRoot = Join-Path $testRoot "dist/builds/$packageId"
+    & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio -PackageId $packageId
+    $namedArchive = Join-Path $namedRoot "AudioLibExplorer-$packageId-win-x64-portable.zip"
+    if (!(Test-Path -LiteralPath (Join-Path $namedRoot 'portable/AudioLibExplorer.exe')) -or
+        !(Test-Path -LiteralPath $namedArchive) -or !(Test-Path -LiteralPath ($namedArchive + '.sha256')) -or
+        (Get-FileHash -LiteralPath (Join-Path $staleRoot 'AudioLibExplorer.exe')).Hash -cne $originalPortableHash) {
+        throw 'Named portable package did not preserve the existing latest package.'
+    }
+    $namedArchiveHash = (Get-FileHash -LiteralPath $namedArchive).Hash
+    $rejected = $false
+    try { & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio -PackageId $packageId } catch { $rejected = $_.Exception.Message -match 'already exists' }
+    if (!$rejected -or (Get-FileHash -LiteralPath $namedArchive).Hash -cne $namedArchiveHash) {
+        throw 'A repeated named package was not rejected.'
+    }
+    $folderOnlyId = 'build-20261112-181305-8f21058d'
+    $folderOnlyRoot = Join-Path $testRoot "dist/builds/$folderOnlyId"
+    & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio -PackageId $folderOnlyId -NoArchive
+    if (!(Test-Path -LiteralPath (Join-Path $folderOnlyRoot 'portable/AudioLibExplorer.exe')) -or
+        !(Test-Path -LiteralPath (Join-Path $folderOnlyRoot 'portable/AudioLibExplorer.exe.sha256')) -or
+        @(Get-ChildItem -LiteralPath $folderOnlyRoot -Filter '*.zip*' -File).Count -ne 0 -or
+        (Get-FileHash -LiteralPath (Join-Path $staleRoot 'AudioLibExplorer.exe')).Hash -cne $originalPortableHash) {
+        throw 'Folder-only portable output created an archive or changed an older package.'
+    }
+    $rejected = $false
+    try { & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio -NoArchive } catch { $rejected = $_.Exception.Message -match 'requires a unique package ID' }
+    if (!$rejected) { throw 'Folder-only output without a unique package ID was accepted.' }
     $licenseValidator = Join-Path $testRoot 'tools/validate-portable-licenses.ps1'
     & $licenseValidator -BinaryDirectory $staleRoot -WithoutAsio
     $fixtureNoticePath = Join-Path $staleRoot 'licenses/dependencies.json'
