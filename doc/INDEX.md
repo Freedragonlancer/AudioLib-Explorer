@@ -9,6 +9,7 @@ AI 智能搜索使用与实现见 [Rust AI Search](https://github.com/Freedragon
 | Document | Purpose |
 |----------|---------|
 | [README](../README.md) | Build, launch, user-data layout and release operations |
+| [AI search](Rust_AI_Search.md) | Desktop AI keyword search shipped in v1.0.0. The in-tree guide matches that tag; research and unwired concepts stay in [AI Keyword Search](AI_Keyword_Search_Design.md) |
 | [Repository guidance](../AGENTS.md) | Engineering invariants and required checks |
 | [Rust Architecture](Rust_Architecture.md) | Owned contracts, data services, migration, playback and platform boundaries |
 | [Appearance themes](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/beta/doc/Rust_Themes.md) | Stable default and Studio player presentations, settings and theme extension |

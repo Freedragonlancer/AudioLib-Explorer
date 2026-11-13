@@ -6,6 +6,8 @@
 
 AudioLib Explorer 是一款本地优先音效库管理软件，使用 Rust 编写，桌面界面基于 [Slint](https://slint.dev)。当前源码将大型 WAV/BWF、MP3、AIFF、FLAC、Ogg Vorbis/OGA 音效库索引到 SQLite（FTS5），支持路径、内嵌标签及厂商 Metadata 搜索，在 Windows 上通过 WASAPI（可选 ASIO）试听，也可以浏览由 `audiolib-server` 提供的远程音效库。macOS arm64 客户端使用 CoreAudio；0.8.4 增加 Linux x64 服务端和 Docker amd64/arm64 离线镜像。
 
+v1.0.0 起，桌面端提供 AI 智能搜索：用自然语言描述声音，得到最多 5 个经当前资料库命中核验的英文关键词。离线词表无需账号；云端模型需自备 HTTPS 供应商、API Key 和模型。服务端和 `AudioLibCli` 不提供该功能。详见 [AI 智能搜索](#ai-智能搜索)。
+
 - **当前正式版：** [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0)，于 2026-11-13 发布；七份正式包、十四项线上资产与 SHA256、实际平台验收及发布后固定安装同步见 [1.0.0 发布记录](doc/Rust_Release_1.0.0.md)。二进制源码仍为最终 main/tag `1fc6f825`，后续文档提交不重建或替换原产物。
 - **HTTP API：** `/api/v1/`（客户端与服务端）
 - **数据库 schema：** 普通本地 writer 为8；服务端显式迁移后为9，使用专用 writer；客户端只读校验快照3..=9。
@@ -32,9 +34,28 @@ Windows 客户端解压后通过 `Start-AudioLibExplorer.cmd` 启动。Mac 客�
 
 首次 Mac 分发计划使用 ad-hoc 签名，未经 Apple 公证。原生签名、隔离启动和包边界检查须在 Mac 上通过后才可发布，Windows 验证结果不能替代这些检查。Windows 服务端包自 0.8.5 起提供，见 [Windows 服务端发布](doc/Rust_Windows_Server_Release.md)。独立 Linux arm64 服务端包不发布。Docker 离线包校验后使用 `docker load` 导入；详见 [Linux 与 Docker 交付](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md)。
 
+## AI 智能搜索
+
+![AudioLib Explorer AI 智能搜索](resources/screenshot-main.png)
+
+桌面端 AI 智能搜索界面，使用示例描述和关键词。声音列表为空，没有连接服务器。
+
+桌面端 AI 智能搜索随 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0) 发布。本分支的 AI 搜索源码与标签 `1fc6f825` 相同，其后的 beta 提交没有改动它。服务端和 `AudioLibCli` 不提供该功能。行为与限制见 [实现说明](doc/Rust_AI_Search.md)。[研究与设计](doc/AI_Keyword_Search_Design.md) 保留了 1.0 未交付的概念；其中的 SVG 线框不是应用截图。英文对照见 [README.md](README.md#ai-search)。
+
+在桌面搜索条打开 AI，用 1–500 个字符描述声音，再点 **Tag生成**。离线词表或已配置的模型给出纯文本关键词，再按当前目录、搜索范围和筛选做实际检索，只保留有命中的查询，最多 5 条。每条是 1 或 2 个英文词，空格表示 AND。能核验出单词时把它放在第一位。点击标签正文在当前任务搜索；标签上的 **+** 用相同目录、范围和筛选新建一个任务，不再请求模型。**分层素材** 默认勾选，可同时给出素材层查询；取消后只请求成品声音。**查询全部** 为每个已核验标签各建一个任务，最多 5 个，任务名额不足时整批拒绝。**生成后自动搜索 3 个任务** 默认关闭。
+
+离线词表版本 `1.0.0-UCS8.2.1`，含 431 条关键词、753 条 UCS 8.2.1 子类和 19 个场景配方，按条目排序，不是通用语言模型，也不需要账号、网络或 API Key。在 **设置 → AI智能搜索…** 选择 **本地词表（离线）**。
+
+云端模型可选。需要自行填写 HTTPS 地址、API Key 和模型 ID；保存配置前可以获取模型列表。协议包括 OpenAI 兼容 Chat、OpenAI Responses、Anthropic Messages、Gemini、Jev TypeSafe、OpenCode Go 和 DeepSeek。除显式 loopback 外不使用 HTTP。Windows 用当前用户 DPAPI 保存密钥；macOS 与 Linux 只在本次会话保留。本机按 UTC 月份累计生成尝试，失败和超时也计入；这不是供应商余额，获取模型列表不计入。Jev 只在有限的本地候选中选择，也可以返回不确定。接受阈值是应用策略，尚未用音效库校准。1.0 的发布验收没有调用付费供应商账户。
+
+请求只包含描述、所选提示词和有限参考摘录。除非写进描述或提示词，否则不发送音频、文件路径或当前音库 Metadata。模型不能提交 SQL，也不能写入资料库。
+
+1.0 尚未包含：音频 embedding、理解没有 Metadata 的文件、OAuth 与应用内购买订阅、同步供应商账单、macOS/Linux 持久密钥、为每一素材层自动建任务，以及根据检索结果自动改写查询。
+
 ## 功能
 
 - 最多30个独立搜索任务页签，保存各自目录、范围、筛选和列表状态，支持个人收藏与重启恢复。详见[搜索任务](doc/Rust_Search_Tasks.md)。
+- 桌面端 AI 智能搜索（v1.0.0）：离线关键词、UCS 与配方，或可选的自备模型，再走现有 FTS5。见 [AI 智能搜索](#ai-智能搜索)。
 - 增量/完整扫描 WAV、FLAC、OGG、OGA，提取专业 WAV Metadata（BWF `bext`、iXML、INFO、ID3、XMP、只读 Soundminer SMED）及 Vorbis comment，保留重复值、中文和未知字段。内嵌原文与用户标注分开保存。OpusTags 可提取，原生播放器不解码 Opus；链式 Ogg 至少提取首个逻辑流。
 - 四种搜索范围：主字段保留旧字段搜索，仅文件名严格限定名称，仅路径匹配目录/祖先，全部支持跨来源组合；支持中文分词、目录/专辑/收藏/Metadata筛选和排序。路径范围需先完成索引准备；本地准备保持 schema8。目标为 **P95 latency <500ms for 1M+ records**。
 - 本地和有管理权限的服务器模式支持厂商 CSV、XLS、XLSX：编码/表头/sheet预览、列映射与模板、路径/文件名匹配、歧义候选分页确认、幂等批次提交、取消/续导与回滚。厂商和内嵌文本都参与搜索，用户标注保留。

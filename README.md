@@ -13,6 +13,7 @@
 - 扫描与试听 WAV/BWF、MP3、AIFF、FLAC、Ogg Vorbis 和 OGA/Ogg FLAC；提取内嵌 Metadata。Opus 仅支持标签探测，不支持播放。
 - 本地和服务器模式支持厂商 CSV/TSV/TXT/XLS/XLSX Metadata 导入：先预览和确认匹配，再提交，可回滚导入。
 - 可承载 10 TB 以上的大规模音效素材库。
+- v1.0.0 起，桌面端提供 AI 智能搜索：用自然语言描述声音，得到最多 5 个经当前资料库命中核验的英文关键词。离线词表无需账号；云端模型需自备 HTTPS 供应商、API Key 和模型。详见 [AI 智能搜索](#ai-智能搜索)。
 
 **AudioLib Explorer helps sound designers build a sound-effects library of their own.**
 
@@ -25,8 +26,39 @@ A free, open-source sound effects (SFX) library manager for sound design, game a
 - Scan and play WAV/BWF, MP3, AIFF, FLAC, Ogg Vorbis and OGA/Ogg FLAC, with embedded Metadata extraction. Opus supports tag probing only, without playback.
 - Import vendor CSV/TSV/TXT/XLS/XLSX Metadata locally or on the server: preview and confirm matches before committing, with import rollback.
 - Scales to sound libraries of 10 TB and more.
+- From v1.0.0, the desktop app can turn a plain-language sound description into at most five English keyword queries that hit the current library. The offline lexicon needs no account; a cloud model needs your own HTTPS provider, API key and model. See [AI search](#ai-search).
 
-![AudioLib Explorer main window / 主界面](resources/screenshot-main.png)
+![AudioLib Explorer AI search / AI 智能搜索](resources/screenshot-main.png)
+
+Desktop AI search with a sample description and keyword tags. The sound list is empty and no server is connected.
+
+## AI search
+
+Desktop AI search shipped in [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0). On this branch the AI search source matches tag `1fc6f825`; later beta commits do not change it. The server and `AudioLibCli` do not expose it. Behavior and limits: [AI 智能搜索](doc/Rust_AI_Search.md). [Research and design](doc/AI_Keyword_Search_Design.md) keeps notes and concepts that 1.0 does not ship. The SVG wireframes in that note are not application screenshots.
+
+Turn AI on in the desktop search bar and describe the sound in 1–500 characters. **Tag生成 / Generate Tags** asks the offline lexicon, or a configured model, for plain-text keywords, then searches the current folder, scope and filters. It keeps at most five queries that have hits. Each query is one or two English words, and a space means AND. A verified single keyword is placed first when one exists. The tag text searches the current task. The tag **+** opens one new task with the same folder, scope and filters and does not call the model again. **Layers / 分层素材** starts checked and can add separate source-layer queries; clear it to ask only for a finished sound. **Search all / 查询全部** opens one task per verified tag, at most five, and rejects the whole batch when too few task slots remain. **Auto-search 3 tasks after generation / 生成后自动搜索 3 个任务** starts off.
+
+Offline use needs no account, network or API key. The built-in lexicon is version `1.0.0-UCS8.2.1`: 431 keywords, 753 UCS 8.2.1 subcategories and 19 scene recipes. Offline search ranks those stored entries. A general language model runs only after you configure a cloud provider. Open **Settings → AI Search… / 设置 → AI智能搜索…** and choose **Local reference (offline) / 本地词表（离线）**.
+
+A cloud model is optional. Add an HTTPS base URL, an API key and a model id. The model list can be fetched before the profile is saved. Protocols: OpenAI-compatible Chat, OpenAI Responses, Anthropic Messages, Gemini, Jev TypeSafe, OpenCode Go and DeepSeek. HTTP is allowed only for an explicit loopback address. Windows stores the key with the current user's DPAPI. macOS and Linux keep it for the session. A local UTC-month counter records generation attempts, including failures and timeouts. That counter is not the provider balance, and fetching the model list does not increment it. Jev selects among a bounded local candidate list and may answer uncertain. Its thresholds are application policy and were not calibrated on a sound library. The 1.0 release tests did not call a paid provider account.
+
+The request sends the description, the selected prompt and a bounded reference excerpt. Audio, file paths and the open library's Metadata stay out unless you type them into the description or prompt. The model cannot send SQL or write the library.
+
+1.0 leaves these for later: audio embeddings, understanding files that have no Metadata, OAuth and in-app subscription purchase, provider billing sync, persistent keys on macOS and Linux, a task for every layer, and a loop that rewrites queries from search results.
+
+## AI 智能搜索
+
+桌面端 AI 智能搜索随 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0) 发布。本分支的 AI 搜索源码与标签 `1fc6f825` 相同，其后的 beta 提交没有改动它。服务端和 `AudioLibCli` 不提供该功能。行为与限制见 [AI 智能搜索](doc/Rust_AI_Search.md)。[研究与设计](doc/AI_Keyword_Search_Design.md) 保留了 1.0 未交付的概念；其中的 SVG 线框不是应用截图。
+
+在桌面搜索条打开 AI，用 1–500 个字符描述声音，再点 **Tag生成**。离线词表或已配置的模型给出纯文本关键词，再按当前目录、搜索范围和筛选做实际检索，只保留有命中的查询，最多 5 条。每条是 1 或 2 个英文词，空格表示 AND。能核验出单词时把它放在第一位。点击标签正文在当前任务搜索；标签上的 **+** 用相同目录、范围和筛选新建一个任务，不再请求模型。**分层素材** 默认勾选，可同时给出素材层查询；取消后只请求成品声音。**查询全部** 为每个已核验标签各建一个任务，最多 5 个，任务名额不足时整批拒绝。**生成后自动搜索 3 个任务** 默认关闭。
+
+离线词表版本 `1.0.0-UCS8.2.1`，含 431 条关键词、753 条 UCS 8.2.1 子类和 19 个场景配方，按条目排序，不是通用语言模型，也不需要账号、网络或 API Key。在 **设置 → AI智能搜索…** 选择 **本地词表（离线）**（英文界面为 **Local reference (offline)**）。
+
+云端模型可选。需要自行填写 HTTPS 地址、API Key 和模型 ID；保存配置前可以获取模型列表。协议包括 OpenAI 兼容 Chat、OpenAI Responses、Anthropic Messages、Gemini、Jev TypeSafe、OpenCode Go 和 DeepSeek。除显式 loopback 外不使用 HTTP。Windows 用当前用户 DPAPI 保存密钥；macOS 与 Linux 只在本次会话保留。本机按 UTC 月份累计生成尝试，失败和超时也计入；这不是供应商余额，获取模型列表不计入。Jev 只在有限的本地候选中选择，也可以返回不确定。接受阈值是应用策略，尚未用音效库校准。1.0 的发布验收没有调用付费供应商账户。
+
+请求只包含描述、所选提示词和有限参考摘录。除非写进描述或提示词，否则不发送音频、文件路径或当前音库 Metadata。模型不能提交 SQL，也不能写入资料库。
+
+1.0 尚未包含：音频 embedding、理解没有 Metadata 的文件、OAuth 与应用内购买订阅、同步供应商账单、macOS/Linux 持久密钥、为每一素材层自动建任务，以及根据检索结果自动改写查询。
 
 AudioLib Explorer is a fast, local-first sound-effects library manager written in Rust with a [Slint](https://slint.dev) desktop UI. It indexes WAV/BWF, MP3, AIFF, FLAC and Ogg libraries into SQLite (FTS5), previews sounds through WASAPI (optionally ASIO) on Windows, and can browse a remote library served by `audiolib-server`. The macOS arm64 client uses CoreAudio. Version 0.8.4 added Linux x64 server and Docker amd64/arm64 deliverables. This README describes the current development source; published packages retain the features and identity of their own release tag.
 
@@ -162,6 +194,7 @@ Steps, sibling-directory rules and troubleshooting: [Managing sound libraries on
 - Up to 30 independent search-task tabs (limit adjustable in Appearance; existing saved limits are retained), with separate folders, filters and list state, personal saved searches and restored sessions. Overflow arrows keep the new-task button visible. See [Search Tasks](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Search_Tasks.md).
 - Incremental and full folder scans for WAV, FLAC, Ogg Vorbis and OGA/Ogg FLAC. WAV Metadata includes BWF `bext`, iXML, INFO, ID3, XMP and Soundminer SMED read-only compatibility; bounded Vorbis extraction retains Chinese text and repeated values. Rescans preserve user annotations. Source audio files are never modified. OpusTags can be probed separately, but `.opus` is not scanned by default and Opus playback is unsupported.
 - Four search scopes: **Main fields** searches filenames and Metadata; **All** also includes directory names; **Path** searches directory names and ancestors; **Filename** restricts the search to filenames. Path needs a prepared directory index; without one, All uses Main fields. SQLite FTS5 supports letter fragments of at least two characters (`expl`, `plos` and `sion` match `explosion`), Chinese segmentation (jieba-rs) and tag/category filters. The performance target remains **P95 latency <500ms for 1M+ records**.
+- Desktop AI search, shipped in v1.0.0: an offline keyword, UCS and recipe lexicon, or an optional model you configure, then the same FTS5 search. See [AI search](#ai-search).
 - Vendor Metadata import in local and server modes: CSV/TSV/TXT/XLS/XLSX parsing, mapping previews, explicit ambiguous-match confirmation, recoverable commits and rollback. Server sources can be uploaded tables or a relative directory under a configured server root. Original embedded Metadata and user annotations are preserved. See the [managed server preview API](doc/api/README.md#vendor-import-preview).
 - Playback with streaming decode, device-rate resampling, waveform and spectral views, independent pitch/rate audition (SoundTouch), WASAPI and optional ASIO output.
 - Library management: add folders, repair moved or renamed files, batch annotations, backup/restore, integrity checks, JSONL/CSV exchange.
