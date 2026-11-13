@@ -1,8 +1,8 @@
-# 1.0.0：AI 智能搜索与兼容修复（未发布）
+# 1.0.0：AI 智能搜索与播放可靠性
 
 程序 1.0.0 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9
 
-当前应用候选为 beta `ecbe972b17774aeaabdba413ec60301d42c3e4af`，以已发布的 `v0.9.6` 为基线准备正式 `v1.0.0`；尚未完成最终 main/tag 与七份正式 payload 的交付。现有资料库格式、API 和迁移边界不变，包括已有 `audio_sources:1` / af1 完整格式。候选来源、可复用验证及剩余门禁见 [1.0.0 发布准备](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/beta/doc/Rust_Release_1.0.0.md)。
+已于 2026-11-13 02:17:52 UTC（北京时间 10:17:52）正式发布 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0)。七份正式 payload 来自 main/tag `1fc6f825520bdf24d01e2889dbcc7c96831be04c`，经 [#291](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/291) 从已验收 beta 晋升。API、资料库写目标、快照读取范围和完整格式沿用 0.9.6，包括已有 `audio_sources:1` / af1 边界，不引入新的资料库迁移。源码复用、平台验收、十四资产及发布后固定安装同步见 [1.0.0 发布记录](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_1.0.0.md)。
 
 - **AI 智能搜索**：本地关键词、UCS 与素材配方检索，默认及自定义提示词；支持通用 LLM、Jev 类型化决策、OpenCode Go 与 DeepSeek 等协议。设置入口集中供应商与 Skill／预设，合法已保存配置下侧栏默认收起；供应商支持保存前获取模型和测试，会话草稿独立保留。Jev 增加关键词／UCS／配方结构化召回，候选与真实模式及输出上限一致，并限制请求体预算；Windows 密钥使用当前用户 DPAPI，其他平台暂只保留会话密钥。
 - **推荐与搜索任务**：按当前目录、范围和筛选实际核验候选，最多展示五个、每项最多两个英文关键词，首项保留单关键词。tag 正文在当前任务搜索，右缘“+”沿用当前条件新建独立任务，无需再次调用供应商，按钮提供独立点击及缩放反馈。默认生成后由用户选择执行；可显式查询全部五项，或勾选自动创建最多三项任务。目录过滤保留已完成推荐，在途旧响应与跨资料库结果仍拒绝；普通 query 草稿不再阻断合法推荐，来源引用必须属于本次提供的参考条目。
@@ -10,7 +10,7 @@
 - **RIFF 兼容**：兼容父 RIFF size 误将八字节头计入、且子块结构完整的文件；保留实际截断、内部越界、错误布局及 RF64/BW64 边界检查，不改写音频。
 - **发布工具**：Windows 原生计划支持明确的固定安装目的地和版本清单；草稿续传核对完整资产身份，只上传缺失项，显式发布前再次验证。稳定模块按实际影响选择检查，保留原始验证身份。
 
-使用方法与真实账户联调限制见 [AI 智能搜索](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/ecbe972b17774aeaabdba413ec60301d42c3e4af/doc/Rust_AI_Search.md)。本地 mock、公共模型目录及历史包验收不代表真实供应商账户、真实休眠 NAS 或音频硬件验收。以下已发布记录保持原身份。
+使用方法见 [AI 智能搜索](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/v1.0.0/doc/Rust_AI_Search.md)。七份归档、十四项线上 digest 与七份下载校验文件均已核验；同一 `local_release/` 的 908 文件、CLI 1.0.0 及发布后隔离启动通过。Mac ad-hoc 不是 Apple 公证，Linux x64／Docker amd64 使用 ARM64 主机仿真；真实供应商账户、Jev 语义／阈值、真实休眠 NAS、ASIO 硬件和声学起音延迟仍未新增验收。发布后工具 #290 和 tag 冻结后 beta 的 #292 不属于本版。以下历史发布记录保持原身份，后续文档不移动 tag 或重建原字节。
 
 # 0.9.6：分页偏好与搜索历史导航
 
