@@ -2,7 +2,7 @@
 //! Bounded local records for decision models; selected text is always reconstructed locally.
 use super::{ReferenceIndex, validate_intent};
 use crate::{AiError, Result};
-use audiolib_core::ai_search::AiQueryPlan;
+use audiolib_core::ai_search::{AiQueryKind, AiQueryPlan};
 use serde::Serialize;
 use std::collections::HashSet;
 
@@ -283,6 +283,7 @@ impl ReferenceIndex {
                 Self::add(
                     &mut queries,
                     text,
+                    AiQueryKind::Main,
                     "keyword",
                     &word.zh,
                     &word.id,
@@ -293,6 +294,7 @@ impl ReferenceIndex {
             Self::add(
                 &mut queries,
                 &category.id,
+                AiQueryKind::Main,
                 "UCS",
                 &format!("{} / {}", category.category, category.subcategory),
                 &category.id,

@@ -76,6 +76,45 @@ fn finite_selection_supports_keywords_ucs_and_recipes() {
 }
 
 #[test]
+fn selected_plans_keep_explicit_kinds_instead_of_inferring_labels() {
+    use audiolib_core::ai_search::AiQueryKind;
+
+    for layers in [false, true] {
+        let (_, ids) = request_for("科幻爆炸", layers);
+        let (plan, _) =
+            parse(&response(&ids, "scifi-explosion"), &ids, "科幻爆炸", layers).unwrap();
+        assert!(
+            plan.queries
+                .iter()
+                .any(|query| query.kind == AiQueryKind::Main)
+        );
+        assert_eq!(
+            plan.queries
+                .iter()
+                .any(|query| query.kind == AiQueryKind::Layer),
+            layers
+        );
+        assert!(
+            plan.queries
+                .iter()
+                .all(|query| query.source_ids == ["scifi-explosion"])
+        );
+    }
+    let (_, ids) = request_for("wind", true);
+    let (plan, _) = parse(&response(&ids, "P0300"), &ids, "wind", true).unwrap();
+    assert!(
+        plan.queries
+            .iter()
+            .all(|query| query.kind == AiQueryKind::Main)
+    );
+    assert!(
+        plan.queries
+            .iter()
+            .all(|query| query.source_ids == ["P0300"])
+    );
+}
+
+#[test]
 fn selected_candidate_uses_its_own_independent_fit() {
     let (_, ids) = request_for("科幻爆炸", false);
     let choice = "scifi-explosion";
