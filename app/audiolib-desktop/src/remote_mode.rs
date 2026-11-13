@@ -47,7 +47,9 @@ pub(super) const SELECTION_SETTLE: Duration = Duration::from_millis(180);
 static STREAM_REGISTRATION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
-struct RemoteAuditionWait {
+/// One foreground audition wait; network preparation and engine acknowledgment
+/// share its epoch-owned presentation so older completions cannot clear a newer hint.
+pub(super) struct RemoteAuditionWait {
     epoch: u64,
     selection: u64,
     library: u64,
@@ -1463,7 +1465,9 @@ impl Controller {
                 c2.list_waveforms.roots_online(&online_root_names(&updated));
                 c2.publish_remote_notice(&ui);
                 c2.publish_data_source(&ui);
-                ui.set_status(message.into());
+                if !ui.get_closing() && !c2.close_retains_status.load(Ordering::Acquire) {
+                    ui.set_status(message.into());
+                }
             });
         });
     }
@@ -2879,17 +2883,20 @@ impl Controller {
             + 1;
         if let Some(ui) = self.ui.upgrade() {
             ui.set_remote_audition_status("".into());
+            ui.set_audio_buffering_status("".into());
         } else {
             let current = self.remote_audition_status_epoch.clone();
             post(self.ui.clone(), move |ui| {
                 if current.load(Ordering::Acquire) == epoch {
                     ui.set_remote_audition_status("".into());
+                    ui.set_audio_buffering_status("".into());
                 }
             });
         }
     }
 
-    fn begin_remote_audition_wait(
+    /// Replace the foreground wait for this still-current selection.
+    pub(super) fn begin_remote_audition_wait(
         self: &Arc<Self>,
         selection: u64,
         cancel: &Arc<AtomicBool>,
@@ -2928,7 +2935,12 @@ impl Controller {
         Ok(wait)
     }
 
-    fn publish_remote_audition_wait(self: &Arc<Self>, wait: &RemoteAuditionWait, text: String) {
+    /// Deliver progress only while this wait still owns the current audition.
+    pub(super) fn publish_remote_audition_wait(
+        self: &Arc<Self>,
+        wait: &RemoteAuditionWait,
+        text: String,
+    ) {
         let controller = self.clone();
         let wait = wait.clone();
         post(self.ui.clone(), move |ui| {
@@ -2941,6 +2953,7 @@ impl Controller {
             }
             if !controller.available()
                 || ui.get_closing()
+                || controller.close_retains_status.load(Ordering::Acquire)
                 || wait.cancel.load(Ordering::Acquire)
                 || wait.finished.load(Ordering::Acquire)
                 || controller.selection_generation.load(Ordering::Acquire) != wait.selection
@@ -2954,7 +2967,8 @@ impl Controller {
         });
     }
 
-    fn finish_remote_audition_wait(&self, wait: &RemoteAuditionWait) {
+    /// Retire this wait without clearing feedback belonging to a later audition.
+    pub(super) fn finish_remote_audition_wait(&self, wait: &RemoteAuditionWait) {
         wait.finished.store(true, Ordering::Release);
         let epoch = wait.epoch;
         let current = self.remote_audition_status_epoch.clone();
@@ -3411,23 +3425,6 @@ impl Controller {
         };
         audiolib_audio::waveform_with_cancel(&path, request, cancel)
             .map_err(|error| error.to_string())
-    }
-
-    /// Show (or clear) the "buffering" hint while network audition waits for data.
-    pub(super) fn buffering_hint(&self, on: bool) {
-        let chinese = self.chinese.load(Ordering::Acquire);
-        let text = cn_or(
-            chinese,
-            "正在缓冲音频…（网络较慢，数据到达后自动继续）",
-            "Buffering audio… (slow network; playback resumes by itself)",
-        );
-        post(self.ui.clone(), move |ui| {
-            if on {
-                ui.set_status(text.into());
-            } else if ui.get_status().as_str() == text {
-                ui.set_status(slint::SharedString::new());
-            }
-        });
     }
 }
 

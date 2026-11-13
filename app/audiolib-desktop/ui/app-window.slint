@@ -932,8 +932,9 @@ export component AppWindow inherits Window {
     private property <length> application-footer-height: max(20px * Theme.ui-scale, Theme.font(10) + 6px * Theme.ui-scale);
     private property <string> application-status-text: root.drag-preparing && root.drag-progress != "" ? root.drag-progress
         : root.remote-audition-status != "" ? root.remote-audition-status
+        : root.audio-buffering-status != "" ? root.audio-buffering-status
         : root.scanning ? (root.chinese ? "正在扫描音效文件夹" : "Scanning sound folder") + (root.status != "" ? " · " + root.status : "") : root.status;
-    private property <length> priority-status-width: root.remote-audition-status != "" || (root.drag-preparing && root.drag-progress != "")
+    private property <length> priority-status-width: root.remote-audition-status != "" || root.audio-buffering-status != "" || (root.drag-preparing && root.drag-progress != "")
         ? min(240px * Theme.ui-scale, max(0px, root.width - (40px + (root.drag-preparing ? 60px : 0px)) * Theme.ui-scale - 1px) * 0.6) : 0px;
     in-out property <bool> ai-visible: false;
     in-out property <bool> ai-collapsed: false;
@@ -1325,6 +1326,7 @@ export component AppWindow inherits Window {
     in property <string> status: "";
     // Selection-owned remote waits survive unrelated search/sync status updates.
     in property <string> remote-audition-status: "";
+    in property <string> audio-buffering-status: "";
     in property <bool> searching: false;
     in property <bool> scanning: false;
     in property <bool> can-previous: false;
