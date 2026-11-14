@@ -693,6 +693,7 @@ name = "audiolib-windows"
 version = "1.0.0"
 dependencies = [
  "audiolib-core",
+ "audiolib-db",
  "cc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",

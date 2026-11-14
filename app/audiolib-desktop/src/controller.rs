@@ -7452,53 +7452,23 @@ impl Controller {
     fn open_explorer(self: &Arc<Self>, path: String, select_file: bool) {
         let c = self.clone();
         std::thread::spawn(move || {
-            #[cfg(windows)]
-            {
-                let result = if select_file {
-                    audiolib_windows::reveal_path(Path::new(&path))
-                } else {
-                    std::process::Command::new("explorer.exe")
-                        .arg(&path)
-                        .spawn()
-                        .map(|_| ())
-                        .map_err(audiolib_core::Error::from)
-                };
-                if let Err(error) = result {
-                    c.status(error.to_string());
-                }
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let result = if select_file {
-                    audiolib_windows::reveal_path(Path::new(&path))
-                } else {
-                    Path::new(&path)
-                        .canonicalize()
-                        .and_then(|path| {
-                            std::process::Command::new("/usr/bin/open")
-                                .arg(path)
-                                .status()
-                        })
-                        .map_err(audiolib_core::Error::from)
-                        .and_then(|status| {
-                            if status.success() {
-                                Ok(())
-                            } else {
-                                Err(std::io::Error::other(format!(
-                                    "Finder folder open failed ({status})"
-                                ))
-                                .into())
-                            }
-                        })
-                };
-                if let Err(error) = result {
-                    c.status(error.to_string());
-                }
-            }
+            // Classify before any shell launch. A relative or server path must not
+            // be resolved against the process directory, which is the application
+            // folder for a portable launch. Server mode returns before this call.
+            let result = if select_file {
+                audiolib_windows::reveal_path(Path::new(&path))
+            } else {
+                audiolib_windows::reveal_folder(Path::new(&path))
+            };
             #[cfg(not(any(windows, target_os = "macos")))]
-            {
-                let _ = (path, select_file);
-                c.status("Reveal in Explorer requires Windows".into());
+            let result = match result {
+                Ok(()) => Err(audiolib_core::Error::Validation(
+                    "Reveal in Explorer requires Windows".into(),
+                )),
+                error => error,
+            };
+            if let Err(error) = result {
+                c.status(error.to_string());
             }
         });
     }
@@ -7556,6 +7526,9 @@ impl Controller {
         } else if action == 21 {
             self.propose_operation(LibraryOperation::RemoveAudio(vec![id]));
         } else if action == 2 {
+            // Local libraries reveal the stored absolute file. Server mode has
+            // already returned: a snapshot path is not opened from this process
+            // directory.
             let provider = self.provider();
             let c = self.clone();
             std::thread::spawn(move || match provider.get_audio(id) {
