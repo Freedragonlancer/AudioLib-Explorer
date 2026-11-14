@@ -130,6 +130,20 @@ try {
                 return $true
             }
         }
+        # Intermediate cleanup intentionally removes the live artifact evidence.
+        # A prior successful pass may attest to the same compiler state, but this
+        # reduced proof only permits another Intermediate pass after all build
+        # directories are gone. It never authorizes deleting retained profiles.
+        $retainedEvidence=$owner.PSObject.Properties['intermediate_rustc_info_sha256']
+        if($Mode -eq 'Intermediate' -and $retainedEvidence -and $retainedEvidence.Value -cmatch '^[0-9A-F]{64}$' -and
+            (Get-FileHash -LiteralPath $infoPath -Algorithm SHA256).Hash -ceq $retainedEvidence.Value){
+            foreach($profilePath in $cargoProfiles){
+                foreach($name in @('build','deps','.fingerprint','incremental','examples')){
+                    if(Test-Path -LiteralPath (Join-Path $profilePath $name)){return $false}
+                }
+            }
+            return $true
+        }
         return $false
     }
     $registeredCargoEvidence=$owner -and !$hasCargoTag -and (Test-RegisteredCargoEvidence)
@@ -215,6 +229,14 @@ try {
     }
     if($MaxGiB -gt 0){$report.budget_met=$report.remaining_bytes -le $limit}
     $report.status=if($Action -eq 'Plan'){'planned'}elseif($WhatIfPreference){'whatif'}else{'passed'}
+    if($report.status -eq 'passed' -and $Mode -eq 'Intermediate' -and $registeredCargoEvidence){
+        # Persist only previously validated Cargo provenance, preserving unknown
+        # owner fields. Plan/WhatIf and broader cleanup modes never create it.
+        Assert-AudioLibUnlinkedPath $ownerPath
+        $compilerHash=(Get-FileHash -LiteralPath (Join-Path $TargetDirectory '.rustc_info.json') -Algorithm SHA256).Hash
+        $owner|Add-Member -NotePropertyName intermediate_rustc_info_sha256 -NotePropertyValue $compilerHash -Force
+        [IO.File]::WriteAllText($ownerPath,($owner|ConvertTo-Json -Compress -Depth 5),[Text.UTF8Encoding]::new($false))
+    }
     $report|ConvertTo-Json -Compress -Depth 5
     exit 0
 }catch{

@@ -431,9 +431,7 @@ pub(crate) fn cleanup_successful_update(install: &Path) {
     if lock.try_lock().is_err() {
         return;
     }
-    let mut retained_stage = true;
     if let Ok(entries) = std::fs::read_dir(&install) {
-        retained_stage = false;
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name();
@@ -445,22 +443,18 @@ pub(crate) fn cleanup_successful_update(install: &Path) {
             {
                 continue;
             }
-            match std::fs::read_to_string(path.join("update-result.txt")) {
-                Ok(result) if result == SUCCESS_RESULT => {
-                    if let Err(error) = std::fs::remove_dir_all(&path) {
-                        retained_stage = true;
-                        tracing::warn!(path = %path.display(), %error, "Cannot remove completed update stage");
-                    }
-                }
-                _ => retained_stage = true,
+            if std::fs::read_to_string(path.join("update-result.txt"))
+                .is_ok_and(|result| result == SUCCESS_RESULT)
+                && let Err(error) = std::fs::remove_dir_all(&path)
+            {
+                tracing::warn!(path = %path.display(), %error, "Cannot remove completed update stage");
             }
         }
     }
+    // Keep the sidecar permanently: another updater can acquire this same file
+    // immediately after unlock. Removing its pathname could split the lock on
+    // Unix or prevent the Windows helper from reopening a delete-pending file.
     let _ = File::unlock(&lock);
-    drop(lock);
-    if !retained_stage {
-        let _ = std::fs::remove_file(lock_path);
-    }
 }
 
 #[derive(Debug)]

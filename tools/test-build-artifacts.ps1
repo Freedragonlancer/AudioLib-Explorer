@@ -198,6 +198,40 @@ New-Item -ItemType Directory -Path (Join-Path $notCargo 'x86_64-unknown-linux-gn
 [IO.File]::WriteAllText((Join-Path $notCargo 'x86_64-unknown-linux-gnu/notes.txt'),'a populated target container is not cleared Cargo state')
 $null=Invoke-Clean @{TargetDirectory=$notCargo} 1
 Write-Host 'PASS: pre-registered genuine-shaped Cargo state supports missing tags; unowned/foreign/invalid/non-Cargo state and active compilers remain blocked.'
+$untaggedIntermediate=Join-Path $taskRoot 'untagged-intermediate-target'
+$null=Invoke-Clean @{Action='Register';TargetDirectory=$untaggedIntermediate}
+New-UntaggedCargoEvidence $untaggedIntermediate
+foreach($name in @('debug/app.exe','debug/app.pdb','x86_64-pc-windows-msvc/release/app.exe','x86_64-pc-windows-msvc/release/app.pdb')){
+    $file=Join-Path $untaggedIntermediate $name
+    New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($file)) -Force|Out-Null
+    [IO.File]::WriteAllBytes($file,[byte[]]::new(256))
+}
+$firstIntermediate=Invoke-Clean @{TargetDirectory=$untaggedIntermediate;Mode='Intermediate'}
+if($firstIntermediate.status -ne 'passed' -or $firstIntermediate.removed_bytes -ne 256){throw 'Untagged intermediate cleanup did not remove compilation artifacts.'}
+$retainedExecutable=Join-Path $untaggedIntermediate 'debug/app.exe'
+$retainedHash=(Get-FileHash -LiteralPath $retainedExecutable).Hash
+$retainedOwner=Join-Path $untaggedIntermediate '.audiolib-build-owner.json'
+$ownerBeforePreview=[IO.File]::ReadAllText($retainedOwner)
+$retainedPreview=Invoke-Clean @{Action='Plan';TargetDirectory=$untaggedIntermediate;Mode='Intermediate'}
+if($retainedPreview.status -ne 'planned' -or $retainedPreview.removed_bytes -ne 0 -or [IO.File]::ReadAllText($retainedOwner) -cne $ownerBeforePreview){throw 'Post-intermediate preview failed or changed registered ownership.'}
+$null=Invoke-Clean @{TargetDirectory=$untaggedIntermediate;Mode='All'} 1
+$temporary=Join-Path $untaggedIntermediate 'tmp/compiler.tmp'
+New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($temporary)) -Force|Out-Null
+[IO.File]::WriteAllBytes($temporary,[byte[]]::new(128))
+$retainedInfo=Join-Path $untaggedIntermediate '.rustc_info.json'
+$savedInfo=[IO.File]::ReadAllText($retainedInfo)
+try{
+    [IO.File]::WriteAllText($retainedInfo,($savedInfo+' '))
+    $null=Invoke-Clean @{TargetDirectory=$untaggedIntermediate;Mode='Intermediate'} 1
+    if(!(Test-Path -LiteralPath $temporary)){throw 'Stale post-intermediate evidence authorized temporary-file deletion.'}
+}finally{[IO.File]::WriteAllText($retainedInfo,$savedInfo)}
+$retainedRun=Invoke-Clean @{TargetDirectory=$untaggedIntermediate;Mode='Intermediate'}
+if($retainedRun.status -ne 'passed' -or $retainedRun.removed_bytes -ne 128 -or (Test-Path -LiteralPath $temporary) -or
+    (Get-FileHash -LiteralPath $retainedExecutable).Hash -cne $retainedHash -or (Test-Path -LiteralPath (Join-Path $untaggedIntermediate 'CACHEDIR.TAG'))){throw 'Repeated untagged intermediate cleanup changed final executables or fabricated a Cargo tag.'}
+foreach($name in @('debug/app.pdb','x86_64-pc-windows-msvc/release/app.exe','x86_64-pc-windows-msvc/release/app.pdb')){
+    if(!(Test-Path -LiteralPath (Join-Path $untaggedIntermediate $name))){throw 'Repeated untagged intermediate cleanup removed retained EXE/PDB outputs.'}
+}
+Write-Host 'PASS: untagged Intermediate cleanup retains EXE/PDBs across repeat Plan/Run, removes new Cargo tmp, rejects changed compiler evidence and does not authorize All.'
 $realCompilers=@(Microsoft.PowerShell.Management\Get-Process | Where-Object ProcessName -match '^(cargo|rustc|rustdoc|clippy-driver|clang|clang\+\+|gcc|g\+\+|cc1|cc1plus|link|lld|lld-link|cl)$')
 if($realCompilers.Count){Write-Host 'Pipeline cleanup integration: not-run (another real compiler is active).'}else{
     $tools=Join-Path $taskRoot 'tools'

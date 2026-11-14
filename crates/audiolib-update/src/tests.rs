@@ -342,7 +342,7 @@ fn staged_updates_exclude_another_updater_for_the_same_installation() {
 }
 
 #[test]
-fn startup_cleans_successful_update_stage_and_released_lock() {
+fn startup_cleans_successful_update_stage_and_retains_reusable_lock() {
     let root = tempfile::tempdir().unwrap();
     let stage = root.path().join(".audiolib-update-complete");
     std::fs::create_dir(&stage).unwrap();
@@ -358,9 +358,50 @@ fn startup_cleans_successful_update_stage_and_released_lock() {
 
     assert!(!stage.exists(), "successful update stage was retained");
     assert!(
-        !root.path().join(".audiolib-update.lock").exists(),
-        "released update lock was retained"
+        root.path().join(".audiolib-update.lock").is_file(),
+        "update lock sidecar must survive successful cleanup"
     );
+    UpdateClient::for_install(NATIVE_PRODUCT, "1.0.0", root.path()).unwrap();
+    assert!(root.path().join(".audiolib-update.lock").is_file());
+}
+
+#[test]
+fn startup_preserves_lock_identity_for_existing_handles_and_future_updaters() {
+    let root = tempfile::tempdir().unwrap();
+    let lock_path = root.path().join(".audiolib-update.lock");
+    // A contender may already have opened the sidecar before startup cleanup.
+    let contender = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+        .unwrap();
+
+    UpdateClient::for_install(NATIVE_PRODUCT, "1.0.0", root.path()).unwrap();
+    let first_stage = tempfile::Builder::new()
+        .prefix(".audiolib-update-")
+        .tempdir_in(root.path())
+        .unwrap();
+    let first = PreparedUpdate::new(first_stage, root.path(), NATIVE_PRODUCT).unwrap();
+    assert!(
+        contender.try_lock().is_err(),
+        "cleanup replaced the lock file held by the staged updater"
+    );
+    drop(first);
+
+    contender.try_lock().unwrap();
+    let second_stage = tempfile::Builder::new()
+        .prefix(".audiolib-update-")
+        .tempdir_in(root.path())
+        .unwrap();
+    assert!(PreparedUpdate::new(second_stage, root.path(), NATIVE_PRODUCT).is_err());
+    std::fs::File::unlock(&contender).unwrap();
+
+    let next_stage = tempfile::Builder::new()
+        .prefix(".audiolib-update-")
+        .tempdir_in(root.path())
+        .unwrap();
+    assert!(PreparedUpdate::new(next_stage, root.path(), NATIVE_PRODUCT).is_ok());
 }
 
 #[test]
@@ -411,7 +452,7 @@ fn startup_never_cleans_a_success_stage_while_the_helper_holds_the_lock() {
     std::fs::File::unlock(&lock).unwrap();
     drop(lock);
     UpdateClient::for_install(NATIVE_PRODUCT, "1.0.0", root.path()).unwrap();
-    assert!(!stage.exists() && !lock_path.exists());
+    assert!(!stage.exists() && lock_path.is_file());
 }
 
 #[test]
