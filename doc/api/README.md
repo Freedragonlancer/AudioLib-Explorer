@@ -1605,14 +1605,14 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 `POST /api/v1/ai/models` 和 `POST /api/v1/ai/generate` 复用 AudioLib 服务器连接，独立于当前音库、快照和 Metadata 写权限；库尚未就绪时也可使用。两者始终验证有效的 AudioLib Bearer 令牌，即使普通 LAN 读取无需认证，仍保留同源请求保护。
 
-转发默认禁用。管理员在服务器 TOML 中配置精确协议／Base URL 允许列表，重启后生效。例如（示例 IP 请替换）：
+转发默认禁用。管理员在服务器 TOML 中配置精确协议／Base URL 允许列表，重启后生效。例如（将 `<magpie-host>` 替换为实际部署主机）：
 
 ```toml
 max_ai_requests = 4
 
 [[ai_upstreams]]
 protocol = "magpie"
-base_url = "http://192.168.1.20:3425/v1"
+base_url = "http://<magpie-host>:3425/v1"
 
 [[ai_upstreams]]
 protocol = "chat_completions"
