@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [features]
 test-hooks = ["audiolib-db/test-hooks"]
+test-update-source = ["audiolib-update/test-update-source"]
 
 [dependencies]
 audiolib-ai = { path = "../../crates/audiolib-ai" }
