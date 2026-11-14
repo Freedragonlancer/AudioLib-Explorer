@@ -719,7 +719,18 @@ fn child_restore_current_draft() {
     let sequence = fixture.controller.metadata.lock().unwrap().sequence;
     assert!(sequence > before);
     assert!(fixture.controller.wait_metadata(sequence, false).is_ok());
+    // The worker barrier observes the completed write, while rollback is posted
+    // to the Slint event loop. Run that publication before checking the editor.
+    let weak = fixture.ui.as_weak();
+    run_until(&fixture.ui, move || {
+        !weak.upgrade().unwrap().get_edit_favorite()
+    });
     assert!(!fixture.ui.get_edit_favorite());
+    assert_eq!(fixture.ui.get_metadata_dirty(), dirty_before);
+    assert_eq!(
+        fixture.ui.get_edit_notes(),
+        "keep my original-library annotations"
+    );
     fixture.controller.metadata.lock().unwrap().edit(
         -9,
         MetadataPatch {
