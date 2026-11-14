@@ -21,12 +21,19 @@ if ($PublishedReleaseReport -and $PSVersionTable.PSVersion -lt [version]'7.3') {
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 . (Join-Path $PSScriptRoot 'build-cache.ps1')
 $binaryRoot = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $taskRoot $BinaryDirectory }))
-$cli = Join-Path $binaryRoot 'AudioLibCli.exe'
-$desktop = Join-Path $binaryRoot 'AudioLibExplorer.exe'
 # Reject incomplete packages before reading the legacy fixture or starting apps.
 & (Join-Path $PSScriptRoot 'validate-portable-licenses.ps1') -BinaryDirectory $binaryRoot -WithoutAsio:$WithoutAsio
+if (!$PublishedReleaseReport) {
+    & (Join-Path $PSScriptRoot 'validate-package-privacy.ps1') -BinaryDirectory $binaryRoot
+}
 $tempParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar)
 $testRoot = [IO.Path]::GetFullPath((Join-Path $tempParent ('AudioLibPortable-' + [guid]::NewGuid().ToString('N'))))
+$runtimeRoot = Join-Path $testRoot 'runtime'
+$cli = Join-Path $runtimeRoot 'AudioLibCli.exe'
+$desktop = Join-Path $runtimeRoot 'AudioLibExplorer.exe'
+# Legacy import intentionally discovers the repository's read-only YAML/database;
+# routine synthetic acceptance keeps both executable ancestry and CWD isolated.
+$runtimeWorkingDirectory = if ($LegacyImport) { $taskRoot } else { $runtimeRoot }
 $artifactRoot = [IO.Path]::GetFullPath((Join-Path $taskRoot '.rust-validation/portable-smoke'))
 $savedDataRoot = $env:AUDIOLIB_DATA_DIR
 $legacyPath = Join-Path $taskRoot 'data/audiolib.db'
@@ -37,11 +44,17 @@ $originalHash = if (!$CleanCheckout) { (Get-FileHash -LiteralPath $legacyPath -A
 # success only by its exit code.
 function Invoke-Cli([string[]]$Arguments) {
     $saved = $ErrorActionPreference
+    $pushed = $false
     $ErrorActionPreference = 'Continue'
     try {
+        Push-Location -LiteralPath $runtimeWorkingDirectory -ErrorAction Stop
+        $pushed = $true
         $all = @(& $cli @Arguments 2>&1)
         $code = $LASTEXITCODE
-    } finally { $ErrorActionPreference = $saved }
+    } finally {
+        if ($pushed) { Pop-Location }
+        $ErrorActionPreference = $saved
+    }
     [PSCustomObject]@{
         ExitCode=$code
         Output=($all | Where-Object { $_ -isnot [Management.Automation.ErrorRecord] } | Out-String)
@@ -51,7 +64,7 @@ function Invoke-Cli([string[]]$Arguments) {
 function Invoke-DesktopSmoke([string[]]$Arguments, [string]$Name) {
     $stdout = Join-Path $testRoot ($Name + '.stdout')
     $stderr = Join-Path $testRoot ($Name + '.stderr')
-    $process = Start-Process -FilePath $desktop -ArgumentList $Arguments -WorkingDirectory $binaryRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    $process = Start-Process -FilePath $desktop -ArgumentList $Arguments -WorkingDirectory $runtimeWorkingDirectory -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     # Windows PowerShell 5 reports no ExitCode unless the handle is opened before exit.
     $null = $process.Handle
     try {
@@ -61,6 +74,25 @@ function Invoke-DesktopSmoke([string[]]$Arguments, [string]$Name) {
         if (!$process.HasExited) { $process.Kill(); $process.WaitForExit() }
         $process.Dispose()
     }
+}
+function Get-PortablePayloadIdentity([string]$Root) {
+    $rootItem = Get-Item -LiteralPath $Root -Force
+    if (!$rootItem.PSIsContainer -or $rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Portable runtime source must be an unlinked directory.' }
+    $prefix = $rootItem.FullName.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    foreach ($entry in (Get-ChildItem -LiteralPath $Root -Recurse -Force)) {
+        if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Linked portable runtime content is not supported.' }
+        if (!$entry.PSIsContainer) {
+            [PSCustomObject]@{
+                Path=$entry.FullName.Substring($prefix.Length).Replace('\', '/')
+                Length=$entry.Length
+                SHA256=(Get-FileHash -LiteralPath $entry.FullName -Algorithm SHA256).Hash
+            }
+        }
+    }
+}
+function Assert-PortablePayloadIdentity([object[]]$Expected, [string]$Root, [string]$Name) {
+    $actual = @(Get-PortablePayloadIdentity $Root)
+    if (@(Compare-Object -ReferenceObject $Expected -DifferenceObject $actual -Property Path,Length,SHA256 -CaseSensitive).Count) { throw "$Name differs from the accepted portable payload." }
 }
 try {
     if (!$testRoot.StartsWith($tempParent + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Portable smoke path escaped its owned temporary root.' }
@@ -86,9 +118,6 @@ try {
         & (Join-Path $PSScriptRoot 'validate-package-privacy.ps1') -BinaryDirectory $binaryRoot -ReleaseReport $PublishedReleaseReport
         $published = Get-Content -LiteralPath $PublishedReleaseReport -Raw | ConvertFrom-Json
         if ($published.tag -cne $ExpectedTag -or $published.commit -cne $ExpectedCommit) { throw 'Published release report does not match the expected tag/commit.' }
-        $version = Invoke-Cli @('--version')
-        $versionText = $version.Output
-        if ($version.ExitCode -ne 0 -or $versionText.Trim() -cne ('AudioLibCli ' + $published.version)) { throw 'Published CLI version does not match its release report.' }
         $identityCheck = 'packaged EXE hashes match published release report'
     } else {
         if ($ExpectedTag -or $ExpectedCommit) { throw 'Expected tag/commit requires a published release report.' }
@@ -113,6 +142,19 @@ try {
         $expectedEntries = @(Get-ChildItem -LiteralPath $binaryRoot -Recurse -Force -File | Where-Object { $_.DirectoryName -ne $binaryRoot -or $_.Name -notmatch '^AudioLib(Explorer|Cli)\.exe\.sha256$' } | ForEach-Object { $_.FullName.Substring($binaryRoot.Length).TrimStart('\', '/').Replace('\', '/') })
         & (Join-Path $PSScriptRoot 'validate-portable-zip.ps1') -Archive $portableArchive -ExpectedEntries $expectedEntries
         $zipCheck = 'portable ZIP entry names use forward slashes'
+    }
+    # Startup can create the persistent updater lock next to the EXE. Execute a
+    # verified owned copy so acceptance never adds private state to package bytes.
+    $packageIdentity = @(Get-PortablePayloadIdentity $binaryRoot)
+    New-Item -ItemType Directory -Path $runtimeRoot | Out-Null
+    foreach ($entry in (Get-ChildItem -LiteralPath $binaryRoot -Force)) {
+        Copy-Item -LiteralPath $entry.FullName -Destination $runtimeRoot -Recurse -Force
+    }
+    Assert-PortablePayloadIdentity $packageIdentity $runtimeRoot 'Portable runtime copy'
+    if ($PublishedReleaseReport) {
+        $version = Invoke-Cli @('--version')
+        $versionText = $version.Output
+        if ($version.ExitCode -ne 0 -or $versionText.Trim() -cne ('AudioLibCli ' + $published.version)) { throw 'Published CLI version does not match its release report.' }
     }
     $initial = Invoke-DesktopSmoke @('--headless-smoke') 'headless'
     if ($initial.ExitCode -ne 0) { throw "Portable headless startup failed: $($initial.Error)" }
@@ -162,10 +204,11 @@ try {
         $fixtureHash -eq (Get-FileHash -LiteralPath $fixture -Algorithm SHA256).Hash
     } else { $originalHash -eq (Get-FileHash -LiteralPath $legacyPath -Algorithm SHA256).Hash }
     if (!$unchanged) { throw 'Source changed during portable smoke.' }
+    Assert-PortablePayloadIdentity $packageIdentity $binaryRoot 'Original portable package'
     $report = [PSCustomObject]@{
         success=$true
         mode=$(if ($CleanCheckout) { 'clean-checkout-synthetic' } else { 'legacy-import' })
-        checks=@($identityCheck,$(if ($CleanCheckout) { 'isolated empty first launch and synthetic WAV scan' } else { 'headless first launch imports 34 records' }),'packaged CLI statistics','Chinese UI snapshot and clean exit','invalid preferences return failure and synchronous diagnostic',$(if ($WithoutAsio) { 'Slint and SoundTouch license materials (non-ASIO build)' } else { 'Slint, SoundTouch and ASIO license materials' }),'source unchanged')
+        checks=@($identityCheck,'runtime copy file identities and original package unchanged',$(if ($CleanCheckout) { 'isolated empty first launch and synthetic WAV scan' } else { 'headless first launch imports 34 records' }),'packaged CLI statistics','Chinese UI snapshot and clean exit','invalid preferences return failure and synchronous diagnostic',$(if ($WithoutAsio) { 'Slint and SoundTouch license materials (non-ASIO build)' } else { 'Slint, SoundTouch and ASIO license materials' }),'source unchanged')
         records=$expectedCount
         screenshot='.rust-validation/portable-smoke/chinese.png'
         original_database_unchanged=$(if ($CleanCheckout) { $null } else { $unchanged })
