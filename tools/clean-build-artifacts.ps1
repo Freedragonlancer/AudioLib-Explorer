@@ -64,7 +64,75 @@ try {
     if($owner -and ($owner.schema_version -ne 1 -or $owner.owner_id -cne $ownerId -or $owner.host -cne [Environment]::MachineName)){throw 'Build cache belongs to a different workspace or host.'}
     $cargoTag=Join-Path $TargetDirectory 'CACHEDIR.TAG'
     $hasCargoTag=(Test-Path -LiteralPath $cargoTag -PathType Leaf) -and (Get-Item -LiteralPath $cargoTag).Length -le 4096 -and ([IO.File]::ReadAllText($cargoTag).StartsWith('Signature: 8a477f597d28d172789f06886806bc55',[StringComparison]::Ordinal))
-    if($entries.Count -and !($entries.Count -eq 1 -and $owner) -and !$hasCargoTag){throw 'Nonempty build cache lacks the real Cargo cache marker.'}
+    function Test-RegisteredCargoEvidence {
+        # Cargo only writes CACHEDIR.TAG when it creates the target itself. Empty
+        # registration pre-creates it; a valid owner plus real Cargo state is needed.
+        # https://github.com/rust-lang/cargo/blob/rust-1.97.0/crates/cargo-util/src/paths.rs#L689-L759
+        $infoPath=Join-Path $TargetDirectory '.rustc_info.json'
+        if(!(Test-Path -LiteralPath $infoPath -PathType Leaf)){return $false}
+        Assert-AudioLibUnlinkedPath $infoPath
+        $infoFile=Get-Item -LiteralPath $infoPath -Force
+        if($infoFile.Length -le 0 -or $infoFile.Length -gt 65536){return $false}
+        $document=$null
+        try{
+            $document=[Text.Json.JsonDocument]::Parse([IO.File]::ReadAllText($infoPath))
+            $state=$document.RootElement
+            [ulong]$fingerprint=0
+            if(!$state.GetProperty('rustc_fingerprint').TryGetUInt64([ref]$fingerprint)){return $false}
+            $hasVersion=$false
+            foreach($output in $state.GetProperty('outputs').EnumerateObject()){
+                $result=$output.Value
+                if($result.GetProperty('success').GetBoolean() -and $result.GetProperty('code').GetInt32() -eq 0){
+                    $stdout=$result.GetProperty('stdout').GetString()
+                    if($stdout -cmatch '^rustc [0-9]+\.[0-9]+\.[0-9]+' -and $stdout -cmatch '(?m)^binary: rustc\r?$' -and $stdout -cmatch '(?m)^host: [A-Za-z0-9_-]+\r?$' -and $stdout -cmatch '(?m)^release: [0-9]+\.[0-9]+\.[0-9]+'){$hasVersion=$true;break}
+                }
+            }
+            if(!$hasVersion){return $false}
+        }catch{return $false}finally{if($document){$document.Dispose()}}
+        # A previous All pass retains owner/version state and target-triple cache
+        # tags. Empty containers, optionally carrying only a valid Cargo tag, have
+        # no artifact data to delete; preserve their genuine backup-exclusion tag.
+        $populatedDirectory=$false
+        foreach($entry in $entries|Where-Object PSIsContainer){
+            $contents=@(Get-ChildItem -LiteralPath $entry.FullName -Force|Select-Object -First 2)
+            if(!$contents.Count){continue}
+            if($entry.Name -match '^[A-Za-z0-9_]+-[A-Za-z0-9_-]+$' -and $contents.Count -eq 1 -and $contents[0].Name -ceq 'CACHEDIR.TAG' -and !$contents[0].PSIsContainer -and $contents[0].Length -le 4096){
+                Assert-AudioLibUnlinkedPath $contents[0].FullName
+                if([IO.File]::ReadAllText($contents[0].FullName).StartsWith('Signature: 8a477f597d28d172789f06886806bc55',[StringComparison]::Ordinal)){continue}
+            }
+            $populatedDirectory=$true
+            break
+        }
+        if(!$populatedDirectory){return $true}
+        $cargoProfiles=@()
+        foreach($entry in $entries|Where-Object PSIsContainer){
+            if($entry.Name -in @('debug','release')){$cargoProfiles+=$entry.FullName}
+            elseif($entry.Name -match '^[A-Za-z0-9_]+-[A-Za-z0-9_-]+$'){
+                foreach($name in @('debug','release')){
+                    $profilePath=Join-Path $entry.FullName $name
+                    if(Test-Path -LiteralPath $profilePath -PathType Container){$cargoProfiles+=$profilePath}
+                }
+            }
+        }
+        foreach($profilePath in $cargoProfiles){
+            $fingerprints=Join-Path $profilePath '.fingerprint'
+            $dependencies=Join-Path $profilePath 'deps'
+            if(!(Test-Path -LiteralPath $fingerprints -PathType Container) -or !(Test-Path -LiteralPath $dependencies -PathType Container)){continue}
+            Assert-AudioLibUnlinkedPath $fingerprints
+            Assert-AudioLibUnlinkedPath $dependencies
+            $package=Get-ChildItem -LiteralPath $fingerprints -Directory -Force|Where-Object Name -Match '^.+-[0-9a-f]{16}$'|Select-Object -First 1
+            $artifact=Get-ChildItem -LiteralPath $dependencies -File -Force|Where-Object {$_.Extension -in @('.rmeta','.rlib') -and $_.Length -gt 0}|Select-Object -First 1
+            if($package -and $artifact){
+                Assert-AudioLibUnlinkedPath $package.FullName
+                Assert-AudioLibUnlinkedPath $artifact.FullName
+                return $true
+            }
+        }
+        return $false
+    }
+    $registeredCargoEvidence=$owner -and !$hasCargoTag -and (Test-RegisteredCargoEvidence)
+    if($entries.Count -and !($entries.Count -eq 1 -and $owner) -and !$hasCargoTag -and !$registeredCargoEvidence){throw 'Nonempty build cache lacks a Cargo cache marker or registered Cargo artifact evidence.'}
+    if($registeredCargoEvidence){$report.cache_evidence='registered-cargo-state'}
     if($Action -eq 'Register'){
         if(!$explicitTarget){throw 'Register requires an explicitly named -TargetDirectory.'}
         if(!$owner -and $entries.Count -and !$AdoptExisting){throw 'Existing external cache needs explicit -AdoptExisting after checking exclusive ownership.'}

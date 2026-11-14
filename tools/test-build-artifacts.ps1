@@ -109,6 +109,66 @@ try{
 $null=Invoke-Clean @{TargetDirectory=$external;Mode='All'} 1
 if(!(Test-Path -LiteralPath (Join-Path $external 'x86_64-pc-windows-msvc/release/app.exe'))){throw 'Foreign-owned cache was deleted.'}
 Write-Host 'PASS: external caches require explicit adoption; hidden owner markers support preview/cleanup; foreign ownership refused.'
+$precreated=Join-Path $taskRoot 'precreated-target'
+$registered=Invoke-Clean @{Action='Register';TargetDirectory=$precreated}
+if($registered.status -ne 'registered' -or (Test-Path -LiteralPath (Join-Path $precreated 'CACHEDIR.TAG'))){throw 'Fresh registration unexpectedly fabricated a Cargo tag.'}
+function New-UntaggedCargoEvidence([string]$Path){
+    foreach($name in @('debug/.fingerprint/owned_fixture-0123456789abcdef','debug/deps')){New-Item -ItemType Directory -Path (Join-Path $Path $name) -Force|Out-Null}
+    $state=@{rustc_fingerprint=[ulong]123456789;outputs=@{'123456789'=@{success=$true;status='exit status: 0';code=0;stdout="rustc 1.97.1 (ownedfixture 2026-07-14)`nbinary: rustc`nhost: x86_64-pc-windows-msvc`nrelease: 1.97.1`n";stderr=''}};successes=@{}}
+    $state|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $Path '.rustc_info.json') -Encoding utf8
+    [IO.File]::WriteAllBytes((Join-Path $Path 'debug/deps/libowned_fixture-0123456789abcdef.rmeta'),[byte[]]::new(256))
+}
+New-UntaggedCargoEvidence $precreated
+New-Item -ItemType Directory -Path (Join-Path $precreated 'x86_64-unknown-linux-gnu')|Out-Null
+$retainedTripleTag=Join-Path $precreated 'x86_64-unknown-linux-gnu/CACHEDIR.TAG'
+[IO.File]::WriteAllText($retainedTripleTag,$taskSignature)
+$preview=Invoke-Clean @{Action='Plan';TargetDirectory=$precreated}
+if($preview.status -ne 'planned' -or $preview.ownership -ne 'registered' -or $preview.cache_evidence -ne 'registered-cargo-state' -or $preview.removed_bytes -ne 0){throw 'Pre-registered Cargo outputs without a tag were not recognized during preview.'}
+$precreatedOwner=Join-Path $precreated '.audiolib-build-owner.json'
+$validOwner=[IO.File]::ReadAllText($precreatedOwner)
+Remove-Item -LiteralPath $precreatedOwner
+$null=Invoke-Clean @{Action='Plan';TargetDirectory=$precreated} 1
+[IO.File]::WriteAllText($precreatedOwner,$validOwner)
+@{schema_version=1;owner_id='foreign';host=[Environment]::MachineName}|ConvertTo-Json|Set-Content -LiteralPath $precreatedOwner -Encoding utf8
+$null=Invoke-Clean @{TargetDirectory=$precreated} 1
+[IO.File]::WriteAllText($precreatedOwner,$validOwner)
+$infoPath=Join-Path $precreated '.rustc_info.json'
+$validInfo=[IO.File]::ReadAllText($infoPath)
+foreach($invalidInfo in @('{}','{"rustc_fingerprint":"123","outputs":{}}',(' ' * 65537))){
+    [IO.File]::WriteAllText($infoPath,$invalidInfo)
+    $null=Invoke-Clean @{TargetDirectory=$precreated} 1
+}
+[IO.File]::WriteAllText($infoPath,$validInfo)
+$global:taskCacheTestActive=$true
+try{$blocked=Invoke-Clean @{TargetDirectory=$precreated} 2;if($blocked.status -ne 'blocked'){throw 'Untagged Cargo evidence bypassed the active compiler guard.'}}finally{$global:taskCacheTestActive=$false}
+$cleaned=Invoke-Clean @{TargetDirectory=$precreated;Mode='All'}
+if($cleaned.status -ne 'passed' -or $cleaned.removed_bytes -ne 256 -or (Test-Path -LiteralPath (Join-Path $precreated 'debug')) -or (Test-Path -LiteralPath (Join-Path $precreated 'CACHEDIR.TAG')) -or !(Test-Path -LiteralPath $precreatedOwner)){throw 'Pre-registered untagged Cargo cleanup exceeded its ownership boundary.'}
+$emptyPreview=Invoke-Clean @{Action='Plan';TargetDirectory=$precreated;Mode='All'}
+$emptyRun=Invoke-Clean @{TargetDirectory=$precreated;Mode='All'}
+if($emptyPreview.status -ne 'planned' -or $emptyRun.status -ne 'passed' -or $emptyRun.removed_bytes -ne 0 -or $emptyRun.before_bytes -ne 0 -or [IO.File]::ReadAllText($retainedTripleTag) -cne $taskSignature){throw 'Already-cleared registered Cargo state with a retained target-triple tag was not idempotent.'}
+foreach($invalidTag in @('not a Cargo tag',($taskSignature+(' ' * 4097)))){
+    [IO.File]::WriteAllText($retainedTripleTag,$invalidTag)
+    $null=Invoke-Clean @{Action='Plan';TargetDirectory=$precreated;Mode='All'} 1
+}
+[IO.File]::WriteAllText($retainedTripleTag,$taskSignature)
+$tripleExtra=Join-Path $precreated 'x86_64-unknown-linux-gnu/keep.txt'
+[IO.File]::WriteAllText($tripleExtra,'a valid tag does not authorize unrelated data')
+$null=Invoke-Clean @{TargetDirectory=$precreated;Mode='All'} 1
+if(!(Test-Path -LiteralPath $tripleExtra)){throw 'Retained target-triple tag authorized unrelated data.'}
+Remove-Item -LiteralPath $tripleExtra
+$notCargo=Join-Path $taskRoot 'registered-noncargo-target'
+$null=Invoke-Clean @{Action='Register';TargetDirectory=$notCargo}
+New-Item -ItemType Directory -Path (Join-Path $notCargo 'debug')|Out-Null
+[IO.File]::WriteAllText((Join-Path $notCargo 'debug/notes.txt'),'owned registration is not Cargo artifact evidence')
+$null=Invoke-Clean @{TargetDirectory=$notCargo} 1
+if(!(Test-Path -LiteralPath (Join-Path $notCargo 'debug/notes.txt'))){throw 'Owner-only non-Cargo files were removed.'}
+[IO.File]::WriteAllText((Join-Path $notCargo '.rustc_info.json'),$validInfo)
+$null=Invoke-Clean @{TargetDirectory=$notCargo} 1
+Remove-Item -LiteralPath (Join-Path $notCargo 'debug/notes.txt')
+New-Item -ItemType Directory -Path (Join-Path $notCargo 'x86_64-unknown-linux-gnu')|Out-Null
+[IO.File]::WriteAllText((Join-Path $notCargo 'x86_64-unknown-linux-gnu/notes.txt'),'a populated target container is not cleared Cargo state')
+$null=Invoke-Clean @{TargetDirectory=$notCargo} 1
+Write-Host 'PASS: pre-registered genuine-shaped Cargo state supports missing tags; unowned/foreign/invalid/non-Cargo state and active compilers remain blocked.'
 $realCompilers=@(Microsoft.PowerShell.Management\Get-Process | Where-Object ProcessName -match '^(cargo|rustc|rustdoc|clippy-driver|clang|clang\+\+|gcc|g\+\+|cc1|cc1plus|link|lld|lld-link|cl)$')
 if($realCompilers.Count){Write-Host 'Pipeline cleanup integration: not-run (another real compiler is active).'}else{
     $tools=Join-Path $taskRoot 'tools'

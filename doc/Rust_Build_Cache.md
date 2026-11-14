@@ -45,7 +45,7 @@ pwsh tools/clean-build-artifacts.ps1 -Action Register -TargetDirectory C:/audiol
 pwsh tools/clean-build-artifacts.ps1 -Action Run -TargetDirectory C:/audiolib-cache
 ```
 
-空目录登记不需要 `-AdoptExisting`，但不会伪造 Cargo 标记；后续 Cargo 编译自行生成标记。不能接管其他仓库/主机已经登记的目录，也不接受缺少 Cargo 标记的历史非空目录。旧 worktree 可通过 `-Root <仍存在的 AudioLib checkout>` 维护其默认 target；无 checkout 或归属不明的历史输出先保留，不猜测所有权。每个目录分别预览和维护，不递归扫描、清空整块构建盘。
+空目录登记不需要 `-AdoptExisting`，也不伪造 Cargo 标记。Cargo 对预先存在的目录可能不写入 `CACHEDIR.TAG`（参见 [Cargo 的目录创建逻辑](https://github.com/rust-lang/cargo/blob/rust-1.97.0/crates/cargo-util/src/paths.rs#L689-L759)）。此时仅在当前仓库／主机归属登记有效，并同时具有有界、可解析的 `.rustc_info.json` 编译器记录及已知 profile 的 `.fingerprint`／`deps` 编译产物证据时接受；全清后保留的编译器记录、空目录或仅含有效 Cargo 标记的 target triple 目录也支持重复预览和清理。未登记、错误归属或只有归属文件而无 Cargo 证据的非空目录仍被拒绝。不能接管其他仓库／主机的缓存。旧 worktree 可通过 `-Root <仍存在的 AudioLib checkout>` 维护其默认 target；无 checkout 或归属不明的历史输出先保留，不猜测所有权。每个目录分别预览和维护，不递归扫描、清空整块构建盘。
 
 ## 安全与并发
 
