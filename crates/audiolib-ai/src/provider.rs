@@ -67,8 +67,19 @@ fn headers(profile: &Profile, key: &ApiKey) -> Vec<(&'static str, String)> {
     headers
 }
 
+fn transport_error(error: ureq::Error, timeout_seconds: u64) -> AiError {
+    match error {
+        ureq::Error::Timeout(_) => AiError::Timeout(timeout_seconds),
+        ureq::Error::Io(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+            AiError::Timeout(timeout_seconds)
+        }
+        _ => AiError::Transport,
+    }
+}
+
 fn read_response(
     mut response: ureq::http::Response<ureq::Body>,
+    timeout_seconds: u64,
     cancel: &AtomicBool,
 ) -> Result<Value> {
     check_cancel(cancel)?;
@@ -81,7 +92,9 @@ fn read_response(
         .as_reader()
         .take(512 * 1024 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| AiError::Transport)?;
+        // ureq BodyReader wraps typed errors with Error::into_io. Its public
+        // From<io::Error> restores that typed timeout without parsing messages.
+        .map_err(|error| transport_error(ureq::Error::from(error), timeout_seconds))?;
     check_cancel(cancel)?;
     if bytes.len() > 512 * 1024 {
         return Err(AiError::Response);
@@ -89,9 +102,9 @@ fn read_response(
     serde_json::from_slice(&bytes).map_err(|_| AiError::Response)
 }
 
-// Accept the service root or the OpenAI-compatible base from Go's SDK examples.
+// Accept the service root or the OpenAI-compatible base from gateway examples.
 // Normalize paths only; credentials never move to a different authority.
-fn request_url(profile: &Profile, suffix: &str) -> String {
+pub(crate) fn request_url(profile: &Profile, suffix: &str) -> String {
     let mut base = profile.base_url.trim_end_matches('/');
     if profile.protocol == Protocol::OpenCodeGo {
         for ending in ["/openai/v1/chat/completions", "/openai/v1", "/v1"] {
@@ -100,6 +113,13 @@ fn request_url(profile: &Profile, suffix: &str) -> String {
                 break;
             }
         }
+    }
+    if profile.protocol == Protocol::Magpie {
+        // Keep the user's port and optional reverse-proxy prefix. Both the
+        // gateway root and its documented OpenAI base resolve to one /v1.
+        base = base.strip_suffix("/chat/completions").unwrap_or(base);
+        base = base.strip_suffix("/v1").unwrap_or(base);
+        return format!("{base}/v1{suffix}");
     }
     format!("{base}{suffix}")
 }
@@ -119,8 +139,10 @@ pub fn models(profile: &Profile, key: &ApiKey, cancel: &AtomicBool) -> Result<Ve
     for (name, value) in headers(profile, key) {
         request = request.header(name, value);
     }
-    let response = request.call().map_err(|_| AiError::Transport)?;
-    let value = read_response(response, cancel)?;
+    let response = request
+        .call()
+        .map_err(|error| transport_error(error, profile.timeout_seconds))?;
+    let value = read_response(response, profile.timeout_seconds, cancel)?;
     let items = value
         .get("data")
         .or_else(|| value.get("models"))
@@ -133,7 +155,14 @@ pub fn models(profile: &Profile, key: &ApiKey, cancel: &AtomicBool) -> Result<Ve
                 .or_else(|| v.get("name"))
                 .and_then(Value::as_str)
         })
-        .map(|s| s.trim_start_matches("models/").to_owned())
+        .map(|s| {
+            if profile.protocol == Protocol::Magpie {
+                // The provider/routing-group prefix belongs to the gateway ID.
+                s.to_owned()
+            } else {
+                s.trim_start_matches("models/").to_owned()
+            }
+        })
         .filter(|s| valid_model_id(s))
         .take(200)
         .collect();
@@ -163,7 +192,10 @@ pub fn generate(
         format!("{guidance}\n\nRequired response contract (always applies):\n{instructions}");
     let mut ids = Vec::new();
     let (suffix, body) = match profile.protocol {
-        Protocol::ChatCompletions | Protocol::OpenCodeGo | Protocol::DeepSeek => (
+        Protocol::ChatCompletions
+        | Protocol::OpenCodeGo
+        | Protocol::DeepSeek
+        | Protocol::Magpie => (
             if profile.protocol == Protocol::OpenCodeGo {
                 "/openai/v1/chat/completions".to_owned()
             } else {
@@ -228,11 +260,14 @@ pub fn generate(
     if profile.protocol == Protocol::OpenCodeGo {
         request = request.header("x-opencode-session", session);
     }
+    if profile.protocol == Protocol::Magpie {
+        request = request.header("X-Magpie-Session", session);
+    }
     check_cancel(cancel)?;
     let response = request
         .send(serde_json::to_vec(&body).map_err(|_| AiError::Invalid)?)
-        .map_err(|_| AiError::Transport)?;
-    let value = read_response(response, cancel)?;
+        .map_err(|error| transport_error(error, profile.timeout_seconds))?;
+    let value = read_response(response, profile.timeout_seconds, cancel)?;
     decode(profile.protocol, &value, &ids, intent, layers)
 }
 
@@ -259,12 +294,15 @@ fn decode(
         .or_else(|| usage.get("candidatesTokenCount"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let (mut plan, decision) = if protocol == Protocol::Jev {
+    let (plan, decision) = if protocol == Protocol::Jev {
         let (plan, decision) = jev::parse(value, ids, intent, layers)?;
         (plan, Some(decision))
     } else {
         let structured = match protocol {
-            Protocol::ChatCompletions | Protocol::OpenCodeGo | Protocol::DeepSeek => {
+            Protocol::ChatCompletions
+            | Protocol::OpenCodeGo
+            | Protocol::DeepSeek
+            | Protocol::Magpie => {
                 let choice = &value["choices"][0];
                 if choice["finish_reason"] != "stop" || !choice["message"]["refusal"].is_null() {
                     return Err(AiError::Response);
@@ -330,10 +368,59 @@ fn decode(
             None,
         )
     };
+    validate_output(
+        Output {
+            plan,
+            input_tokens,
+            output_tokens,
+            decision,
+        },
+        protocol,
+        intent,
+        layers,
+    )
+}
+
+// Both provider decoding and the AudioLib relay admission retain the same bounds,
+// request-scoped provenance and explicit main/layer semantics.
+pub(crate) fn validate_output(
+    mut output: Output,
+    protocol: Protocol,
+    intent: &str,
+    layers: bool,
+) -> Result<Output> {
+    let plan = &mut output.plan;
     plan.intent = intent.into();
-    ReferenceIndex::embedded().validate(&plan)?;
+    ReferenceIndex::embedded().validate(plan)?;
     if protocol != Protocol::Jev {
-        validate_response_references(&plan, intent, layers)?;
+        if output.decision.is_some() {
+            return Err(AiError::Response);
+        }
+        validate_response_references(plan, intent, layers)?;
+    } else {
+        let decision = output.decision.as_ref().ok_or(AiError::Response)?;
+        let unit = |value: f64| value.is_finite() && (0.0..=1.0).contains(&value);
+        if !unit(decision.confidence)
+            || !unit(decision.probability)
+            || !unit(decision.clarification)
+            || !decision.fit.is_finite()
+            || !(0.0..=2.0).contains(&decision.fit)
+            || decision.confidence < 0.65
+            || decision.fit < 1.25
+            || decision.clarification >= 0.5
+            || !ReferenceIndex::embedded()
+                .decision_candidates(intent, layers)
+                .iter()
+                .any(|candidate| candidate.id == decision.recipe)
+        {
+            return Err(AiError::Response);
+        }
+        let expected = ReferenceIndex::embedded()
+            .selection_plan(intent, &decision.recipe, layers)
+            .map_err(|_| AiError::Response)?;
+        if *plan != expected {
+            return Err(AiError::Response);
+        }
     }
     if !layers {
         // Validate every received candidate before discarding an unrequested
@@ -349,12 +436,7 @@ fn decode(
         // A component-only response cannot be relabeled as the requested sound.
         return Err(AiError::Response);
     }
-    Ok(Output {
-        plan,
-        input_tokens,
-        output_tokens,
-        decision,
-    })
+    Ok(output)
 }
 
 // Rebuild the same immutable context sent by generate. A known global ID is
@@ -409,6 +491,108 @@ mod jev_http_tests;
 mod tests {
     use super::*;
     use std::{io::Write, net::TcpListener, thread};
+
+    fn delayed_gateway_response(
+        header_delay: Duration,
+        body_delay: Duration,
+    ) -> (Profile, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let profile = Profile {
+            protocol: Protocol::Magpie,
+            base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
+            model: "mock".into(),
+            timeout_seconds: 2,
+            ..Default::default()
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8(head).unwrap();
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            stream.read_exact(&mut vec![0; length]).unwrap();
+            let body = if head.starts_with("POST ") {
+                let plan = ReferenceIndex::embedded()
+                    .local_plan("wind", false)
+                    .unwrap();
+                json!({"choices":[{"finish_reason":"stop","message":{"content":serde_json::to_string(&plan).unwrap()}}]}).to_string()
+            } else {
+                json!({"data":[{"id":"mock"}]}).to_string()
+            };
+            thread::sleep(header_delay);
+            if write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).is_err() {
+                return;
+            }
+            thread::sleep(body_delay);
+            // The client may already have enforced its deadline and closed.
+            let _ = stream.write_all(body.as_bytes());
+        });
+        (profile, server)
+    }
+
+    #[test]
+    fn global_header_deadlines_report_the_configured_timeout_for_models_and_generation() {
+        for generation in [false, true] {
+            let (profile, server) =
+                delayed_gateway_response(Duration::from_millis(2200), Duration::ZERO);
+            let cancel = AtomicBool::new(false);
+            let key = ApiKey::default();
+            let result = if generation {
+                generate(
+                    &profile,
+                    &key,
+                    "wind",
+                    false,
+                    crate::config::DEFAULT_PROMPT,
+                    "deadline-test",
+                    &cancel,
+                )
+                .map(|_| ())
+            } else {
+                models(&profile, &key, &cancel).map(|_| ())
+            };
+            assert!(matches!(result, Err(AiError::Timeout(2))));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn body_deadlines_recover_typed_timeouts_and_allow_responses_within_the_budget() {
+        for (body_delay, should_timeout) in [
+            (Duration::from_millis(100), false),
+            (Duration::from_millis(2200), true),
+        ] {
+            let (profile, server) = delayed_gateway_response(Duration::ZERO, body_delay);
+            let response = agent(&profile)
+                .get(request_url(&profile, "/models"))
+                .call()
+                .unwrap();
+            // Receiving headers must succeed, proving any subsequent timeout
+            // originates in BodyReader rather than the call/send error path.
+            assert_eq!(response.status().as_u16(), 200);
+            let result = read_response(response, profile.timeout_seconds, &AtomicBool::new(false));
+            if should_timeout {
+                assert!(matches!(result, Err(AiError::Timeout(2))));
+            } else {
+                assert_eq!(result.unwrap()["data"][0]["id"], "mock");
+            }
+            server.join().unwrap();
+        }
+    }
 
     #[test]
     fn explicit_layers_follow_request_mode_and_preserve_validated_provenance() {
@@ -580,6 +764,10 @@ mod tests {
                 json!({"choices":[{"finish_reason":"stop","message":{"content":plan.to_string()}}]}),
             ),
             (
+                Protocol::Magpie,
+                json!({"choices":[{"finish_reason":"stop","message":{"content":plan.to_string()}}]}),
+            ),
+            (
                 Protocol::Responses,
                 json!({"status":"completed","output":[{"content":[{"type":"output_text","text":plan.to_string()}]}]}),
             ),
@@ -595,7 +783,15 @@ mod tests {
         for (protocol, value) in cases {
             assert!(decode(protocol, &value, &[], "科幻爆炸", false).is_ok());
         }
-        assert!(decode(Protocol::ChatCompletions,&json!({"choices":[{"finish_reason":"length","message":{"content":plan.to_string()}}]}),&[],"科幻爆炸",false).is_err());
+        for protocol in [Protocol::ChatCompletions, Protocol::Magpie] {
+            for response in [
+                json!({"choices":[{"finish_reason":"length","message":{"content":plan.to_string()}}]}),
+                json!({"choices":[{"finish_reason":"stop","message":{"refusal":"refused","content":plan.to_string()}}]}),
+                json!({"choices":[{"finish_reason":"stop","message":{"content":"invalid JSON"}}]}),
+            ] {
+                assert!(decode(protocol, &response, &[], "科幻爆炸", false).is_err());
+            }
+        }
         let mut forged = plan;
         forged["queries"][0]["cat_ids"] = json!(["MADEUP"]);
         assert!(decode(Protocol::ChatCompletions,&json!({"choices":[{"finish_reason":"stop","message":{"content":forged.to_string()}}]}),&[],"科幻爆炸",false).is_err());
@@ -822,6 +1018,119 @@ mod tests {
                 ["deepseek-flash", "deepseek-v4-pro"]
             );
             server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn magpie_discovers_and_sends_exact_gateway_ids_with_optional_authentication() {
+        for (model, key, base_suffix) in [
+            ("models/wind", "", ""),
+            ("group/sound-design", "gateway-key", "/v1"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut profile = Profile {
+                protocol: Protocol::Magpie,
+                base_url: format!("http://{}{base_suffix}", listener.local_addr().unwrap()),
+                ..Default::default()
+            };
+            let server = thread::spawn(move || {
+                for step in 0..2 {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut head = Vec::new();
+                    let mut byte = [0];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        stream.read_exact(&mut byte).unwrap();
+                        head.push(byte[0]);
+                    }
+                    let header = String::from_utf8(head).unwrap();
+                    assert!(header.starts_with(if step == 0 {
+                        "GET /v1/models HTTP/1.1"
+                    } else {
+                        "POST /v1/chat/completions HTTP/1.1"
+                    }));
+                    let lower = header.to_ascii_lowercase();
+                    assert!(lower.contains("user-agent: audiolibexplorer/"));
+                    if key.is_empty() {
+                        assert!(!lower.contains("authorization:"));
+                    } else {
+                        assert!(lower.contains("authorization: bearer gateway-key"));
+                    }
+                    let response = if step == 0 {
+                        json!({"data":[{"id":"models/wind"},{"id":"wind"},{"id":"group/sound-design"},{"id":"vendor/model"},{"id":"models/wind"},{"id":"invalid model"}]}).to_string()
+                    } else {
+                        assert!(lower.contains("x-magpie-session: test-session"));
+                        let length: usize = header
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|value| value.trim().parse().unwrap())
+                            })
+                            .unwrap();
+                        assert!(length < 24 * 1024);
+                        let mut bytes = vec![0; length];
+                        stream.read_exact(&mut bytes).unwrap();
+                        let body: Value = serde_json::from_slice(&bytes).unwrap();
+                        assert_eq!(body["model"], model);
+                        assert_eq!(body["response_format"]["type"], "json_object");
+                        assert_eq!(body["max_tokens"], 1800);
+                        assert!(body.get("thinking").is_none());
+                        let plan = ReferenceIndex::embedded()
+                            .local_plan("wind", false)
+                            .unwrap();
+                        json!({"choices":[{"finish_reason":"stop","message":{"content":serde_json::to_string(&plan).unwrap()}}],"usage":{"prompt_tokens":60,"completion_tokens":30}}).to_string()
+                    };
+                    write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",response.len()).unwrap();
+                }
+            });
+            let key = ApiKey::new(key.into()).unwrap();
+            let cancel = AtomicBool::new(false);
+            assert_eq!(
+                models(&profile, &key, &cancel).unwrap(),
+                ["group/sound-design", "models/wind", "vendor/model", "wind"]
+            );
+            profile.model = model.into();
+            let output = generate(
+                &profile,
+                &key,
+                "wind",
+                false,
+                crate::config::DEFAULT_PROMPT,
+                "test-session",
+                &cancel,
+            )
+            .unwrap();
+            assert_eq!(output.plan.intent, "wind");
+            assert_eq!((output.input_tokens, output.output_tokens), (60, 30));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn magpie_gateway_bases_resolve_once_without_changing_authority() {
+        for root in [
+            "http://127.0.0.1:3425",
+            "https://gateway.example:443/prefix",
+        ] {
+            for ending in ["", "/", "/v1", "/v1/", "/v1/chat/completions/"] {
+                let profile = Profile {
+                    protocol: Protocol::Magpie,
+                    base_url: format!("{root}{ending}"),
+                    ..Default::default()
+                };
+                profile.validate_discovery_request().unwrap();
+                assert_eq!(
+                    request_url(&profile, "/models"),
+                    format!("{root}/v1/models")
+                );
+                assert_eq!(
+                    request_url(&profile, "/chat/completions"),
+                    format!("{root}/v1/chat/completions")
+                );
+            }
         }
     }
 

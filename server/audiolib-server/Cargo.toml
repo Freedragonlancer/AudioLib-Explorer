@@ -19,6 +19,7 @@ path = "src/main.rs"
 test-hooks = ["audiolib-db/test-hooks"]
 
 [dependencies]
+audiolib-ai = { path = "../../crates/audiolib-ai" }
 audiolib-update = { path = "../../crates/audiolib-update" }
 audiolib-core = { path = "../../crates/audiolib-core" }
 # Remote scans (POST /scans) run the workspace scanner. Its audiolib-audio dependency is

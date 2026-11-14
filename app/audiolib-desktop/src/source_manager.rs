@@ -28,8 +28,8 @@ use audiolib_remote::{
     CacheState, Capabilities, ConnectionReport, ListWaveformStatus, ManageMode, ProfileEdit,
     RemoteCache, RemoteClient, RemoteError, RemoteRoot, RemoteSecrets, RootScan, RootState,
     ScanControl, ScanMode, ScanRequest, ServerScan, ServerSettings, edit_transcode,
-    manage_error_text, remove_server_profile, root_status_text, save_profile_edit, save_secrets,
-    test_connection, use_external_address,
+    manage_error_text, remove_server_profile, root_status_text, save_profile_edit,
+    save_profile_secrets, test_connection, use_external_address,
 };
 use slint::{Model, ModelRc, SharedString, VecModel};
 use std::sync::Arc;
@@ -915,8 +915,12 @@ impl Controller {
         let mut preferences = config.clone();
         let value = change(&mut preferences.data_source, &mut secrets)?;
         if store_secrets {
-            save_secrets(&preferences.data_root(), &secrets)
-                .map_err(|error| error.localized(chinese))?;
+            save_profile_secrets(
+                &preferences.data_root(),
+                &preferences.data_source,
+                &mut secrets,
+            )
+            .map_err(|error| error.localized(chinese))?;
         }
         preferences.save().map_err(|error| error.to_string())?;
         *config = preferences;

@@ -35,6 +35,7 @@ pub enum Readiness {
 
 struct ServiceInner {
     security: Arc<Security>,
+    ai_relay: crate::ai_relay::AiRelay,
     readiness: RwLock<Readiness>,
     progress: RwLock<Option<audiolib_db::SnapshotUpgradeProgress>>,
     updates: crate::update::UpdateManager,
@@ -61,10 +62,29 @@ impl Service {
         Self::with(security, Readiness::Starting)
     }
 
+    /// Starting service with explicitly approved AI upstreams and bounded concurrency.
+    /// Existing constructors keep AI relay disabled.
+    pub fn starting_with_config(
+        security: Arc<Security>,
+        config: &ServerConfig,
+    ) -> anyhow::Result<Self> {
+        let ai_relay = crate::ai_relay::AiRelay::from_config(config)?;
+        Ok(Self::with_ai(security, Readiness::Starting, ai_relay))
+    }
+
     fn with(security: Arc<Security>, readiness: Readiness) -> Self {
+        Self::with_ai(security, readiness, crate::ai_relay::AiRelay::default())
+    }
+
+    fn with_ai(
+        security: Arc<Security>,
+        readiness: Readiness,
+        ai_relay: crate::ai_relay::AiRelay,
+    ) -> Self {
         Self {
             inner: Arc::new(ServiceInner {
                 security,
+                ai_relay,
                 readiness: RwLock::new(readiness),
                 progress: RwLock::new(None),
                 updates: crate::update::UpdateManager::default(),
@@ -150,6 +170,10 @@ impl Service {
     /// Authentication and admin settings.
     pub fn security(&self) -> &Arc<Security> {
         &self.inner.security
+    }
+
+    pub(crate) fn ai_relay(&self) -> &crate::ai_relay::AiRelay {
+        &self.inner.ai_relay
     }
 
     /// Process-local release check and deployment coordinator (inactive until main starts it).

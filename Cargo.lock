@@ -614,6 +614,7 @@ dependencies = [
 name = "audiolib-remote"
 version = "1.0.0"
 dependencies = [
+ "audiolib-ai",
  "audiolib-core",
  "audiolib-db",
  "audiolib-windows",
@@ -637,6 +638,7 @@ name = "audiolib-server"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+ "audiolib-ai",
  "audiolib-audio",
  "audiolib-core",
  "audiolib-db",

@@ -25,7 +25,7 @@ auth = false
 
 # Authentication mode (doc/api/README.md §2.2; the LAN-only admin page at
 # http://<host>:8790/admin can override it):
-#   "off"      - no endpoint needs a token
+#   "off"      - ordinary endpoints need no token (AI relay always requires one)
 #   "external" - default: LAN-direct requests need no token (Authorization is ignored);
 #                requests through a reverse proxy (X-Forwarded-For, Forwarded, X-Real-IP,
 #                X-Forwarded-Proto/Host) or from a non-private peer need
@@ -56,6 +56,18 @@ auth = false
 # Use at least 32 random characters or an admin-generated al_ token, never a passphrase.
 # Required with auth = true, optional otherwise. Never stored in this file, never logged.
 token_env = "AUDIOLIB_SERVER_TOKEN"
+
+# Optional AI relay. Empty by default: no client can make the server act as a general
+# proxy. Configure only upstreams the administrator explicitly trusts this host to
+# contact. Protocol, authority, port and base path are matched after safe provider
+# normalization; redirects are never followed. Do not put API keys in this file.
+# AI requests ALWAYS need a valid server bearer token, including trusted LAN peers
+# and auth_mode="off". Provider keys arrive per request, are never persisted, and
+# must be sent over a trusted LAN connection or HTTPS. No library needs to be open.
+# max_ai_requests = 4 # 1..=64; extra in-flight requests receive 503 BUSY.
+# ai_upstreams = [{ protocol = "magpie", base_url = "http://127.0.0.1:3425/v1" }]
+# A client may choose a request deadline up to 600s (default 180s); the dedicated AI
+# route deadline is 620s. Reverse proxies need a compatible response timeout.
 
 # Public base URL for clients outside the LAN (behind a reverse proxy; may carry a path
 # prefix), reported as `public_url` by /health. Usually set on the admin page instead.

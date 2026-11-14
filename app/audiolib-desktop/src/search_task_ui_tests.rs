@@ -8,6 +8,145 @@ use slint::{
 };
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
+#[test]
+fn unsaved_ai_provider_selection_survives_recreated_controls_in_both_languages() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    let ui = window();
+    ui.set_ai_visible(true);
+    ui.set_ai_collapsed(false);
+    ui.set_ai_settings(true);
+    ui.set_ai_dirty(true);
+    for chinese in [false, true] {
+        ui.set_chinese(chinese);
+        ui.set_ai_providers(ModelRc::new(VecModel::from(vec![
+            if chinese {
+                "本地词表（离线）"
+            } else {
+                "Local reference (offline)"
+            }
+            .into(),
+            "Work".into(),
+            if chinese { "未保存" } else { "Unsaved" }.into(),
+        ])));
+        ui.set_ai_provider_index(2);
+        ui.set_ai_profile_id("".into());
+        ui.set_ai_profile_name("".into());
+        ui.set_ai_selected_model("".into());
+        for page in [1, 0] {
+            ui.set_ai_settings_page(page);
+            settle();
+        }
+        let label = if chinese {
+            "AI 供应商预设"
+        } else {
+            "AI provider preset"
+        };
+        let selector = ElementHandle::find_by_accessible_label(&ui, label)
+            .next()
+            .unwrap();
+        assert_eq!(
+            selector.accessible_value().as_deref(),
+            Some(if chinese { "未保存" } else { "Unsaved" })
+        );
+        assert_eq!(ui.get_ai_provider_index(), 2);
+        snapshot_if_requested(
+            &ui,
+            if chinese {
+                "ai-unsaved-provider-cn"
+            } else {
+                "ai-unsaved-provider-en"
+            },
+        );
+    }
+    ui.hide().unwrap();
+}
+
+#[test]
+fn ai_advanced_request_mode_and_timeout_are_visible_in_both_languages() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    let ui = window();
+    ui.set_ai_visible(true);
+    ui.set_ai_collapsed(false);
+    ui.set_ai_settings(true);
+    ui.set_ai_profile_name("Magpie".into());
+    ui.set_ai_protocol(7);
+    ui.set_ai_endpoint("http://127.0.0.1:3425/v1".into());
+    assert_eq!(ui.get_ai_timeout(), 180);
+    assert_eq!(ui.get_ai_request_mode(), 0);
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let observed = actions.clone();
+    ui.on_ai_action(move |kind, index| observed.borrow_mut().push((kind, index)));
+    for chinese in [false, true] {
+        ui.set_chinese(chinese);
+        settle();
+        let scroll = || {
+            ui.window().dispatch_event(WindowEvent::PointerScrolled {
+                position: slint::LogicalPosition::new(1200.0, 500.0),
+                delta_x: 0.0,
+                delta_y: -100_000.0,
+            });
+            settle();
+        };
+        scroll();
+        let advanced = if chinese {
+            "高级选项"
+        } else {
+            "Advanced options"
+        };
+        if ElementHandle::find_by_accessible_label(&ui, advanced)
+            .next()
+            .is_some()
+        {
+            click(&ui, advanced);
+        }
+        scroll();
+        let label = if chinese {
+            "AI 请求模式"
+        } else {
+            "AI request mode"
+        };
+        let mode = ElementHandle::find_by_accessible_label(&ui, label)
+            .next()
+            .unwrap();
+        assert!(mode.size().height > 0.0);
+        assert!(mode.absolute_position().y + mode.size().height <= 900.0);
+        ui.set_ai_request_mode(1);
+        ui.set_ai_timeout(600);
+        settle();
+        // Recreating the advanced widgets must retain both explicit choices.
+        ui.set_ai_settings_page(1);
+        settle();
+        ui.set_ai_settings_page(0);
+        settle();
+        scroll();
+        assert_eq!(ui.get_ai_request_mode(), 1);
+        assert_eq!(ui.get_ai_timeout(), 600);
+        snapshot_if_requested(
+            &ui,
+            if chinese {
+                "ai-advanced-server-cn"
+            } else {
+                "ai-advanced-server-en"
+            },
+        );
+    }
+    assert!(
+        actions.borrow().is_empty(),
+        "Recreation must not edit the profile"
+    );
+    ui.hide().unwrap();
+}
+
 fn tasks(count: usize) -> ModelRc<SearchTaskRow> {
     ModelRc::new(VecModel::from(
         (0..count)
@@ -777,6 +916,26 @@ fn ai_panel_actions_and_provider_view_are_renderable() {
     click(&ui, "供应商");
     assert_eq!(ui.get_ai_settings_page(), 0);
     assert_eq!(ui.get_ai_model(), "deepseek-flash");
+    ui.set_ai_protocol(7);
+    ui.set_ai_endpoint("http://127.0.0.1:3425/v1".into());
+    ui.set_ai_model("group/sound-design".into());
+    ui.set_ai_profile_name("Magpie 1".into());
+    ui.set_ai_profile_id("saved-magpie".into());
+    ui.set_ai_saved_key(false);
+    ui.set_ai_saved_endpoint("http://127.0.0.1:3425/v1".into());
+    ui.set_ai_saved_protocol(7);
+    for chinese in [false, true] {
+        ui.set_chinese(chinese);
+        settle();
+        snapshot_if_requested(
+            &ui,
+            if chinese {
+                "ai-magpie-provider-cn"
+            } else {
+                "ai-magpie-provider-en"
+            },
+        );
+    }
     click(&ui, "退出 AI 搜索");
     assert_eq!(actions.borrow().last(), Some(&(1, 0)));
     click(&ui, "返回 AI 搜索");
@@ -1105,8 +1264,7 @@ fn ai_provider_form_survives_page_recreation_and_panel_reopening() {
     ui.set_ai_model("saved-model".into());
     ui.set_ai_key("unsaved-draft-key".into());
     ui.set_ai_timeout(31);
-    ui.set_ai_request_cap(123);
-    ui.set_ai_subscription(true);
+    ui.set_ai_request_mode(1);
     ui.set_ai_preset_index(1);
     ui.set_ai_instruction("Preserved sound design instruction".into());
     let actions = Rc::new(RefCell::new(Vec::new()));
@@ -1125,8 +1283,7 @@ fn ai_provider_form_survives_page_recreation_and_panel_reopening() {
         assert_eq!(ui.get_ai_model(), "saved-model");
         assert_eq!(ui.get_ai_key(), "unsaved-draft-key");
         assert_eq!(ui.get_ai_timeout(), 31);
-        assert_eq!(ui.get_ai_request_cap(), 123);
-        assert!(ui.get_ai_subscription());
+        assert_eq!(ui.get_ai_request_mode(), 1);
         click(&ui, "Skill and presets");
         assert_eq!(ui.get_ai_settings_page(), 1);
         assert_eq!(ui.get_ai_preset_index(), 1);

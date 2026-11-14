@@ -1988,6 +1988,7 @@ impl Controller {
             });
             if let Some(ui) = c.ui.upgrade() {
                 c.publish_search_tasks(&ui);
+                c.publish_ai_profiles(&ui);
                 c.request_search(&ui, true, false);
                 c.refresh_library_info();
                 c.publish_data_source(&ui);

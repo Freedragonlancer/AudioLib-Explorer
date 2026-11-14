@@ -142,10 +142,10 @@ async fn run() -> Result<Option<Deployment>> {
     );
     match mode {
         AuthMode::Off => tracing::warn!(
-            "Authentication is DISABLED (auth_mode = off): every endpoint accepts requests without a token"
+            "Authentication is DISABLED for ordinary endpoints (auth_mode = off); AI relay still requires a token"
         ),
         AuthMode::External => tracing::info!(
-            "LAN-direct requests need no token; proxied or public requests need a bearer token"
+            "Ordinary LAN-direct requests need no token; AI relay, proxied or public requests need a bearer token"
         ),
         AuthMode::All => tracing::info!(
             token_env,
@@ -163,7 +163,7 @@ async fn run() -> Result<Option<Deployment>> {
     let listener = tokio::net::TcpListener::bind(config.bind)
         .await
         .with_context(|| format!("Cannot bind {}", config.bind))?;
-    let service = Service::starting_with(security.clone());
+    let service = Service::starting_with_config(security.clone(), &config)?;
     let updates = service.updates().clone();
     if let Err(error) = updates.start(std::env::args_os().skip(1).collect()) {
         tracing::warn!(%error, "Automatic update check could not start; server remains available");

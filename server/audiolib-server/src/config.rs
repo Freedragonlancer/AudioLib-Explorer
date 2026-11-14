@@ -29,6 +29,8 @@ pub const DEFAULT_FFMPEG_PATH: &str = "/opt/homebrew/bin/ffmpeg";
 pub const DEFAULT_MAX_TRANSCODES: usize = 4;
 /// Default limit of concurrent `/audio/{id}/preview` responses (both codecs).
 pub const DEFAULT_MAX_PREVIEWS: usize = 8;
+/// Default bound on in-flight AI upstream calls.
+pub const DEFAULT_MAX_AI_REQUESTS: usize = 4;
 /// Minimum accepted bearer token length in characters.
 pub const MIN_TOKEN_CHARS: usize = 32;
 
@@ -80,6 +82,14 @@ pub struct ServerConfig {
     /// Name of the environment variable holding the token, default [`DEFAULT_TOKEN_ENV`].
     #[serde(default)]
     pub token_env: Option<String>,
+    /// Explicit AI protocol/base URL allowlist. Empty (the default) disables AI relay.
+    /// These endpoints are trusted administrative network destinations, including any
+    /// configured LAN endpoint; client-supplied URLs cannot expand this list.
+    #[serde(default)]
+    pub ai_upstreams: Vec<AiUpstream>,
+    /// Concurrent AI upstream calls (1..=64, default 4); further calls get 503 `BUSY`.
+    #[serde(default = "default_max_ai_requests")]
+    pub max_ai_requests: usize,
     /// Seconds between background library change checks (1..=3600, default 3).
     #[serde(default = "default_poll_secs")]
     pub revision_poll_secs: u64,
@@ -154,6 +164,16 @@ fn default_legacy_snapshot_enabled() -> bool {
     true
 }
 
+/// One administrator-approved AI endpoint; never contains provider credentials.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiUpstream {
+    /// Exact provider wire protocol, for example `magpie` or `chat_completions`.
+    pub protocol: audiolib_ai::config::Protocol,
+    /// Exact upstream base URL, including any reverse-proxy prefix.
+    pub base_url: String,
+}
+
 /// One configured scan root shared with clients.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -194,6 +214,9 @@ fn default_poll_secs() -> u64 {
 }
 fn default_max_streams() -> usize {
     DEFAULT_MAX_STREAMS
+}
+fn default_max_ai_requests() -> usize {
+    DEFAULT_MAX_AI_REQUESTS
 }
 fn default_root_check_secs() -> u64 {
     300
@@ -333,6 +356,7 @@ impl ServerConfig {
         if !(1..=1024).contains(&self.max_streams) {
             bail!("max_streams must be 1..=1024");
         }
+        crate::ai_relay::validate_config(self)?;
         if !(60..=86_400).contains(&self.root_check_secs) {
             bail!("root_check_secs must be 60..=86400");
         }
