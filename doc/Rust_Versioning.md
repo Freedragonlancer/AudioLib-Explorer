@@ -1,6 +1,6 @@
 # AudioLib Explorer 版本规范
 
-当前工作区候选为 **1.0.1**（用户所称“v1.01”按三段式规范记为 `v1.0.1`），以正式 `v1.0.0` 为基线。正在整合本地及待合分支并执行受影响源码检查，尚待 PR 汇入 beta；未提升 main、创建标签、构建最终正式 payload 或公开发布。API `/api/v1/`、本地写 schema 8、专用服务端写 schema 9、快照 `3..=9` 及完整格式沿用 1.0.0；新增 AI 转发端点保持 API v1。范围、验证身份与待交付资产见 [1.0.1 发布准备](Rust_Release_1.0.1.md)。下文已发布 1.0.0 的事实和标签身份保持原样。
+当前工作区候选为 **1.0.1**（用户所称“v1.01”按三段式规范记为 `v1.0.1`），以正式 `v1.0.0` 为基线。本地与待合分支由 [#308](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/308) 汇总，选定源码检查通过；未提升 main、创建标签、构建最终正式 payload 或公开发布。API `/api/v1/`、本地写 schema 8、专用服务端写 schema 9、快照 `3..=9` 及完整格式沿用 1.0.0；新增 AI 转发端点保持 API v1。范围、验证身份与待交付资产见 [1.0.1 发布准备](Rust_Release_1.0.1.md)。下文已发布 1.0.0 的事实和标签身份保持原样。
 
 当前正式版为 **[1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0)**，于 2026-11-13 02:17:52 UTC（北京时间 10:17:52）发布。七份正式 payload 来自 main/tag `1fc6f825520bdf24d01e2889dbcc7c96831be04c`，十四项线上资产与下载校验正文、发布后固定安装同步均通过。范围为 AI／Jev、搜索任务按钮、音频确认与状态生命周期、RIFF 兼容及已合并发布工具修正；API、schema、快照读取范围和完整格式沿用 0.9.6。原始与新执行证据、平台限制见 [1.0.0 发布记录](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_1.0.0.md)。tag 冻结后的 beta #292 与发布后工具 #290 不属于该正式版，后续文档不改变二进制源码身份。
 
