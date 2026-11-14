@@ -28,9 +28,17 @@ A free, open-source sound effects (SFX) library manager for sound design, game a
 - Scales to sound libraries of 10 TB and more.
 - From v1.0.0, the desktop app can turn a plain-language sound description into English keyword queries that hit the current library: up to six main queries in the current beta, expanding to eight total when useful source layers are verified, or five in the published v1.0.0. The offline lexicon needs no account; a cloud model needs your own HTTPS provider, API key and model. See [AI search](#ai-search).
 
-![AudioLib Explorer AI search / AI 智能搜索](resources/screenshot-main.png)
+![v1.0 AI search with keyword tags and a populated sound list / v1.0 AI 智能搜索、关键词标签和声音列表](resources/screenshot-main.png)
 
-Desktop AI search with a sample description and keyword tags. The sound list is empty and no server is connected.
+v1.0 AI search. Generate Tags is on, with the description and verified keyword tags. The current task lists the matching sounds and their waveforms.
+
+v1.0 AI 智能搜索。搜索条已打开 Generate Tags，旁边是声音描述和已核验的关键词标签；当前任务列出命中的声音和 Waveform。
+
+![v1.0 sound details with embedded cover artwork / v1.0 声音详情与内嵌封面](resources/screenshot-artwork.png)
+
+v1.0 details for the same search. The selected sound shows its embedded cover, description, and waveform next to the list.
+
+v1.0 同一搜索的详情。选中的声音在列表旁显示内嵌封面、描述和 Waveform。
 
 ## AI search
 
