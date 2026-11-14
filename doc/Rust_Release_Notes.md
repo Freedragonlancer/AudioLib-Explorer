@@ -1,8 +1,8 @@
-# 1.0.1 候选：AI 网关转发、收藏与 Windows 修复
+# 1.0.1：AI 网关转发、收藏与 Windows 修复
 
 程序 1.0.1 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9
 
-2026-11-14 准备，以已发布 `v1.0.0` 为基线。候选由 [#308](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/308) 汇总，选定源码检查已通过，当前停留在 beta 发布准备；尚未提升 main、创建标签、生成最终正式产物或公开发布。整合身份、复用证据、待验收的七归档／十四资产见 [1.0.1 发布准备](Rust_Release_1.0.1.md)。API 仍为 `/api/v1/`，资料库写目标、快照范围及完整格式沿用 1.0.0，不新增资料库迁移。
+已于 2026-11-14 11:22:02 UTC（北京时间 19:22:02）正式发布 [v1.0.1](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.1)，以已发布 `v1.0.0` 为基线。经 [#308](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/308) 整合、[#310](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/310) 交付边界修正及 [#311](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/311) 文档协调，再由 [#309](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/309) 提升 main。七份正式产物来自 `21a0e1c2fc5de4a23a10f2139459885373f97ada`，tag object 为 `bf4bcf7d5986c47f3afbb9a0c719c370abccf8c5`；各平台包／启动验收、十四项线上资产与校验正文核验通过；发布后固定安装 908 文件及两 EXE 哈希、CLI 1.0.1 与隔离启动同步通过（copied=0），详见 [1.0.1 发布记录](Rust_Release_1.0.1.md)。API、资料库写目标、快照范围及完整格式沿用 1.0.0，不新增资料库迁移。
 
 - **AI 连接与设置**：新增 Magpie 本机及显式私网网关；可选择由音库服务器转发模型获取、测试和生成。服务器默认禁用转发，需要独立令牌及明确上游允许列表，失败不自动直连。未保存供应商与离线词表分开，草稿可恢复；新配置默认 180 秒、允许 2–600 秒，旧超时保留。移除应用内月请求限制与订阅字段，保留旧配置兼容。
 - **推荐与反馈**：包含 beta #303–#306 的 Go DeepSeek 修正、主声音／分层区分、主声音最多 6 项且有效分层时总计最多 8 项、自适应顶栏与当前模型／失败提示。
@@ -11,7 +11,7 @@
 - **凭据与更新器**：音库服务器令牌绑定 API 地址，部分保存失败时隔离错配凭据并保留修复资料；#301 修正 Windows 更新 helper 早期失败恢复、成功阶段清理和持锁保留。
 - **工具与说明**：整合本地 Cargo 缓存／临时目录路由、租约及成功后中间产物清理；保留按实际改动选择验证的流程。#298 更新中英文主页截图。
 
-上述范围已完成选定源码检查；原始通过证据保留其实际源码与平台身份，不代替 beta 环境及最终 main/tag 产物验收。本轮准备未更新 `local_release/`，正式发布状态仍以下方 1.0.0 记录为准。
+Windows 101 项定向源码测试与 10 项数据安全检查、Mac／Linux 受影响源码检查及 beta 完整冒烟通过；原始执行、失败与复用身份分别保留。beta 快照 909,342 条，20 个授权流样本通过；当前一根范围内 80,562、范围外 828,780，missing=0 且未变，不能据此声称全库均在配置根内或都已流读取。Mac ad-hoc 不是 Apple 公证，Linux x64／Docker amd64 使用 ARM64 主机上的 x64 仿真；完整 SHA256、覆盖与安装状态见发布记录。
 
 # 1.0.0：AI 智能搜索与播放可靠性
 

@@ -4,12 +4,12 @@ AudioLib Explorer is a Rust + Slint Windows desktop application with SQLite FTS5
 
 ## Current implementation
 
-当前候选的 AI 智能搜索使用与实现见 [Rust AI Search](Rust_AI_Search.md)，发布状态见 [1.0.1 发布准备](Rust_Release_1.0.1.md)；已发布 1.0.0 的指南保留在 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/v1.0.0/doc/Rust_AI_Search.md)。研究、Agent skill、补全词表及概念设计见 [AI Keyword Search](AI_Keyword_Search_Design.md)。
+当前 1.0.1 的 AI 智能搜索使用与实现见 [Rust AI Search](Rust_AI_Search.md)，正式发布、验收与安装记录见 [1.0.1 发布记录](Rust_Release_1.0.1.md)；历史 1.0.0 的五标签指南保留在 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/v1.0.0/doc/Rust_AI_Search.md)。研究、Agent skill、补全词表及概念设计见 [AI Keyword Search](AI_Keyword_Search_Design.md)。
 
 | Document | Purpose |
 |----------|---------|
 | [README](../README.md) | Build, launch, user-data layout and release operations |
-| [AI search](Rust_AI_Search.md) | Current candidate AI settings, Magpie, server relay and verification boundaries; published v1.0.0 remains documented at its tag |
+| [AI search](Rust_AI_Search.md) | v1.0.1 AI settings, Magpie, server relay and verification boundaries; historical v1.0.0 remains documented at its tag |
 | [Repository guidance](../AGENTS.md) | Engineering invariants and required checks |
 | [Rust Architecture](Rust_Architecture.md) | Owned contracts, data services, migration, playback and platform boundaries |
 | [Appearance themes](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/beta/doc/Rust_Themes.md) | Stable default and Studio player presentations, settings and theme extension |
@@ -37,7 +37,7 @@ AudioLib Explorer is a Rust + Slint Windows desktop application with SQLite FTS5
 | [Scan and Search Performance](Rust_Scan_Search_Performance.md) | Bounded Metadata workers, batch writes and measured scan/search latency |
 | [Large-library GUI Search](Rust_GUI_Search_Performance.md) | Query cancellation, directory facet reuse, virtualized tree models and GUI benchmark |
 | [Release Notes](Rust_Release_Notes.md) | Candidate changes and published client/server release history |
-| [1.0.1 release preparation](Rust_Release_1.0.1.md) | Beta integration candidate, source-evidence identities, pending seven payloads and publication limits |
+| [1.0.1 release record](Rust_Release_1.0.1.md) | Published 21a0e1c payloads, fourteen verified online assets, source/failure identities, beta coverage, fixed installation and actual platform limits |
 | [1.0.0 release record](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_1.0.0.md) | Published 1fc6f825 payloads, fourteen verified assets, beta/native evidence, fixed installation and actual platform limits |
 | [0.9.6 release record](Rust_Release_0.9.6.md) | Published 4606291 payloads, fourteen verified online assets, source-evidence reuse, fixed installation and actual platform limits |
 | [0.9.5 release record](Rust_Release_0.9.5.md) | Published 7d payloads and hashes, fourteen online assets, fixed-install synchronization, original versus new checks and actual platform limits |
