@@ -62,11 +62,11 @@ const STREAM_CHUNK_BYTES: usize = 256 * 1024;
 /// Bundle download limits are independent of its short preparation lease.
 static BUNDLE_DOWNLOAD_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 const BUNDLE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-/// Time limit for every endpoint except `/library/snapshot`, `/audio/{id}/stream`,
+/// Time limit for ordinary endpoints except `/library/snapshot`, `/audio/{id}/stream`,
 /// `/audio/{id}/preview`, `/audio/{id}/waveform`, `/audio/{id}/artwork` and
 /// `/albums/{id}/artwork`, which
 /// legitimately take long (large bodies, waking disks, decoding); exceeding it yields
-/// 408 `TIMEOUT`.
+/// 408 `TIMEOUT`. AI relay has a separate deadline for long-running model calls.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Largest accepted JSON request body (a 1 MiB note may double when JSON-escaped).
 const MAX_JSON_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -244,6 +244,15 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
     );
     let api = with_request_timeout(timeout, open)
         .merge(protected)
+        // AI calls carry their own <=600s upstream deadline. They are independent
+        // of library readiness and must not inherit the ordinary 30s route limit.
+        .merge(with_request_timeout(
+            crate::ai_relay::REQUEST_TIMEOUT,
+            crate::ai_relay::router().route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_ai_token,
+            )),
+        ))
         .layer(middleware::from_fn(guard_api_mutation));
     let vendor = Router::new()
         .nest(
@@ -517,6 +526,21 @@ async fn require_token(State(service): State<Service>, request: Request, next: N
             Some(response) => response,
             None => next.run(request).await,
         },
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn require_ai_token(
+    State(service): State<Service>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let connection = request.extensions().get::<ConnectionInfo>().copied();
+    match service
+        .security()
+        .authorize_required_token(request.headers(), connection.as_ref())
+    {
+        Ok(()) => next.run(request).await,
         Err(error) => error.into_response(),
     }
 }

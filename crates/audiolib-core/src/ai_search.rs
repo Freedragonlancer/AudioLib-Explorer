@@ -3,8 +3,25 @@
 use crate::{Error, Result, SearchRequest};
 use serde::{Deserialize, Serialize};
 
-/// Maximum suggestions shown or admitted from a model response.
+/// Maximum raw candidates admitted before current-library hit verification.
 pub const MAX_AI_QUERIES: usize = 12;
+
+/// Maximum verified recommendations displayed when none are source layers.
+pub const MAX_AI_MAIN_RECOMMENDATIONS: usize = 6;
+
+/// Maximum verified main and layer recommendations displayed together.
+pub const MAX_AI_LAYERED_RECOMMENDATIONS: usize = 8;
+
+/// Explicit recommendation purpose, independent of its human-readable layer label.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiQueryKind {
+    /// A finished sound or ordinary keyword suggestion; also the legacy default.
+    #[default]
+    Main,
+    /// A useful independent source layer for constructing the described sound.
+    Layer,
+}
 
 /// One independently executable plain-text AND query, not an FTS expression.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,6 +29,9 @@ pub const MAX_AI_QUERIES: usize = 12;
 pub struct AiQuery {
     pub text: String,
     pub reason: String,
+    /// Missing kinds in older responses remain main recommendations.
+    #[serde(default)]
+    pub kind: AiQueryKind,
     pub layer: String,
     pub source_ids: Vec<String>,
     pub cat_ids: Vec<String>,
@@ -72,6 +92,7 @@ impl AiQueryPlan {
             validate_ai_query(&query.text)?;
             if query.reason.chars().count() > 300
                 || query.layer.chars().count() > 40
+                || (query.kind == AiQueryKind::Layer && query.layer.trim().is_empty())
                 || query.source_ids.len() > 6
                 || query.cat_ids.len() > 6
                 || query
@@ -90,6 +111,56 @@ impl AiQueryPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_kind_round_trips_and_legacy_labels_do_not_infer_layers() {
+        let legacy = serde_json::json!({
+            "text":"metal impact","reason":"Useful impact","layer":"尾音",
+            "source_ids":[],"cat_ids":[]
+        });
+        let main: AiQuery = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(main.kind, AiQueryKind::Main);
+        assert_eq!(serde_json::to_value(&main).unwrap()["kind"], "main");
+
+        let mut explicit = legacy.clone();
+        explicit["kind"] = serde_json::json!("layer");
+        let layer: AiQuery = serde_json::from_value(explicit.clone()).unwrap();
+        assert_eq!(layer.kind, AiQueryKind::Layer);
+        assert_eq!(serde_json::to_value(&layer).unwrap(), explicit);
+
+        for invalid in [serde_json::json!("tail"), serde_json::Value::Null] {
+            let mut query = legacy.clone();
+            query["kind"] = invalid;
+            assert!(serde_json::from_value::<AiQuery>(query).is_err());
+        }
+    }
+
+    #[test]
+    fn explicit_layers_need_a_role_and_raw_candidates_keep_their_separate_bound() {
+        let query: AiQuery = serde_json::from_value(serde_json::json!({
+            "text":"wind","reason":"Wind recording","kind":"main","layer":"",
+            "source_ids":[],"cat_ids":[]
+        }))
+        .unwrap();
+        let mut plan = AiQueryPlan {
+            schema_version: 1,
+            intent: "wind".into(),
+            queries: vec![query; MAX_AI_QUERIES],
+            cautions: vec![],
+        };
+        // Display limits must not reject extra raw hit-verification candidates.
+        plan.validate().unwrap();
+        plan.queries[0].kind = AiQueryKind::Layer;
+        for role in ["", " \t "] {
+            plan.queries[0].layer = role.into();
+            assert!(plan.validate().is_err());
+        }
+        plan.queries[0].layer = "air texture".into();
+        plan.validate().unwrap();
+        plan.queries.push(plan.queries[0].clone());
+        assert!(plan.validate().is_err());
+    }
+
     #[test]
     fn executable_queries_cannot_smuggle_boolean_or_shell_syntax() {
         for value in [

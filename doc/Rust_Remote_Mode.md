@@ -121,10 +121,17 @@ settings files load as local mode):
   once to `settings.json.pre-profiles`. When an older client later edits `mode`/`server_url`
   directly, those fields win on the next load (an unknown URL becomes a new profile).
   Migration is idempotent.
-- Tokens are per profile in the same DPAPI `secrets.bin` (`profiles: {id: {token}}`);
+- Tokens are per profile in the same DPAPI `secrets.bin` (`profiles: {id: {token, server_url?}}`);
   the old single token moves to the first profile, and the top-level `token` stays the
   active profile's for older clients. An older client that rewrites `secrets.bin` drops
   the map; the next start migrates its single token again.
+- New saves bind profile tokens and the mirrored legacy token (`token_server_url`)
+  to the canonical API address, preserving path-prefix case. Legacy unbound files
+  remain readable. If credentials save but settings do not, mismatched tokens are
+  quarantined before any network use, including after restart; matching profiles
+  and the raw records needed for repair remain available. An explicit replacement
+  token or a matching address repairs the binding. Saving an unresolved mismatch
+  fails rather than forwarding its token or dropping unrelated credentials.
 - The 「音效库管理」 window (see *Desktop usage*) lists 本地素材库 and every profile
   and edits exactly the selected one; editing never switches the source. Save on a
   non-active profile only stores settings (no runtime reset); on the active profile a

@@ -416,6 +416,9 @@ pub struct AppConfig {
     /// explicitly saved value, including `false`, is kept as-is.
     #[serde(default = "default_true")]
     pub audition_play_on_single_click: bool,
+    /// Stop an active audition when another application becomes foreground.
+    #[serde(default)]
+    pub stop_playback_on_focus_loss: bool,
     /// Client-local playback event limit per library; zero disables new records.
     /// History lives under the user data root, independently of libraries and caches.
     #[serde(default = "default_play_history_limit")]
@@ -492,6 +495,8 @@ struct SavedPreferences {
     playback: serde_json::Value,
     #[serde(default = "default_true")]
     audition_play_on_single_click: bool,
+    #[serde(default)]
+    stop_playback_on_focus_loss: bool,
     #[serde(default = "default_play_history_limit")]
     play_history_limit: u32,
     #[serde(default = "default_true")]
@@ -821,6 +826,7 @@ impl AppConfig {
             language: english(),
             playback: default_playback(),
             audition_play_on_single_click: true,
+            stop_playback_on_focus_loss: false,
             play_history_limit: PLAY_HISTORY_LIMIT_PER_LIBRARY,
             show_album_artwork: true,
             slice_export_directory: None,
@@ -881,6 +887,7 @@ impl AppConfig {
             config.language = saved.language;
             config.playback = saved.playback;
             config.audition_play_on_single_click = saved.audition_play_on_single_click;
+            config.stop_playback_on_focus_loss = saved.stop_playback_on_focus_loss;
             config.play_history_limit = saved.play_history_limit;
             config.show_album_artwork = saved.show_album_artwork;
             config.slice_export_directory = saved.slice_export_directory;
@@ -939,6 +946,7 @@ impl AppConfig {
             language: self.language.clone(),
             playback: self.playback.clone(),
             audition_play_on_single_click: self.audition_play_on_single_click,
+            stop_playback_on_focus_loss: self.stop_playback_on_focus_loss,
             play_history_limit: self.play_history_limit,
             show_album_artwork: self.show_album_artwork,
             slice_export_directory: self.slice_export_directory.clone(),
@@ -1535,6 +1543,7 @@ mod tests {
         config.language = "cn".into();
         config.playback = serde_json::json!({"volume":0.35,"device_id":"custom-device"});
         config.audition_play_on_single_click = true;
+        config.stop_playback_on_focus_loss = true;
         config.pregenerate_list_waveforms = true;
         config.hold_list_waveform_batches_after_audition = true;
         config.allowed_scan_roots = vec![directory.path().join("sounds")];
@@ -1560,6 +1569,7 @@ mod tests {
             loaded.audition_play_on_single_click,
             config.audition_play_on_single_click
         );
+        assert!(loaded.stop_playback_on_focus_loss);
         assert!(loaded.pregenerate_list_waveforms);
         assert!(loaded.hold_list_waveform_batches_after_audition);
         assert_eq!(loaded.allowed_scan_roots, config.allowed_scan_roots);
@@ -1967,6 +1977,7 @@ mod tests {
         .unwrap();
         let config = AppConfig::load_with_roots(directory.path().to_owned(), &[]).unwrap();
         assert!(!config.audition_play_on_single_click);
+        assert!(!config.stop_playback_on_focus_loss);
     }
 
     #[test]

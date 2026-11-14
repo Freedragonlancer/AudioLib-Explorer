@@ -1,11 +1,11 @@
 // crates/audiolib-audio/src/wav_metadata.rs
 //! Bounded, read-only extraction of public WAV Metadata containers.
-use encoding_rs::{Encoding, UTF_16BE, UTF_16LE, WINDOWS_1252};
+use encoding_rs::{Encoding, GBK, SHIFT_JIS, UTF_16BE, UTF_16LE, WINDOWS_1252};
 use roxmltree::{Document, Node, ParsingOptions};
 use serde_json::{Map, Value, json};
 
 /// Increment when extraction changes so an ordinary scan refreshes old records.
-pub const WAV_METADATA_VERSION: i64 = 4;
+pub const WAV_METADATA_VERSION: i64 = 5;
 pub(crate) const MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
 // Modern SMED includes UTF-16 base64 artwork (the supplied BOOM files use ~4 MiB).
 pub(crate) const MAX_SMED_BYTES: u64 = 16 * 1024 * 1024;
@@ -29,13 +29,348 @@ pub struct Artwork {
     pub mime: String,
 }
 
+/// Decode NUL-terminated INFO, BWF, and AIFF text.
+///
+/// Valid UTF-8 wins, so ASCII and well-formed Unicode stay intact. Other bytes
+/// are GBK or Shift-JIS when they form a plausible CJK or kana run, and
+/// Windows-1252 otherwise. That keeps Latin-1 words and illegal bytes on the
+/// previous fallback instead of inventing a CJK reading.
 pub(crate) fn text(bytes: &[u8]) -> String {
     let bytes = bytes.split(|b| *b == 0).next().unwrap_or_default();
-    let decoded = match std::str::from_utf8(bytes) {
-        Ok(value) => value.into(),
-        Err(_) => WINDOWS_1252.decode_without_bom_handling(bytes).0,
+    decode_unmarked_text(bytes).trim().to_string()
+}
+
+fn decode_unmarked_text(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    if let Ok(value) = std::str::from_utf8(bytes) {
+        return value.to_string();
+    }
+    let mut out = String::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] < 0x80 {
+            let start = index;
+            index += 1;
+            while index < bytes.len() && bytes[index] < 0x80 {
+                index += 1;
+            }
+            out.push_str(std::str::from_utf8(&bytes[start..index]).unwrap());
+            continue;
+        }
+        let end = legacy_span_end(bytes, index);
+        let run = &bytes[index..end];
+        if let Some(decoded) = decode_legacy_run(run) {
+            out.push_str(&decoded);
+        } else {
+            out.push_str(&windows_1252(run));
+        }
+        index = end;
+    }
+    out
+}
+
+fn windows_1252(bytes: &[u8]) -> String {
+    WINDOWS_1252
+        .decode_without_bom_handling(bytes)
+        .0
+        .into_owned()
+}
+
+fn legacy_span_end(bytes: &[u8], start: usize) -> usize {
+    let high_end = high_byte_end(bytes, start);
+    let sjis_end = sjis_greedy_end(bytes, start);
+    if sjis_end > high_end && sjis_extension_ok(&bytes[start..sjis_end]) {
+        sjis_end
+    } else if high_end > start {
+        high_end
+    } else {
+        start + 1
+    }
+}
+
+fn high_byte_end(bytes: &[u8], start: usize) -> usize {
+    let mut index = start;
+    while index < bytes.len() && bytes[index] >= 0x80 {
+        index += 1;
+    }
+    index
+}
+
+/// Windows-1252 punctuation bytes that are also Shift-JIS leads.
+///
+/// An en dash or quote must not swallow the following ASCII letter (`it’s`,
+/// `a–b`). The same lead with a non-letter trail is a kanji (`本` is
+/// `0x96 '{'`) and can be consumed.
+fn refuses_letter_trail(lead: u8) -> bool {
+    matches!(
+        lead,
+        0x82 | 0x84
+            | 0x85
+            | 0x86
+            | 0x87
+            | 0x91
+            | 0x92
+            | 0x93
+            | 0x94
+            | 0x95
+            | 0x96
+            | 0x97
+            | 0x99
+            | 0x9B
+    )
+}
+
+const fn is_sjis_lead(byte: u8) -> bool {
+    matches!(byte, 0x81..=0x9F | 0xE0..=0xFC)
+}
+
+const fn is_sjis_trail(byte: u8) -> bool {
+    matches!(byte, 0x40..=0x7E | 0x80..=0xFC)
+}
+
+fn sjis_greedy_end(bytes: &[u8], start: usize) -> usize {
+    let mut index = start;
+    while index < bytes.len() {
+        let lead = bytes[index];
+        if (0xA1..=0xDF).contains(&lead) {
+            index += 1;
+            continue;
+        }
+        if is_sjis_lead(lead) && index + 1 < bytes.len() && is_sjis_trail(bytes[index + 1]) {
+            let trail = bytes[index + 1];
+            if trail < 0x80 && refuses_letter_trail(lead) && trail.is_ascii_alphabetic() {
+                break;
+            }
+            index += 2;
+            continue;
+        }
+        break;
+    }
+    index
+}
+
+fn sjis_extension_ok(run: &[u8]) -> bool {
+    if !run.iter().any(|byte| *byte < 0x80) {
+        return false;
+    }
+    let Some(text) = strict_text(SHIFT_JIS, run) else {
+        return false;
     };
-    decoded.trim().to_string()
+    let kana = count_chars(&text, is_fullwidth_kana);
+    let kanji = count_chars(&text, is_cjk_ideograph);
+    if kana >= 2 || kanji >= 2 {
+        return true;
+    }
+    // One pair whose trail is not an ASCII letter is not `it’s` or `Œuvre`.
+    kana + kanji >= 1 && !run.iter().any(|byte| byte.is_ascii_alphabetic())
+}
+
+struct LegacyCandidate {
+    text: String,
+    gb2312: u32,
+    sjis_low: u32,
+    kana: u32,
+    halfwidth: u32,
+}
+
+fn decode_legacy_run(run: &[u8]) -> Option<String> {
+    if run.len() < 2 || prefer_windows_1252_latin(run) {
+        return None;
+    }
+    choose_legacy(gbk_candidate(run), sjis_candidate(run))
+}
+
+fn choose_legacy(gbk: Option<LegacyCandidate>, sjis: Option<LegacyCandidate>) -> Option<String> {
+    match (gbk, sjis) {
+        (None, None) => None,
+        (Some(gbk), None) => Some(gbk.text),
+        (None, Some(sjis)) => Some(sjis.text),
+        (Some(gbk), Some(sjis)) => Some(if prefer_sjis(&gbk, &sjis) {
+            sjis.text
+        } else {
+            gbk.text
+        }),
+    }
+}
+
+fn prefer_sjis(gbk: &LegacyCandidate, sjis: &LegacyCandidate) -> bool {
+    if sjis.kana > 0 && (gbk.gb2312 == 0 || sjis.kana >= gbk.gb2312) {
+        return true;
+    }
+    if sjis.sjis_low > gbk.gb2312 {
+        return true;
+    }
+    if gbk.gb2312 > sjis.sjis_low {
+        return false;
+    }
+    // Shared E0–F7 leads are GB2312 as well as Shift-JIS. Without kana or an
+    // 81–9F lead, keep the Chinese reading.
+    gbk.gb2312 == 0 && (sjis.kana > 0 || sjis.sjis_low > 0 || sjis.halfwidth >= 4)
+}
+
+fn gbk_candidate(run: &[u8]) -> Option<LegacyCandidate> {
+    if run.iter().any(|byte| *byte < 0x80) || run.iter().all(|byte| (0x80..0xC0).contains(byte)) {
+        return None;
+    }
+    let text = strict_text(GBK, run)?;
+    if count_chars(&text, is_cjk_ideograph) == 0 {
+        return None;
+    }
+    Some(LegacyCandidate {
+        text,
+        gb2312: count_gb2312(run),
+        sjis_low: 0,
+        kana: 0,
+        halfwidth: 0,
+    })
+}
+
+fn sjis_candidate(run: &[u8]) -> Option<LegacyCandidate> {
+    let text = strict_text(SHIFT_JIS, run)?;
+    let kana = count_chars(&text, is_fullwidth_kana);
+    let kanji = count_chars(&text, is_cjk_ideograph);
+    let halfwidth = count_chars(&text, is_halfwidth_kana);
+    let sjis_low = count_sjis_low(run);
+    if kana == 0 && kanji == 0 && (halfwidth < 4 || !run.iter().any(|byte| *byte >= 0xC0)) {
+        return None;
+    }
+    Some(LegacyCandidate {
+        text,
+        gb2312: 0,
+        sjis_low,
+        kana,
+        halfwidth,
+    })
+}
+
+fn strict_text(encoding: &'static Encoding, bytes: &[u8]) -> Option<String> {
+    let text = encoding
+        .decode_without_bom_handling_and_without_replacement(bytes)?
+        .into_owned();
+    if text
+        .chars()
+        .any(|ch| ch == '\u{FFFD}' || ('\u{E000}'..='\u{F8FF}').contains(&ch))
+    {
+        return None;
+    }
+    Some(text)
+}
+
+fn count_chars(text: &str, kind: fn(char) -> bool) -> u32 {
+    text.chars().filter(|ch| kind(*ch)).count() as u32
+}
+
+fn count_gb2312(run: &[u8]) -> u32 {
+    let mut index = 0;
+    let mut count = 0;
+    while index < run.len() {
+        let lead = run[index];
+        if lead < 0x81 || index + 1 >= run.len() {
+            index += 1;
+            continue;
+        }
+        let trail = run[index + 1];
+        let valid_trail = (0x40..=0x7E).contains(&trail) || (0x80..=0xFE).contains(&trail);
+        if (0x81..=0xFE).contains(&lead) && valid_trail {
+            if (0xB0..=0xF7).contains(&lead) && (0xA1..=0xFE).contains(&trail) {
+                count += 1;
+            }
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    count
+}
+
+fn count_sjis_low(run: &[u8]) -> u32 {
+    let mut index = 0;
+    let mut count = 0;
+    while index < run.len() {
+        let lead = run[index];
+        if (0xA1..=0xDF).contains(&lead) {
+            index += 1;
+            continue;
+        }
+        if is_sjis_lead(lead) && index + 1 < run.len() && is_sjis_trail(run[index + 1]) {
+            if (0x81..=0x9F).contains(&lead) {
+                count += 1;
+            }
+            index += 2;
+        } else if lead < 0x80 {
+            index += 1;
+        } else {
+            break;
+        }
+    }
+    count
+}
+
+fn is_cjk_ideograph(ch: char) -> bool {
+    matches!(ch, '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}')
+}
+
+fn is_fullwidth_kana(ch: char) -> bool {
+    matches!(ch, '\u{3040}'..='\u{30FF}')
+}
+
+fn is_halfwidth_kana(ch: char) -> bool {
+    matches!(ch, '\u{FF61}'..='\u{FF9F}')
+}
+
+/// Accented European bytes that are also legal CJK pairs.
+///
+/// A run of Windows-1252 letters stays Latin when lowercase letters predominate
+/// (Größe, äö) or it is one of the adjacent Scandinavian pairs. Mixed and
+/// uppercase pairs in the GB2312 range are read as hanzi: those two-byte
+/// sequences are how unmarked Chinese metadata is stored.
+fn prefer_windows_1252_latin(run: &[u8]) -> bool {
+    if run.is_empty() || !run.iter().copied().all(is_prose_latin_byte) {
+        return false;
+    }
+    if run.len() == 2 && run.contains(&0xDF) {
+        return true;
+    }
+    let lower = run
+        .iter()
+        .copied()
+        .filter(|byte| is_prose_lower_byte(*byte))
+        .count();
+    let upper = run
+        .iter()
+        .copied()
+        .filter(|byte| is_prose_upper_byte(*byte))
+        .count();
+    if lower > upper {
+        return true;
+    }
+    if run.len() == 2 {
+        let text = windows_1252(run);
+        return ["ÄÖ", "ÖÄ", "ÅÄ", "ÄÅ", "ÆØ", "ØÆ", "ÜÖ", "ÖÜ", "ÅÖ", "ÖÅ"]
+            .iter()
+            .any(|pair| *pair == text);
+    }
+    false
+}
+
+const fn is_prose_latin_byte(byte: u8) -> bool {
+    is_prose_lower_byte(byte) || is_prose_upper_byte(byte)
+}
+
+const fn is_prose_upper_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        0x8A | 0x8C | 0x8E | 0x9F | 0xC0..=0xD6 | 0xD8..=0xDE
+    )
+}
+
+const fn is_prose_lower_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        0x9A | 0x9C | 0x9E | 0xDF | 0xE0..=0xF6 | 0xF8..=0xFF
+    )
 }
 
 fn xml_text(bytes: &[u8]) -> String {

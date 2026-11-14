@@ -8,6 +8,9 @@ mod package;
 #[cfg(test)]
 mod tests;
 
+#[cfg(all(feature = "test-update-source", not(debug_assertions)))]
+compile_error!("test-update-source is unavailable in release builds");
+
 use anyhow::{Context, Result, bail, ensure};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -127,6 +130,42 @@ pub struct UpdateClient {
     agent: ureq::Agent,
     /// GitHub releases API endpoint (without query); defaults to this repository's.
     releases_api: String,
+    #[cfg(all(feature = "test-update-source", debug_assertions))]
+    test_source: Option<TestSource>,
+}
+
+#[cfg(all(feature = "test-update-source", debug_assertions))]
+#[derive(Clone, Debug)]
+struct TestSource {
+    base: String,
+}
+
+#[cfg(all(feature = "test-update-source", debug_assertions))]
+impl TestSource {
+    fn parse(value: &std::ffi::OsStr) -> Result<Self> {
+        let text = value.to_str().context("Invalid test update source")?;
+        let base = text.trim_end_matches('/');
+        let address = base
+            .strip_prefix("http://")
+            .context("Test update source must be a loopback HTTP origin")?
+            .parse::<std::net::SocketAddr>()
+            .context("Test update source must include a loopback address and port")?;
+        ensure!(
+            address.ip().is_loopback() && address.port() != 0,
+            "Test update source must use a loopback address"
+        );
+        Ok(Self {
+            base: format!("http://{address}"),
+        })
+    }
+
+    fn releases_api(&self) -> String {
+        format!("{}/releases", self.base)
+    }
+
+    fn valid_asset_url(&self, asset: &Asset, tag: &str) -> bool {
+        asset.browser_download_url == format!("{}/download/{tag}/{}", self.base, asset.name)
+    }
 }
 
 impl UpdateClient {
@@ -149,15 +188,14 @@ impl UpdateClient {
         self.channel
     }
 
-    /// Replace the releases API endpoint (`?per_page=100&page=N` is appended). The
-    /// production agent still only accepts HTTPS; intended for mirrors and tests.
-    pub fn with_releases_api(mut self, url: impl Into<String>) -> Self {
+    #[cfg(test)]
+    fn with_releases_api(mut self, url: impl Into<String>) -> Self {
         self.releases_api = url.into();
         self
     }
 
-    /// The releases API endpoint in use.
-    pub fn releases_api(&self) -> &str {
+    #[cfg(test)]
+    fn releases_api(&self) -> &str {
         &self.releases_api
     }
 
@@ -168,6 +206,8 @@ impl UpdateClient {
             channel,
             current: Version::parse(current_version)?,
             releases_api: RELEASES_API.to_owned(),
+            #[cfg(all(feature = "test-update-source", debug_assertions))]
+            test_source: None,
             agent: ureq::Agent::config_builder()
                 .https_only(true)
                 .tls_config(
@@ -187,6 +227,7 @@ impl UpdateClient {
     /// Reads package markers so prerelease tags remain distinguishable even when
     /// the executable's Cargo version contains only MAJOR.MINOR.PATCH.
     pub fn for_install(product: Product, current_version: &str, directory: &Path) -> Result<Self> {
+        deploy::cleanup_successful_update(directory);
         let binary_version = Version::parse(current_version)?;
         let installed = match std::fs::read_to_string(directory.join("update-version.txt")) {
             Ok(text) => {
@@ -207,11 +248,31 @@ impl UpdateClient {
             }
             Err(error) => return Err(error.into()),
         };
-        Self::new(
+        let client = Self::new(
             product,
             Channel::for_install(directory, &installed)?,
             &installed,
-        )
+        )?;
+        #[cfg(all(feature = "test-update-source", debug_assertions))]
+        let client = match std::env::var_os("AUDIOLIB_UPDATE_TEST_SOURCE") {
+            Some(value) => client.with_test_source(&value)?,
+            None => client,
+        };
+        Ok(client)
+    }
+
+    #[cfg(all(feature = "test-update-source", debug_assertions))]
+    fn with_test_source(mut self, value: &std::ffi::OsStr) -> Result<Self> {
+        let source = TestSource::parse(value)?;
+        self.releases_api = source.releases_api();
+        self.test_source = Some(source);
+        self.agent = ureq::Agent::config_builder()
+            .max_redirects(0)
+            .timeout_connect(Some(Duration::from_secs(5)))
+            .timeout_global(Some(Duration::from_secs(30)))
+            .build()
+            .into();
+        Ok(self)
     }
 
     /// Queries published releases on every call; callers run this once at startup.
@@ -297,8 +358,8 @@ impl UpdateClient {
                 (asset.size > 0
                     && asset.size <= MAX_ARCHIVE
                     && checksum.size <= 4096
-                    && valid_asset_url(asset, &release.tag_name)
-                    && valid_asset_url(checksum, &release.tag_name))
+                    && self.valid_asset_url(asset, &release.tag_name)
+                    && self.valid_asset_url(checksum, &release.tag_name))
                 .then_some((asset, checksum))
             }) else {
                 tracing::warn!(
@@ -374,8 +435,8 @@ impl UpdateClient {
         ensure!(
             asset_names(self.product, &update.tag)?.contains(expected)
                 && update.checksum.name == format!("{expected}.sha256")
-                && valid_asset_url(&update.asset, &update.tag)
-                && valid_asset_url(&update.checksum, &update.tag),
+                && self.valid_asset_url(&update.asset, &update.tag)
+                && self.valid_asset_url(&update.checksum, &update.tag),
             "Invalid release asset identity"
         );
         let version = Version::parse(
@@ -496,6 +557,14 @@ impl UpdateClient {
         );
         Ok(())
     }
+
+    fn valid_asset_url(&self, asset: &Asset, tag: &str) -> bool {
+        #[cfg(all(feature = "test-update-source", debug_assertions))]
+        if let Some(source) = &self.test_source {
+            return source.valid_asset_url(asset, tag);
+        }
+        valid_github_asset_url(asset, tag)
+    }
 }
 
 fn supported_prerelease(version: &Version) -> bool {
@@ -514,7 +583,7 @@ fn unique_asset<'a>(assets: &'a [Asset], name: &str) -> Option<&'a Asset> {
     found.next().is_none().then_some(item)
 }
 
-fn valid_asset_url(asset: &Asset, tag: &str) -> bool {
+fn valid_github_asset_url(asset: &Asset, tag: &str) -> bool {
     asset.browser_download_url
         == format!(
             "https://github.com/{REPOSITORY}/releases/download/{tag}/{}",

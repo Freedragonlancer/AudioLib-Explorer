@@ -26,11 +26,35 @@ pwsh tools/release-pipeline.ps1 -Action Logs -Tag v0.9.0 -Stage accept -Tail 15 
 
 记录默认位于 `.rust-validation/release-pipeline/<tag>/<plan-name>/`，属于私有、本机生成证据，不得作为 Release 资产。`Status` 不重新证明当前输入有效；只有 `Run` 才执行复用判定。日志查看同时限制行数和 stdout/stderr 的合计字符数，单行巨型 JSON 也不会整段进入工具输出。失败保留日志、当前阶段状态和其他有效的成功收据；失败阶段自身的旧收据失效，不继续后续阶段。进程中断后同样通过 `Run` 重试。运行目录和子阶段各有独占锁；父执行器中断但构建/安装子进程仍在运行时，重试会被拒绝，等待子进程退出后再续跑，不强制终止它。
 
+## 本地快速验收
+
+仅在明确要求本地试用或安装交付时使用 `windows-local` 计划。它沿用现有执行器：许可证预检 → 增量 release 构建 → portable 目录打包 → 一次完整 portable 验收 → 固定安装。省略本地安装不需要的 ZIP 压缩、归档哈希和 ZIP 检查；EXE 身份、许可证、隐私、旧更新器兼容边界及启动验收仍保留。
+
+```powershell
+# 干净且已提交的 checkout；vX.Y.Z 必须对应 Cargo.toml 的版本。
+# 此计划的 -Tag 只用于包版本和运行目录，不要求或创建 Git 标签。
+pwsh tools/release-pipeline.ps1 -PlanFile tools/release-plans/windows-local.json -Tag v1.0.0
+pwsh tools/release-pipeline.ps1 -PlanFile tools/release-plans/windows-local.json -Tag v1.0.0 -Action Run
+# 失败后用同一 Run 续跑；Status/Logs 也需保持同一 PlanFile、Tag。
+pwsh tools/release-pipeline.ps1 -PlanFile tools/release-plans/windows-local.json -Tag v1.0.0 -Action Status
+```
+
+已有仍有效的源码检查无需再加入；还需执行时通过 `-ChecksFile` 选择实际影响范围，未选择记为 `not-requested`。Windows 默认使用本机 `%LOCALAPPDATA%/AudioLibExplorerBuild/<checkout-hash>/target`，显式 `CARGO_TARGET_DIR` 优先；构建、打包、验收使用同一解析结果和 ASIO 配置。成功交付后自动统一清理编译中间文件，保留 release EXE 和已验收包；本次全部构建收据复用且清理已有通过收据时不重复扫描。清除依赖缓存会使下一次实际编译变慢，需要连跑多轮时可暂用 `-CleanBuildArtifacts:$false`。无需为了试用增加版本提交或创建标签。
+
+尚未提交的试用源码无法使用有干净身份要求的管线；可以按顺序单独调用 `check-release-licenses.ps1 -Profile WindowsClient`、`build-release.ps1`、`package-portable.ps1 -SkipBuild -SkipArchive`、`validate-portable.ps1 -BinaryDirectory dist/latest/portable`、`install-local-release.ps1`，每步成功才进入下一步。无 ASIO 时前四步都加 `-WithoutAsio`。检查对应最新源码，只复用输入仍一致的结果；不要使用旧 EXE，也不要为源码草稿伪造已提交身份。
+
+`-SkipArchive` 仍生成两份 EXE 的校验 sidecar；它会移除 `dist/latest/` 下上一份 latest ZIP 及其 `.sha256`，避免旧归档被误认为当前产物。此时只交付已验证的目录，不能声称生成了可发布归档。需要分享 ZIP 或正式发布时用普通 `windows-client` 计划；该计划仍要求真实标签并生成归档。两种计划共用构建、打包和安装目录，必须串行执行。
+
+打包器已有的 `-PackageId build-YYYYMMDD-HHMMSS-xxxxxxxx` 使用独立 `dist/builds/<id>/`，拒绝覆盖同名产物；该模式支持 `-NoArchive` 或 `-SkipArchive`，不会替换或清理 `dist/latest/`。原 `-NoArchive` 仍要求 `PackageId`；`windows-local` 使用不带 `PackageId` 的 `-SkipArchive` 更新 latest 目录。命名目录只用于保存打包产物，固定工作安装仍为 `local_release/`。
+
+安装器仅复制哈希不同的文件，继续核对所有包内文件、CLI 版本及一次隔离桌面启动，不重复完整 portable 套件。相同源码/环境/产物的 Run 会复用成功阶段；验收或安装失败时保留已通过的构建/打包证据。源码、feature、工具链或产物变化仍使对应结果失效。
+
 ## 选择范围与配置
 
 | 计划 | 平台与职责 |
 | --- | --- |
 | `tools/release-plans/windows-client.json` | Windows x64 客户端，默认 ASIO，包含固定 `local_release/` 安装 |
+| `tools/release-plans/windows-local.json` | Windows 本地快速试用，不要求 Git 标签、不生成 ZIP，保留 portable 验收和固定安装 |
 | `tools/release-plans/server.json` | Windows x64 无播放服务端，显式构建验收 fixture 所需 benchmark |
 | `tools/release-plans/server-unix.json` | 对应本机 Linux/macOS 服务端，不额外构建 Windows fixture helper |
 | `tools/release-plans/macos-client.json` | Apple Silicon Mac 客户端，结构与原生验收合并运行；需要已登录桌面 |
@@ -40,7 +64,7 @@ Windows 客户端计划按打包器的实际常规输出记录 `dist/latest/Audi
 
 ### 固定安装目录与版本来源
 
-Windows 客户端计划声明 `InstallDestination` 和 `VersionManifest` 两个变量，默认分别为当前源码根的 `local_release/` 与 `Cargo.toml`。隔离 worktree 发布时，用 `-VariablesFile` 指向私有 JSON，将安装目录设为原仓库的固定 `local_release/`，版本来源仍绑定最终发布源码的 manifest；不再复制或改写安装器：
+两个 Windows 客户端计划（`windows-client` / `windows-local`）都声明 `InstallDestination` 和 `VersionManifest` 两个变量，默认分别为当前源码根的 `local_release/` 与 `Cargo.toml`。隔离 worktree 试用或发布时，用 `-VariablesFile` 指向私有 JSON，将安装目录设为原仓库的固定 `local_release/`，版本来源仍绑定最终交付源码的 manifest；不再复制或改写安装器：
 
 ```json
 {
@@ -59,7 +83,7 @@ pwsh tools/install-local-release.ps1 -Source $acceptedPayload -Destination $fixe
 
 安装锁和证据位于安装目录父工作区的 `.rust-validation/`，不同源码 checkout 指向同一固定安装时共享排他锁。计划把所选 manifest 声明为安装阶段的 `input_files`、固定安装声明为输出。只更改安装路径或 manifest 身份会重新验证安装，不使仍有效的 build/package/accept 收据失效；实际源码、工具链或打包输入改变仍按原管线规则失效。
 
-四个原生计划在 release 构建前执行 `license-preflight`，复用 `dependency-licenses.ps1` 的选定依赖图与 notice 解析，检查实际 target、roots、features 及固定材料身份。此阶段只使用 locked/offline Cargo 元数据，不编译、不下载、不生成包。它每次 Run 都重新检查外部依赖缓存中的材料；输入不变时收据身份稳定，不使后面的成功构建失效。打包与验收仍执行原有许可证检查，ASIO SDK 等额外材料仍由原准备/打包流程验证。离线缓存不完整时先准备依赖，不通过一次试编译发现缺件。`-ChecksFile` 的源码检查仍在版本预检之后插入；若本轮还需执行耗时源码检查，在前期环境核对时先单独运行下面的轻量许可证预检。
+原生构建计划在 release 构建前执行 `license-preflight`，复用 `dependency-licenses.ps1` 的选定依赖图与 notice 解析，检查实际 target、roots、features 及固定材料身份。此阶段只使用 locked/offline Cargo 元数据，不编译、不下载、不生成包。它每次 Run 都重新检查外部依赖缓存中的材料；输入不变时收据身份稳定，不使后面的成功构建失效。打包与验收仍执行原有许可证检查，ASIO SDK 等额外材料仍由原准备/打包流程验证。离线缓存不完整时先准备依赖，不通过一次试编译发现缺件。`-ChecksFile` 的源码检查在版本预检之后插入，没有版本预检的计划则插入最前面；若本轮还需执行耗时源码检查，在前期环境核对时先单独运行下面的轻量许可证预检。
 
 候选构建若不经过标签管线，也应先调用同一预检入口；服务端通过不能替代客户端闭包通过：
 
@@ -161,7 +185,7 @@ pwsh tools/verify-release-assets.ps1 -Tag v0.9.6 -ListExpectedAssets
 
 这些检查不替代原生 payload 验收。恢复后的正式 Release 仍需做线上元数据/摘要核验和固定安装同步；同版本资产替换仍须单独授权。
 
-实际交付建议加 `-CleanBuildArtifacts`，在所有交付阶段成功后追加 debug 缓存维护，默认预算 40 GiB，可用 `-BuildCacheLimitGiB` 调整。管线先释放构建租约，再运行独占清理；交付失败不触发清理，清理失败保留已通过的交付收据供续跑。不要在 ChecksFile 中再清理一遍。SDK、正式包和固定安装均保留，详见[编译缓存维护](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md)。
+包含 Rust 构建/检查的计划默认在全部交付阶段成功后追加 `Intermediate` 清理，`-BuildCacheLimitGiB` 默认 0（清除全部合格中间文件），可显式设为正数按预算保留。管线先释放构建租约，再独占清理；子检查/构建自动延后清理，不在 ChecksFile 中再加一次。清理保留 profile 根目录的最终 EXE/库/PDB，不破坏 build/package/accept/install 身份或续跑；全部构建阶段复用时复用上次成功清理，显式 `-CleanBuildArtifacts` 可要求重新维护。交付失败不清理，清理失败保留已通过的交付收据供续跑。只读资产核验计划不自动创建或清理缓存。SDK、正式包和固定安装均保留，详见[编译缓存维护](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md)。
 
 多份计划共享同一受管缓存时，等它们的构建与交付全部结束，再集中维护一次；不要给每条并行计划都追加清理。只复用原有结果、未构建/测试 Rust 的文档或流程任务不触发维护扫描。
 

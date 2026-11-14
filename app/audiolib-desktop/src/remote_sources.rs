@@ -6,7 +6,7 @@
 use super::{Controller, DataSourceSwitch, LibraryOperation, post};
 use crate::AppWindow;
 use audiolib_core::config::{ActiveSource, DataSourceMode, DataSourceSettings};
-use audiolib_remote::{RemoteSecrets, activate_source, save_secrets};
+use audiolib_remote::{RemoteSecrets, activate_source, save_profile_secrets};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -198,10 +198,10 @@ impl Controller {
 
     /// Save data source settings and secrets together and reset the server-mode state
     /// that belonged to the previous source. Runs off the UI thread (DPAPI, disk).
-    pub(super) fn save_data_source(
+    pub(in crate::controller) fn save_data_source(
         &self,
         settings: DataSourceSettings,
-        secrets: RemoteSecrets,
+        mut secrets: RemoteSecrets,
         chinese: bool,
         explicit_choice: bool,
     ) -> Result<(), String> {
@@ -213,8 +213,12 @@ impl Controller {
             // when it equals the selection a startup fallback replaced.
             preferences.data_source_fallback = None;
         }
-        save_secrets(&preferences.data_root(), &secrets)
-            .map_err(|error| error.localized(chinese))?;
+        save_profile_secrets(
+            &preferences.data_root(),
+            &preferences.data_source,
+            &mut secrets,
+        )
+        .map_err(|error| error.localized(chinese))?;
         preferences.save().map_err(|error| error.to_string())?;
         super::apply_audition_memory(&preferences.data_source);
         *config = preferences;

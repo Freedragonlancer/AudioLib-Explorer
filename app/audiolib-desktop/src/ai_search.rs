@@ -3,14 +3,19 @@
 use super::*;
 use audiolib_ai::{
     AiError,
-    config::{ApiKey, DEFAULT_PROMPT, Profile, Protocol, validate_instruction},
+    config::{ApiKey, DEFAULT_PROMPT, Profile, Protocol, RequestMode, validate_instruction},
     provider,
     reference::ReferenceIndex,
     storage::ProfileStore,
 };
-use audiolib_core::ai_search::{AiQueryPlan, validate_ai_query};
+use audiolib_core::ai_search::{
+    AiQueryKind, AiQueryPlan, MAX_AI_LAYERED_RECOMMENDATIONS, MAX_AI_MAIN_RECOMMENDATIONS,
+    validate_ai_query,
+};
 
-const MAX_AI_RECOMMENDATIONS: usize = 5;
+// The admitted plan determines whether six main queries or eight mixed queries
+// are available; task admission still needs the largest supported batch bound.
+pub(super) const MAX_AI_RECOMMENDATIONS: usize = MAX_AI_LAYERED_RECOMMENDATIONS;
 const MAX_AI_AUTO_TASKS: usize = 3;
 
 #[derive(Clone, PartialEq)]
@@ -38,7 +43,7 @@ struct FormDraft {
 struct SearchControls {
     text: [slint::SharedString; 8],
     choices: [i32; 6],
-    flags: [bool; 3],
+    flags: [bool; 4],
 }
 
 impl SearchControls {
@@ -66,6 +71,7 @@ impl SearchControls {
                 ui.get_sort_descending(),
                 ui.get_favorites_only(),
                 ui.get_tagged_only(),
+                ui.get_ai_layers(),
             ],
         }
     }
@@ -133,6 +139,9 @@ pub(super) struct Runtime {
     save_wake: Condvar,
     save_error: Mutex<Option<String>>,
     draft_protocol: std::sync::atomic::AtomicI32,
+    // ComboBox updates its bound index before invoking selected; retain the
+    // owner of the still-displayed form until that callback switches profiles.
+    editor_selection: std::sync::atomic::AtomicI32,
     drafts: Mutex<std::collections::HashMap<String, FormDraft>>,
     batch_revision: AtomicU64,
     verified_search: Mutex<Option<VerifiedSearch>>,
@@ -268,8 +277,7 @@ impl Controller {
                         return;
                     }
                     if c.ai_search_probe_request(&ui).is_none() {
-                        ui.set_ai_error(true);
-                        ui.set_ai_status(c.localized(
+                        c.ai_failure(&ui, c.localized(
                             "请先完成当前目录和筛选条件的搜索，再生成推荐",
                             "Finish a valid search for the current directory and filters before generating suggestions",
                         ));
@@ -285,7 +293,7 @@ impl Controller {
                         let Some(p) = store.as_ref().and_then(|s| {
                             s.profiles().get((ui.get_ai_provider_index() - 1) as usize)
                         }) else {
-                            ui.set_ai_status(
+                            c.ai_failure(&ui,
                                 c.localized("请先保存供应商配置", "Save a provider profile first"),
                             );
                             return;
@@ -362,7 +370,7 @@ impl Controller {
                         ui.get_ai_query().trim().to_owned()
                     };
                     if validate_ai_query(&query).is_err() {
-                        ui.set_ai_status(c.localized(
+                        c.ai_failure(&ui, c.localized(
                             "请输入不含布尔运算符的关键词，最多 500 字符",
                             "Use plain keywords without Boolean operators, up to 500 characters",
                         ));
@@ -410,8 +418,10 @@ impl Controller {
                     c.cancel_ai_task_batch(&ui);
                     c.ai.cancel();
                     c.clear_ai_suggestions(&ui);
-                    ui.set_ai_provider_index(0);
-                    c.select_ai_profile(&ui, 0);
+                    let unsaved = c.ai_unsaved_profile_index();
+                    ui.set_ai_provider_index(unsaved);
+                    c.select_ai_profile(&ui, unsaved);
+                    ui.set_ai_dirty(true);
                     ui.set_ai_status("".into());
                 }
                 10 => {
@@ -420,6 +430,7 @@ impl Controller {
                     }
                 }
                 11 | 17 => {
+                    c.activate_ai_unsaved_profile(&ui);
                     // Discover directly from the form; the worker resolves a saved key
                     // only when its endpoint and protocol still match this draft.
                     let input = draft(&ui, kind == 17).and_then(|profile| {
@@ -458,12 +469,13 @@ impl Controller {
                         });
                         ui.set_ai_key("".into());
                         ui.set_ai_go_authorized(false);
-                        ui.set_ai_subscription(protocol == Protocol::OpenCodeGo);
                         ui.set_ai_models(ModelRc::default());
                         ui.set_ai_dirty(true);
                         c.refresh_ai_name_hint(&ui);
+                        c.activate_ai_unsaved_profile(&ui);
                     }
                 }
+                26 => c.activate_ai_unsaved_profile(&ui),
                 18 => {
                     c.ai.drafts
                         .lock()
@@ -498,7 +510,7 @@ impl Controller {
                 }
                 15 => {
                     if validate_instruction(&ui.get_ai_instruction()).is_err() {
-                        ui.set_ai_status(c.localized(
+                        c.ai_failure(&ui, c.localized(
                             "提示词需为 1–2000 字符",
                             "Prompt must contain 1–2000 characters",
                         ));
@@ -561,10 +573,13 @@ impl Controller {
         // request so applying it cannot silently broaden the search conditions.
         self.capture_search_task(ui);
         if self.ai_captured_condition_request().is_none() {
-            ui.set_ai_status(self.localized(
-                "请先完成当前目录和筛选条件的有效搜索",
-                "Finish a valid search for the current directory and filters first",
-            ));
+            self.ai_failure(
+                ui,
+                self.localized(
+                    "请先完成当前目录和筛选条件的有效搜索",
+                    "Finish a valid search for the current directory and filters first",
+                ),
+            );
             return false;
         }
         true
@@ -735,12 +750,17 @@ impl Controller {
             return;
         }
         let edit = ui.get_ai_query();
+        let has_main = rows.iter().any(|row| !row.is_layer);
         if let Some(index) = rows
             .iter()
             .position(|row| row.text.split_whitespace().count() == 1)
+            .filter(|_| has_main)
         {
             let single = rows.remove(index);
             rows.insert(0, single);
+            if rows.iter().all(|row| !row.is_layer) {
+                rows.truncate(MAX_AI_MAIN_RECOMMENDATIONS);
+            }
             ui.set_ai_quick_rows(ModelRc::new(VecModel::from(rows.clone())));
             ui.set_ai_rows(ModelRc::new(VecModel::from(rows.clone())));
             if let Some(index) = rows
@@ -758,8 +778,8 @@ impl Controller {
                 ui.set_ai_detail("".into());
             }
         } else {
-            // Do not retain a pair-only plan after its sole verified broad
-            // single disappears. Keep an unrelated custom editor draft intact.
+            // A pruned plan still needs both a main sound and a verified single.
+            // Keep an unrelated custom editor draft intact when either is lost.
             self.clear_ai_suggestions(ui);
             if ai_query_key(&edit) != key {
                 ui.set_ai_query(edit);
@@ -780,6 +800,7 @@ impl Controller {
         context: &Context,
         cancel: &Arc<AtomicBool>,
         plan: &mut AiQueryPlan,
+        allow_layers: bool,
     ) -> audiolib_core::Result<()> {
         let cancelled = || {
             cancel.load(Ordering::Acquire)
@@ -813,8 +834,11 @@ impl Controller {
                 .is_empty())
         };
         let mut seen = std::collections::HashSet::new();
-        let mut verified = Vec::new();
-        let ranked_queries = std::mem::take(&mut plan.queries);
+        let mut verified: Vec<audiolib_core::ai_search::AiQuery> = Vec::new();
+        let mut ranked_queries = std::mem::take(&mut plan.queries);
+        ranked_queries.retain(|query| allow_layers || query.kind == AiQueryKind::Main);
+        // Keep provider ranking across roles. If a later main query duplicates
+        // a verified layer, it owns that existing rank slot and provenance.
         for mut query in ranked_queries.iter().cloned() {
             if cancelled() {
                 return Err(audiolib_core::Error::Cancelled);
@@ -825,6 +849,16 @@ impl Controller {
                     return Err(audiolib_core::Error::Cancelled);
                 }
                 if !seen.insert(ai_query_key(&text)) {
+                    if let Some(previous) = verified
+                        .iter_mut()
+                        .find(|previous| ai_query_key(&previous.text) == ai_query_key(&text))
+                    {
+                        if query.kind == AiQueryKind::Main && previous.kind == AiQueryKind::Layer {
+                            query.text = text;
+                            *previous = query.clone();
+                        }
+                        break;
+                    }
                     continue;
                 }
                 if text.split_whitespace().count() == 1 && is_ai_query_modifier(&text) {
@@ -842,8 +876,8 @@ impl Controller {
                 verified.push(query);
             }
         }
-        // Provider/local order is the ranking. Prefer its strongest verified
-        // single word, preserving the relative order of the remaining schemes.
+        // Keep the role/rank order apart from its strongest verified single
+        // word, preserving the relative order of the remaining schemes.
         if let Some(index) = verified
             .iter()
             .position(|query| query.text.split_whitespace().count() == 1)
@@ -876,7 +910,31 @@ impl Controller {
         }
         let mut final_seen = std::collections::HashSet::new();
         verified.retain(|query| final_seen.insert(ai_query_key(&query.text)));
-        verified.truncate(MAX_AI_RECOMMENDATIONS);
+        let limit = if verified
+            .iter()
+            .any(|query| query.kind == AiQueryKind::Layer)
+        {
+            MAX_AI_LAYERED_RECOMMENDATIONS
+        } else {
+            MAX_AI_MAIN_RECOMMENDATIONS
+        };
+        if let Some(main) = verified
+            .iter()
+            .position(|query| query.kind == AiQueryKind::Main)
+        {
+            if main >= limit {
+                let main = verified.remove(main);
+                verified.truncate(limit - 1);
+                verified.push(main);
+            }
+        } else {
+            // Layer-only hits cannot stand in for the requested main sound.
+            verified.clear();
+        }
+        verified.truncate(limit);
+        if verified.iter().all(|query| query.kind == AiQueryKind::Main) {
+            verified.truncate(MAX_AI_MAIN_RECOMMENDATIONS);
+        }
         if cancelled() || provider.search_revision()? != Some(revision) {
             return Err(audiolib_core::Error::Cancelled);
         }
@@ -976,7 +1034,7 @@ impl Controller {
                 .is_some_and(|publication| publication.page == SearchPagePhase::Failed)
         {
             self.cancel_ai_task_batch(ui);
-            ui.set_ai_status(self.localized(
+            self.ai_failure(ui, self.localized(
                 "批量搜索已停止；已创建的任务保留，可逐个重试",
                 "Batch search stopped; created tasks are retained and can be retried individually",
             ));
@@ -1068,15 +1126,17 @@ impl Controller {
         ui.set_ai_model(p.model.clone().into());
         ui.set_ai_key("".into());
         ui.set_ai_clear_key(false);
-        ui.set_ai_subscription(p.subscription);
+        ui.set_ai_request_mode(p.request_mode.index());
         ui.set_ai_go_authorized(p.go_use_authorized);
         ui.set_ai_timeout(p.timeout_seconds as i32);
-        ui.set_ai_request_cap(p.max_requests_per_month as i32);
         ui.set_ai_models(ModelRc::default());
         ui.set_ai_dirty(false);
     }
 
     fn remember_ai_draft(&self, ui: &AppWindow) {
+        if self.ai.editor_selection.load(Ordering::Acquire) == 0 {
+            return;
+        }
         // Keep at most one draft per saved profile plus the new-profile form.
         let profile = Profile {
             id: ui.get_ai_profile_id().to_string(),
@@ -1085,8 +1145,7 @@ impl Controller {
             base_url: ui.get_ai_endpoint().to_string(),
             model: ui.get_ai_model().to_string(),
             timeout_seconds: ui.get_ai_timeout().max(0) as u64,
-            max_requests_per_month: ui.get_ai_request_cap().max(0) as u64,
-            subscription: ui.get_ai_subscription(),
+            request_mode: RequestMode::from_index(ui.get_ai_request_mode()).unwrap_or_default(),
             go_use_authorized: ui.get_ai_go_authorized(),
             ..Default::default()
         };
@@ -1111,7 +1170,35 @@ impl Controller {
         ui.set_ai_auto_name(name.into());
     }
 
+    fn ai_unsaved_profile_index(&self) -> i32 {
+        self.ai
+            .store
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(1, |store| store.profiles().len() as i32 + 1)
+    }
+
+    // Editing the offline setup form creates a new profile draft, not a change
+    // to the local reference. Preserve the typed values while selecting it.
+    fn activate_ai_unsaved_profile(&self, ui: &AppWindow) {
+        if self.ai.editor_selection.load(Ordering::Acquire) != 0
+            || !ui.get_ai_profile_id().is_empty()
+        {
+            return;
+        }
+        self.cancel_ai_task_batch(ui);
+        self.ai.cancel();
+        self.clear_ai_suggestions(ui);
+        let unsaved = self.ai_unsaved_profile_index();
+        ui.set_ai_provider_index(unsaved);
+        self.ai.editor_selection.store(unsaved, Ordering::Release);
+        ui.set_ai_selected_model("".into());
+        ui.set_ai_dirty(true);
+    }
+
     fn select_ai_profile(&self, ui: &AppWindow, index: i32) {
+        self.ai.editor_selection.store(index, Ordering::Release);
         let store = self.ai.store.lock().unwrap();
         let saved = if let Some(s) = store.as_ref()
             && let Some(p) = index
@@ -1135,8 +1222,15 @@ impl Controller {
                 ..Default::default()
             }
         };
+        // The toolbar describes the saved profile actually used by generation;
+        // restoring an unsaved editor draft below must not change this value.
+        ui.set_ai_selected_model(saved.model.clone().into());
         drop(store);
-        let cached = self.ai.drafts.lock().unwrap().get(&saved.id).cloned();
+        let cached = if index == 0 {
+            None
+        } else {
+            self.ai.drafts.lock().unwrap().get(&saved.id).cloned()
+        };
         if let Some(cached) = cached {
             self.set_ai_draft(ui, &cached.profile);
             ui.set_ai_key(cached.key.into());
@@ -1158,10 +1252,9 @@ impl Controller {
         let u = store.usage(&p.id);
         ui.set_ai_usage(
             format!(
-                "{} · {} / {} {} · tokens {} + {}\n{}",
+                "{} · {} {} · tokens {} + {}\n{}",
                 u.month,
                 u.requests,
-                p.max_requests_per_month,
                 if self.chinese.load(Ordering::Acquire) {
                     "本应用请求（失败尝试也计入）"
                 } else {
@@ -1178,7 +1271,8 @@ impl Controller {
             .into(),
         );
     }
-    fn publish_ai_profiles(&self, ui: &AppWindow) {
+    /// Refresh localized selector labels without replacing the active editor draft.
+    pub(super) fn publish_ai_profiles(&self, ui: &AppWindow) {
         let store = self.ai.store.lock().unwrap();
         let mut names = vec![self.localized("本地词表（离线）", "Local reference (offline)")];
         if let Some(s) = store.as_ref() {
@@ -1191,26 +1285,64 @@ impl Controller {
                 self.publish_ai_usage(ui, s, p);
             }
         }
+        names.push(self.localized("未保存", "Unsaved"));
         ui.set_ai_providers(ModelRc::new(VecModel::from(names)));
         drop(store);
         self.refresh_ai_name_hint(ui);
     }
-    fn ai_error(&self, ui: &AppWindow, error: AiError) {
+    fn ai_failure(&self, ui: &AppWindow, message: slint::SharedString) {
         ui.set_ai_error(true);
+        ui.set_ai_status(message.clone());
+        ui.invoke_show_ai_notice(message);
+    }
+    fn ai_error(&self, ui: &AppWindow, error: AiError) {
+        if matches!(error, AiError::Cancelled) {
+            ui.set_ai_status(error.to_string().into());
+            return;
+        }
         let message=match error {
             AiError::Invalid=>self.localized("配置或输入无效；检查模型 ID、URL、长度，更换地址须重新输入密钥", "Invalid input/config: check model, URL, limits; re-enter key after changing endpoint"),
             AiError::Uncertain=>self.localized("Jev 判断不够确定；请细化描述或切换本地词表", "Jev decision uncertain; refine the description or use local reference"),
             AiError::Response=>self.localized("未找到合适词条，或供应商结果未通过校验；请细化描述", "No matching reference or invalid provider result; refine the description"),
             AiError::Storage=>self.localized("AI 配置保存/读取失败；原配置已保留", "AI configuration could not be read/saved; original retained"),
-            AiError::Transport=>self.localized("连接失败或超时；检查地址、网络和密钥", "Connection failed or timed out; check endpoint, network and key"),
+            AiError::Transport=>self.localized("连接失败；检查地址、网络和密钥", "Connection failed; check endpoint, network and key"),
+            AiError::Timeout(seconds)=>self.localized(
+                &format!("请求在 {seconds} 秒后超时；可在供应商高级选项中提高超时（最多 {} 秒），修改后保存配置", audiolib_ai::config::MAX_TIMEOUT_SECONDS),
+                &format!("Request timed out after {seconds} seconds; raise the timeout in provider advanced options (up to {} seconds), then save the profile", audiolib_ai::config::MAX_TIMEOUT_SECONDS),
+            ),
             AiError::Http(401)=>self.localized("认证失败（401）；请检查 API Key", "Authentication failed (401); check the API key"),
             AiError::Http(403)=>self.localized("访问被拒绝（403）；请检查账户或订阅权限", "Access denied (403); check account or subscription permissions"),
             AiError::Http(404)=>self.localized("接口不存在（404）；请检查 Base URL，也可手动填写模型 ID", "Endpoint not found (404); check Base URL or enter a model ID manually"),
             AiError::Http(429)=>self.localized("供应商限流或额度不足（429）；请稍后重试或检查账户", "Provider rate/quota limit (429); retry later or check the account"),
-            AiError::Budget=>self.localized("已达到本应用的每月请求上限", "This app's monthly request cap has been reached"),
+            AiError::RelayUnavailable=>self.localized("请先在音库服务器设置中配置服务器地址和访问令牌，再使用 AI 服务器模式", "Configure an AudioLib server address and access token in library server settings before using server AI mode"),
+            AiError::RelayTransport=>self.localized("无法连接 AI 转发服务器；请检查 AudioLib 音库服务器连接", "Cannot reach the AI relay; check the AudioLib library server connection"),
+            AiError::RelayHttp(401)=>self.localized("音库服务器认证失败（401）；请检查服务器访问令牌", "AudioLib server authentication failed (401); check its access token"),
+            AiError::RelayHttp(403)=>self.localized("音库服务器未允许此 AI 供应商地址；请在服务器配置中启用 AI 转发并允许该地址", "The AudioLib server has not allowed this provider endpoint; enable AI relay and allow the endpoint in its configuration"),
+            AiError::RelayHttp(404)=>self.localized("音库服务器不支持 AI 转发（404）；请升级服务器", "The AudioLib server does not support AI relay (404); upgrade the server"),
+            AiError::RelayHttp(503)=>self.localized("AI 转发服务器繁忙或暂时不可用；请稍后重试", "The AI relay is busy or temporarily unavailable; retry later"),
+            AiError::RelayHttp(status)=>self.localized(&format!("AI 转发服务器返回 HTTP {status}"), &format!("AI relay returned HTTP {status}")),
             other=>other.to_string().into(),
         };
-        ui.set_ai_status(message);
+        self.ai_failure(ui, message);
+    }
+
+    pub(super) fn ai_transport(
+        &self,
+        profile: &Profile,
+        root: &std::path::Path,
+        settings: &audiolib_core::config::DataSourceSettings,
+    ) -> audiolib_ai::Result<AiTransport> {
+        if profile.request_mode == RequestMode::Client {
+            return Ok(AiTransport::Client);
+        }
+        // save_data_source holds this same lock across credentials and settings
+        // replacement. Never pair an admitted old address with a newly saved token.
+        // This disk/DPAPI work is called exclusively on the AI worker thread.
+        let config = self.config.lock().unwrap();
+        if config.data_source != *settings || config.data_root() != root {
+            return Err(AiError::Cancelled);
+        }
+        AiTransport::for_profile(profile, root, settings)
     }
 
     fn ai_job(self: &Arc<Self>, ui: &AppWindow, job: Job) {
@@ -1229,6 +1361,10 @@ impl Controller {
         // One submission owns its automatic-search choice. Profile operations
         // and model probes never create tasks, even if the option is enabled.
         let generating = matches!(&job, Job::Local(..) | Job::Generate(..));
+        let allow_layers = match &job {
+            Job::Local(_, layers) | Job::Generate(_, _, layers, _) => *layers,
+            _ => false,
+        };
         let auto_search = generating && ui.get_ai_auto_search();
         if saving {
             *self.ai.saves.lock().unwrap() = true;
@@ -1250,7 +1386,12 @@ impl Controller {
         }
         self.clear_ai_suggestions(ui);
         ui.set_ai_generating(generating);
-        let root = self.config.lock().unwrap().data_root();
+        // Capture one server choice for the entire admitted request. AI relay
+        // does not switch libraries, initialize remote snapshots or use a writer.
+        let (root, relay_settings) = {
+            let config = self.config.lock().unwrap();
+            (config.data_root(), config.data_source.clone())
+        };
         let c = self.clone();
         std::thread::spawn(move || {
             let result = (|| -> audiolib_ai::Result<Reply> {
@@ -1289,6 +1430,7 @@ impl Controller {
                         Ok(Reply::PromptSaved)
                     }
                     Job::Models(profile, supplied) => {
+                        let transport = c.ai_transport(&profile, &root, &relay_settings)?;
                         let key =
                             c.ai.store
                                 .lock()
@@ -1296,10 +1438,11 @@ impl Controller {
                                 .as_ref()
                                 .unwrap()
                                 .discovery_key(&profile, supplied)?;
-                        Ok(Reply::Models(provider::models(&profile, &key, &cancel)?))
+                        Ok(Reply::Models(transport.models(&profile, &key, &cancel)?))
                     }
                     Job::Probe(profile, supplied) => {
                         profile.validate_request()?;
+                        let transport = c.ai_transport(&profile, &root, &relay_settings)?;
                         let (key, tracked) = {
                             let mut store = c.ai.store.lock().unwrap();
                             let store = store.as_mut().unwrap();
@@ -1313,7 +1456,7 @@ impl Controller {
                                 .find(|p| p.id == profile.id)
                                 .cloned();
                             if let Some(saved) = &saved {
-                                store.reserve(
+                                store.record_request(
                                     saved,
                                     &chrono::Utc::now().format("%Y-%m").to_string(),
                                 )?;
@@ -1322,7 +1465,7 @@ impl Controller {
                         };
                         // A real structured round trip, not the often-public model list.
                         // Uses a fixed example, never the user's library or current prompt.
-                        let output = provider::generate(
+                        let output = transport.generate(
                             &profile,
                             &key,
                             "wind",
@@ -1346,10 +1489,11 @@ impl Controller {
                     }
                     Job::Generate(profile, intent, layers, guidance) => {
                         profile.validate_request()?;
+                        let transport = c.ai_transport(&profile, &root, &relay_settings)?;
                         audiolib_core::ai_search::validate_intent(&intent)
                             .map_err(|_| AiError::Invalid)?;
                         validate_instruction(&guidance)?;
-                        // Validate the finite request before reserving provider usage.
+                        // Validate the finite request before recording an attempt.
                         if profile.protocol == Protocol::Jev {
                             audiolib_ai::jev::request(&profile.model, &intent, layers, &guidance)?;
                         }
@@ -1363,10 +1507,13 @@ impl Controller {
                                 return Err(AiError::Cancelled);
                             }
                             let key = s.key(&profile)?;
-                            s.reserve(&profile, &chrono::Utc::now().format("%Y-%m").to_string())?;
+                            s.record_request(
+                                &profile,
+                                &chrono::Utc::now().format("%Y-%m").to_string(),
+                            )?;
                             key
                         };
-                        let output = provider::generate(
+                        let output = transport.generate(
                             &profile,
                             &key,
                             &intent,
@@ -1411,6 +1558,7 @@ impl Controller {
                         &context,
                         &cancel,
                         &mut plan,
+                        allow_layers,
                     ) {
                         Ok(()) => Ok(Reply::Plan(plan, evidence)),
                         Err(audiolib_core::Error::Cancelled) => Err(AiError::Cancelled),
@@ -1438,8 +1586,7 @@ impl Controller {
                 if (cancel.load(Ordering::Acquire)
                     || c.ai_context() != context
                     || !Arc::ptr_eq(&probe_provider, &c.provider())
-                    || (matches!(&result, Ok(Reply::Plan(..) | Reply::SearchFailed))
-                        && SearchControls::capture(&ui) != probe_controls))
+                    || (generating && SearchControls::capture(&ui) != probe_controls))
                     && !matches!(
                         &result,
                         Ok(Reply::Loaded | Reply::Saved | Reply::Removed | Reply::PromptSaved)
@@ -1453,12 +1600,18 @@ impl Controller {
                 }
                 match result {
                     Ok(Reply::Plan(plan, evidence)) => {
+                        let recommendation_limit = if plan.queries.iter().any(|query| query.kind == AiQueryKind::Layer) {
+                            MAX_AI_LAYERED_RECOMMENDATIONS
+                        } else {
+                            MAX_AI_MAIN_RECOMMENDATIONS
+                        };
                         let mut seen = std::collections::HashSet::new();
                         let rows = plan
                             .queries
                             .into_iter()
                             .filter(|q| seen.insert(ai_query_key(&q.text)))
                             .map(|q| crate::AiSuggestion {
+                                is_layer: q.kind == AiQueryKind::Layer,
                                 text: q.text.into(),
                                 detail: format!(
                                     "{} · {}\nUCS: {} · ref: {}",
@@ -1489,7 +1642,7 @@ impl Controller {
                         }
                         let verified_search = context.search;
                         *c.ai.context.lock().unwrap() = Some(context);
-                        let status: slint::SharedString = format!("{} {} {}", evidence, plan.cautions.join(" · "), if count < MAX_AI_RECOMMENDATIONS {
+                        let status: slint::SharedString = format!("{} {} {}", evidence, plan.cautions.join(" · "), if count < recommendation_limit {
                             c.localized(&format!("当前条件下仅有 {count} 个有结果的推荐方案"), &format!("Only {count} recommended queries have results under the current conditions"))
                         } else { "".into() }).trim().into();
                         *c.ai.verified_search.lock().unwrap() = Some(VerifiedSearch {
@@ -1570,13 +1723,12 @@ impl Controller {
                     }
                     Ok(Reply::SearchFailed) => {
                         c.clear_ai_suggestions(&ui);
-                        ui.set_ai_error(true);
-                        ui.set_ai_status(c.localized(
+                        c.ai_failure(&ui, c.localized(
                             "资料库查询验证失败；请稍后重新生成推荐，未创建搜索任务",
                             "Library query verification failed; regenerate suggestions later. No tasks were created",
                         ));
                     }
-                    Err(AiError::Response) if discovery => ui.set_ai_status(c.localized(
+                    Err(AiError::Response) if discovery => c.ai_failure(&ui, c.localized(
                         "模型列表格式无法识别；检查接口或手动填写模型 ID",
                         "Unrecognized model list; check the endpoint or enter a model ID manually",
                     )),
@@ -1703,6 +1855,73 @@ fn same_batch_controls(left: &BatchControls, right: &BatchControls, restoring: b
         && (restoring || left.scroll == right.scroll)
 }
 
+// One dispatch point for model discovery, connection probes and generation.
+// Server mode never falls back to a client-side provider request.
+pub(super) enum AiTransport {
+    Client,
+    Server(Box<audiolib_remote::RemoteClient>),
+}
+
+impl AiTransport {
+    fn for_profile(
+        profile: &Profile,
+        root: &std::path::Path,
+        settings: &audiolib_core::config::DataSourceSettings,
+    ) -> audiolib_ai::Result<Self> {
+        if profile.request_mode == RequestMode::Client {
+            return Ok(Self::Client);
+        }
+        // Local-library mode retains the most recently selected server. Reading
+        // its connection and credentials does not alter library/source state.
+        let id = settings
+            .legacy_profile_id()
+            .ok_or(AiError::RelayUnavailable)?;
+        let server = settings.profile(&id).ok_or(AiError::RelayUnavailable)?;
+        let secrets = audiolib_remote::load_profile_secrets(root, settings)
+            .map_err(|_| AiError::RelayUnavailable)?;
+        let token = secrets.token_for(&id);
+        if token.is_empty() {
+            return Err(AiError::RelayUnavailable);
+        }
+        let client = audiolib_remote::RemoteClient::new(&server.server_url, token)
+            .map_err(|_| AiError::RelayUnavailable)?;
+        Ok(Self::Server(Box::new(client)))
+    }
+
+    fn models(
+        &self,
+        profile: &Profile,
+        key: &ApiKey,
+        cancel: &AtomicBool,
+    ) -> audiolib_ai::Result<Vec<String>> {
+        match self {
+            Self::Client => provider::models(profile, key, cancel),
+            Self::Server(client) => client.ai_models(profile, key, cancel),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn generate(
+        &self,
+        profile: &Profile,
+        key: &ApiKey,
+        intent: &str,
+        layers: bool,
+        guidance: &str,
+        session: &str,
+        cancel: &AtomicBool,
+    ) -> audiolib_ai::Result<provider::Output> {
+        match self {
+            Self::Client => {
+                provider::generate(profile, key, intent, layers, guidance, session, cancel)
+            }
+            Self::Server(client) => {
+                client.ai_generate(profile, key, intent, layers, guidance, session, cancel)
+            }
+        }
+    }
+}
+
 fn draft(ui: &AppWindow, model_required: bool) -> audiolib_ai::Result<Profile> {
     let mut p = Profile {
         name: if ui.get_ai_profile_name().trim().is_empty() {
@@ -1714,8 +1933,7 @@ fn draft(ui: &AppWindow, model_required: bool) -> audiolib_ai::Result<Profile> {
         base_url: ui.get_ai_endpoint().trim().trim_end_matches('/').into(),
         model: ui.get_ai_model().trim().into(),
         timeout_seconds: ui.get_ai_timeout().max(0) as u64,
-        max_requests_per_month: ui.get_ai_request_cap().max(0) as u64,
-        subscription: ui.get_ai_subscription(),
+        request_mode: RequestMode::from_index(ui.get_ai_request_mode())?,
         go_use_authorized: ui.get_ai_go_authorized(),
         ..Default::default()
     };

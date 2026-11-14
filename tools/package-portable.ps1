@@ -1,8 +1,19 @@
 # tools/package-portable.ps1
 [CmdletBinding()]
-param([switch]$SkipBuild, [switch]$WithoutAsio, [string]$Tag)
+param(
+    [switch]$SkipBuild,
+    [switch]$WithoutAsio,
+    [string]$Tag,
+    [string]$PackageId,
+    # Existing named-package mode keeps its unique-ID requirement.
+    [switch]$NoArchive,
+    # Local installation needs the validated directory, not a compressed archive.
+    # Remove previous latest ZIP/checksum output so it cannot represent new bytes.
+    [switch]$SkipArchive
+)
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+. (Join-Path $PSScriptRoot 'build-cache.ps1')
 . (Join-Path $PSScriptRoot 'dependency-licenses.ps1')
 $workspaceText = Get-Content -LiteralPath (Join-Path $taskRoot 'Cargo.toml') -Raw
 $versionMatch = [regex]::Match($workspaceText, '(?ms)^\[workspace\.package\]\s*.*?^version\s*=\s*"(\d+\.\d+\.\d+)"')
@@ -11,6 +22,8 @@ $packageVersion = $versionMatch.Groups[1].Value
 if (!$Tag) { $Tag = 'v' + $packageVersion }
 $tagMatch = [regex]::Match($Tag, '^v(\d+\.\d+\.\d+)(?:-(?:rc|beta)\.(?:0|[1-9]\d*))?$')
 if (!$tagMatch.Success -or $tagMatch.Groups[1].Value -cne $packageVersion) { throw 'Portable tag must match the workspace version (vX.Y.Z, vX.Y.Z-rc.N or vX.Y.Z-beta.N).' }
+if ($PackageId -and $PackageId -cnotmatch '^build-[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$') { throw 'Invalid portable package ID.' }
+if ($NoArchive -and !$PackageId) { throw 'Folder-only portable output requires a unique package ID.' }
 $updateChannel = if ($Tag.Contains('-')) { 'beta' } else { 'stable' }
 function Assert-WorkspacePath([string]$Path) {
     $cursor = [IO.Path]::GetFullPath($Path)
@@ -24,14 +37,17 @@ function Assert-WorkspacePath([string]$Path) {
     }
 }
 if (!$SkipBuild) { & (Join-Path $PSScriptRoot 'build-release.ps1') -WithoutAsio:$WithoutAsio }
-$latestRoot = [IO.Path]::GetFullPath((Join-Path $taskRoot 'dist/latest'))
+$latestRoot = if ($PackageId) {
+    [IO.Path]::GetFullPath((Join-Path $taskRoot ("dist/builds/$PackageId")))
+} else {
+    [IO.Path]::GetFullPath((Join-Path $taskRoot 'dist/latest'))
+}
 $outputRoot = [IO.Path]::GetFullPath((Join-Path $latestRoot 'portable'))
 if (!$outputRoot.StartsWith($taskRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Portable path escaped the intended workspace.'
 }
-# Cargo writes to CARGO_TARGET_DIR when it is set (e.g. a local SSD outside a network
-# share); fall back to <repo>/target otherwise.
-$targetRoot = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) { $env:CARGO_TARGET_DIR } else { Join-Path $taskRoot $env:CARGO_TARGET_DIR })) } else { Join-Path $taskRoot 'target' }
+# Match the builder's local target default, including separate script invocations.
+$targetRoot = Get-AudioLibTargetDirectory $taskRoot
 $binaryRoot = Join-Path $targetRoot 'x86_64-pc-windows-msvc/release'
 foreach ($binary in @('AudioLibExplorer.exe', 'AudioLibCli.exe')) {
     if (!(Test-Path -LiteralPath (Join-Path $binaryRoot $binary))) { throw "Missing release executable: $binary" }
@@ -39,6 +55,7 @@ foreach ($binary in @('AudioLibExplorer.exe', 'AudioLibCli.exe')) {
 # Build in a fresh owned staging directory. Reusing a previous payload would
 # retain obsolete reports, screenshots or local files even after source removal.
 Assert-WorkspacePath $latestRoot
+if ($PackageId -and (Test-Path -LiteralPath $latestRoot)) { throw "Portable package already exists: $latestRoot" }
 New-Item -ItemType Directory -Force -Path $latestRoot | Out-Null
 if ((Get-Item -LiteralPath $latestRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Linked package output is not supported.' }
 $portableRoot = [IO.Path]::GetFullPath((Join-Path $latestRoot ('.portable-stage-' + [guid]::NewGuid().ToString('N'))))
@@ -78,12 +95,24 @@ $compatibilityEntries = @(Get-ChildItem -LiteralPath $portableRoot -Recurse -For
 })
 & (Join-Path $PSScriptRoot 'validate-update-compatibility.ps1') -Product Desktop -Entries $compatibilityEntries
 & (Join-Path $PSScriptRoot 'validate-package-privacy.ps1') -BinaryDirectory $portableRoot
-# Replace only the verified generated output, never local_release or runtime data.
+$archiveName = if ($PackageId) { "AudioLibExplorer-$PackageId-win-x64-portable.zip" } else { 'AudioLibExplorer-latest-win-x64-portable.zip' }
+$archivePath = Join-Path $latestRoot $archiveName
+foreach ($archiveFile in @($archivePath, ($archivePath + '.sha256'))) {
+    Assert-WorkspacePath $archiveFile
+    if ((Test-Path -LiteralPath $archiveFile) -and !(Test-Path -LiteralPath $archiveFile -PathType Leaf)) { throw 'Archive output must be a regular file.' }
+}
+# Replace only the latest output. A named package always uses a new directory.
 if (Test-Path -LiteralPath $outputRoot) {
+    if ($PackageId) { throw "Portable package already exists: $outputRoot" }
     Assert-WorkspacePath $outputRoot
     if ((Get-Item -LiteralPath $outputRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint -or
         @(Get-ChildItem -LiteralPath $outputRoot -Recurse -Force -Attributes ReparsePoint).Count -gt 0) { throw 'Linked previous package output is not supported.' }
     Remove-Item -LiteralPath $outputRoot -Recurse -Force
+}
+# Both modes invalidate the previous archive before publishing a new directory;
+# a skipped or failed compression must not leave an apparently current old ZIP.
+foreach ($archiveFile in @($archivePath, ($archivePath + '.sha256'))) {
+    if (Test-Path -LiteralPath $archiveFile) { Remove-Item -LiteralPath $archiveFile -Force }
 }
 Move-Item -LiteralPath $portableRoot -Destination $outputRoot
 $portableRoot = $outputRoot
@@ -97,9 +126,10 @@ foreach ($binary in @('AudioLibExplorer.exe', 'AudioLibCli.exe')) {
     $binaryHash = (Get-FileHash -LiteralPath (Join-Path $portableRoot $binary) -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText($sidecar, ($binaryHash + '  ' + $binary + "`n"), [Text.Encoding]::ASCII)
 }
-$archivePath = Join-Path $latestRoot 'AudioLibExplorer-latest-win-x64-portable.zip'
-Assert-WorkspacePath $archivePath
-Assert-WorkspacePath ($archivePath + '.sha256')
+if ($SkipArchive -or $NoArchive) {
+    Write-Host "Portable directory ready: $portableRoot; archive=not-requested."
+    return
+}
 # Cargo archives may give notices pre-1980 timestamps, which ZIP cannot represent.
 # Adjust only the copied package files; registry and project sources stay untouched.
 $zipEpoch = [datetime]::new(1980, 1, 1)

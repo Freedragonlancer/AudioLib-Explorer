@@ -3,7 +3,7 @@
 # Requires current CLI, desktop and server builds; never contacts a configured server.
 [CmdletBinding()]
 param(
-    [string]$BinaryDirectory = 'target/x86_64-pc-windows-msvc/release',
+    [string]$BinaryDirectory,
     [string]$ServerBinary,
     [switch]$SkipDesktop,
     # Reuse a passing CLI fault report when only the desktop/CLI lease needs checking.
@@ -16,6 +16,8 @@ Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion -lt [version]'7.3' -or !$IsWindows) { throw 'Remote resume validation requires Windows and PowerShell 7.3 or newer.' }
 if ($SkipDesktop -and $DesktopOnly) { throw '-DesktopOnly cannot be combined with -SkipDesktop.' }
 $taskRepo = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+. (Join-Path $PSScriptRoot 'build-cache.ps1')
+if (!$BinaryDirectory) { $BinaryDirectory = Join-Path (Get-AudioLibTargetDirectory $taskRepo) 'x86_64-pc-windows-msvc/release' }
 $taskBinary = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $taskRepo $BinaryDirectory }))
 $taskCli = Join-Path $taskBinary 'AudioLibCli.exe'
 $taskDesktop = Join-Path $taskBinary 'AudioLibExplorer.exe'

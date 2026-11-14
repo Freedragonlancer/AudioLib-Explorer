@@ -13,6 +13,7 @@
 - 扫描与试听 WAV/BWF、MP3、AIFF、FLAC、Ogg Vorbis 和 OGA/Ogg FLAC；提取内嵌 Metadata。Opus 仅支持标签探测，不支持播放。
 - 本地和服务器模式支持厂商 CSV/TSV/TXT/XLS/XLSX Metadata 导入：先预览和确认匹配，再提交，可回滚导入。
 - 可承载 10 TB 以上的大规模音效素材库。
+- v1.0.0 起，桌面端提供 AI 智能搜索：用自然语言描述声音，得到经当前资料库命中核验的英文关键词，当前 beta 主声音最多 6 个，有有效分层素材时总计最多 8 个（已发布的 v1.0.0 最多 5 个）。离线词表无需账号；云端模型需自备 HTTPS 供应商、API Key 和模型。详见 [AI 智能搜索](#ai-智能搜索)。
 
 **AudioLib Explorer helps sound designers build a sound-effects library of their own.**
 
@@ -25,12 +26,51 @@ A free, open-source sound effects (SFX) library manager for sound design, game a
 - Scan and play WAV/BWF, MP3, AIFF, FLAC, Ogg Vorbis and OGA/Ogg FLAC, with embedded Metadata extraction. Opus supports tag probing only, without playback.
 - Import vendor CSV/TSV/TXT/XLS/XLSX Metadata locally or on the server: preview and confirm matches before committing, with import rollback.
 - Scales to sound libraries of 10 TB and more.
+- From v1.0.0, the desktop app can turn a plain-language sound description into English keyword queries that hit the current library: up to six main queries in the current beta, expanding to eight total when useful source layers are verified, or five in the published v1.0.0. The offline lexicon needs no account; a cloud model needs your own HTTPS provider, API key and model. See [AI search](#ai-search).
 
-![AudioLib Explorer main window / 主界面](resources/screenshot-main.png)
+![v1.0 AI search with keyword tags and a populated sound list / v1.0 AI 智能搜索、关键词标签和声音列表](resources/screenshot-main.png)
+
+v1.0 AI search. Generate Tags is on, with the description and verified keyword tags. The current task lists the matching sounds and their waveforms.
+
+v1.0 AI 智能搜索。搜索条已打开 Generate Tags，旁边是声音描述和已核验的关键词标签；当前任务列出命中的声音和 Waveform。
+
+![v1.0 sound details with embedded cover artwork / v1.0 声音详情与内嵌封面](resources/screenshot-artwork.png)
+
+v1.0 details for the same search. The selected sound shows its embedded cover, description, and waveform next to the list.
+
+v1.0 同一搜索的详情。选中的声音在列表旁显示内嵌封面、描述和 Waveform。
+
+## AI search
+
+Desktop AI search shipped in [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0) with up to five verified tags. The current beta keeps up to six main tags, or eight main and source-layer tags together when useful layers have verified hits. Color and Main/Layer markers distinguish their roles. Search all searches the current set; auto-search remains limited to three tasks. The desktop provides the search interface; the current server can optionally relay provider requests, while `AudioLibCli` has no interactive AI search. Behavior and limits: [AI 智能搜索](doc/Rust_AI_Search.md). [Research and design](doc/AI_Keyword_Search_Design.md) keeps notes and concepts that 1.0 does not ship. The SVG wireframes in that note are not application screenshots.
+
+Turn AI on in the desktop search bar and describe the sound in 1–500 characters. **Tag生成 / Generate Tags** asks the offline lexicon, or a configured model, for plain-text keywords, then searches the current folder, scope and filters. The current beta verifies up to twelve raw candidates and keeps at most six main queries, or eight main and layer queries together when useful layers have hits; main queries remain capped at six. Each query is one or two English words, and a space means AND. A verified single keyword is placed first when one exists. The tag text searches the current task. The tag **+** opens one new task with the same folder, scope and filters and does not call the model again. **Allow layers / 允许分层** starts checked and lets the model assess whether independent components such as impact, bass or debris would help. It expands to eight only when useful layers have verified hits; ordinary requests stay at six. Clear it to ask only for the main sound. **Search all / 查询全部** opens one task per verified tag, up to six without layers or eight total with layers, and rejects the whole batch when too few task slots remain. **Auto-search 3 tasks after generation / 生成后自动搜索 3 个任务** starts off and runs at most three recommendations when enabled.
+
+Offline use needs no account, network or API key. The built-in lexicon is version `1.0.0-UCS8.2.1`: 431 keywords, 753 UCS 8.2.1 subcategories and 19 scene recipes. Offline search ranks those stored entries. A general language model runs only after you configure a cloud provider. Open **Settings → AI Search… / 设置 → AI智能搜索…** and choose **Local reference (offline) / 本地词表（离线）**.
+
+A cloud model is optional. Add an HTTPS base URL, an API key and a model id. The model list can be fetched before the profile is saved. Protocols: OpenAI-compatible Chat, OpenAI Responses, Anthropic Messages, Gemini, Jev TypeSafe, OpenCode Go and DeepSeek. HTTP is allowed for an explicit loopback address; Magpie also supports an explicitly configured private-IP gateway. Server relay is optional and disabled by default, with an authenticated library-server connection and an explicit upstream allowlist. Windows stores the key with the current user's DPAPI. macOS and Linux keep it for the session. The current beta removes the in-app monthly request limit and subscription fields; provider billing remains external. Jev selects among a bounded local candidate list and may answer uncertain. Its thresholds are application policy and were not calibrated on a sound library. The 1.0 release tests did not call a paid provider account.
+
+The request sends the description, the selected prompt and a bounded reference excerpt. Audio, file paths and the open library's Metadata stay out unless you type them into the description or prompt. The model cannot send SQL or write the library.
+
+1.0 leaves these for later: audio embeddings, understanding files that have no Metadata, OAuth and in-app subscription purchase, provider billing sync, persistent keys on macOS and Linux, a task for every layer, and a loop that rewrites queries from search results.
+
+## AI 智能搜索
+
+桌面端 AI 智能搜索随 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0) 发布，该正式版最多保留 5 个已核验标签。当前 beta 主声音标签最多 6 个；允许分层且有有效分层素材时，总计最多 8 个，主声音和分层标签以颜色及“主／层”标识区分。“查询全部”搜索当前整组标签，自动搜索仍最多 3 项。搜索入口在桌面端；当前服务端可按配置转发供应商请求，`AudioLibCli` 不提供交互式 AI 搜索。行为与限制见 [AI 智能搜索](doc/Rust_AI_Search.md)。[研究与设计](doc/AI_Keyword_Search_Design.md) 保留了 1.0 未交付的概念；其中的 SVG 线框不是应用截图。
+
+在桌面搜索条打开 AI，用 1–500 个字符描述声音，再点 **Tag生成**。离线词表或已配置的模型给出纯文本关键词，再按当前目录、搜索范围和筛选做实际检索；当前 beta 从最多 12 条原始候选中保留有命中的查询：无有效分层时最多 6 条；有有效分层时主声音与素材层总计最多 8 条，主声音本身仍最多 6 条。每条是 1 或 2 个英文词，空格表示 AND。能核验出单词时把它放在第一位。点击标签正文在当前任务搜索；标签上的 **+** 用相同目录、范围和筛选新建一个任务，不再请求模型。**允许分层** 默认勾选，允许按声音设计需求评估冲击、低频、碎片等独立素材层；需要分层且素材层通过命中核验时才扩展到 8 条。普通需求仍最多 6 条；取消后只推荐主声音。**查询全部** 为每个已核验标签各建一个任务，无分层最多 6 个、有分层总计最多 8 个，任务名额不足时整批拒绝。**生成后自动搜索 3 个任务** 默认关闭，开启后仍最多搜索前 3 项。
+
+离线词表版本 `1.0.0-UCS8.2.1`，含 431 条关键词、753 条 UCS 8.2.1 子类和 19 个场景配方，按条目排序，不是通用语言模型，也不需要账号、网络或 API Key。在 **设置 → AI智能搜索…** 选择 **本地词表（离线）**（英文界面为 **Local reference (offline)**）。
+
+云端模型可选。需要自行填写 HTTPS 地址、API Key 和模型 ID；保存配置前可以获取模型列表。协议包括 OpenAI 兼容 Chat、OpenAI Responses、Anthropic Messages、Gemini、Jev TypeSafe、OpenCode Go 和 DeepSeek。HTTP 允许显式 loopback，Magpie 另支持明确配置的私网 IP 网关。服务端转发可选且默认关闭，需要音库服务器认证和明确的上游允许列表。Windows 用当前用户 DPAPI 保存密钥；macOS 与 Linux 只在本次会话保留。当前 beta 移除应用内月请求限制和订阅字段，供应商账单仍由供应商管理。Jev 只在有限的本地候选中选择，也可以返回不确定。接受阈值是应用策略，尚未用音效库校准。1.0 的发布验收没有调用付费供应商账户。
+
+请求只包含描述、所选提示词和有限参考摘录。除非写进描述或提示词，否则不发送音频、文件路径或当前音库 Metadata。模型不能提交 SQL，也不能写入资料库。
+
+1.0 尚未包含：音频 embedding、理解没有 Metadata 的文件、OAuth 与应用内购买订阅、同步供应商账单、macOS/Linux 持久密钥、为每一素材层自动建任务，以及根据检索结果自动改写查询。
 
 AudioLib Explorer is a fast, local-first sound-effects library manager written in Rust with a [Slint](https://slint.dev) desktop UI. It indexes WAV/BWF, MP3, AIFF, FLAC and Ogg libraries into SQLite (FTS5), previews sounds through WASAPI (optionally ASIO) on Windows, and can browse a remote library served by `audiolib-server`. The macOS arm64 client uses CoreAudio. Version 0.8.4 added Linux x64 server and Docker amd64/arm64 deliverables. This README describes the current development source; published packages retain the features and identity of their own release tag.
 
-- **Published release:** [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0), published 2026-11-13. All seven packages, fourteen verified online assets and checksums, platform acceptance and fixed-install synchronization are recorded in the [1.0.0 release record](doc/Rust_Release_1.0.0.md). The payload source remains final main/tag `1fc6f825`; later documentation does not rebuild or replace those bytes.
+- **Published release:** [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0), published 2026-11-13. All seven packages, fourteen verified online assets and checksums, platform acceptance and fixed-install synchronization are recorded in the [1.0.0 release record](doc/Rust_Release_1.0.0.md). Those payloads were built from final main/tag `1fc6f825`; later documentation and current beta source changes do not rebuild or replace the published files.
 - **HTTP API:** `/api/v1/` for library/audio operations; `/api/vendor-import/` for managed vendor import
 - **Database schema:** ordinary local writers use 8; explicit server migration can publish 9. Known complete schema 3–9 snapshots are readable only after format validation.
 - **Writable library format:** base formats are `ale-s8-cld1-t3-m2-p1-a1` locally and `ale-s9-cld1-t3-m2-p1-a1-sd1` for the dedicated server writer. The first successful extended-source write atomically enables required `audio_sources:1` and the corresponding `-af1` format; older clients must upgrade, as described in the [compatibility contract](doc/api/Library_Migration_Compatibility.md). Client snapshots stay read-only. Shared albums and original Metadata JSON TEXT are retained; Metadata compression is deferred, while snapshot transport uses zstd.
@@ -162,6 +202,7 @@ Steps, sibling-directory rules and troubleshooting: [Managing sound libraries on
 - Up to 30 independent search-task tabs (limit adjustable in Appearance; existing saved limits are retained), with separate folders, filters and list state, personal saved searches and restored sessions. Overflow arrows keep the new-task button visible. See [Search Tasks](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Search_Tasks.md).
 - Incremental and full folder scans for WAV, FLAC, Ogg Vorbis and OGA/Ogg FLAC. WAV Metadata includes BWF `bext`, iXML, INFO, ID3, XMP and Soundminer SMED read-only compatibility; bounded Vorbis extraction retains Chinese text and repeated values. Rescans preserve user annotations. Source audio files are never modified. OpusTags can be probed separately, but `.opus` is not scanned by default and Opus playback is unsupported.
 - Four search scopes: **Main fields** searches filenames and Metadata; **All** also includes directory names; **Path** searches directory names and ancestors; **Filename** restricts the search to filenames. Path needs a prepared directory index; without one, All uses Main fields. SQLite FTS5 supports letter fragments of at least two characters (`expl`, `plos` and `sion` match `explosion`), Chinese segmentation (jieba-rs) and tag/category filters. The performance target remains **P95 latency <500ms for 1M+ records**.
+- Desktop AI search, shipped in v1.0.0: an offline keyword, UCS and recipe lexicon, or an optional model you configure, then the same FTS5 search. See [AI search](#ai-search).
 - Vendor Metadata import in local and server modes: CSV/TSV/TXT/XLS/XLSX parsing, mapping previews, explicit ambiguous-match confirmation, recoverable commits and rollback. Server sources can be uploaded tables or a relative directory under a configured server root. Original embedded Metadata and user annotations are preserved. See the [managed server preview API](doc/api/README.md#vendor-import-preview).
 - Playback with streaming decode, device-rate resampling, waveform and spectral views, independent pitch/rate audition (SoundTouch), WASAPI and optional ASIO output.
 - Library management: add folders, repair moved or renamed files, batch annotations, backup/restore, integrity checks, JSONL/CSV exchange.
@@ -185,7 +226,7 @@ The release script builds only the desktop/CLI binaries. To deliver without ASIO
 
 For tagged local delivery, `pwsh tools/release-pipeline.ps1 -Action Run -Tag <tag>` combines preflight, build, package, portable acceptance and fixed local installation. It emits short JSON status, keeps full logs on disk and resumes valid stages. Preview with the default `Plan` action; select source checks by actual change scope. Native server/Mac and read-only asset-verification plans are described in the [release pipeline guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_Pipeline.md).
 
-After actual build/test work, add `-CleanBuildArtifacts` to local checks or the release pipeline to prune debug caches above the default 40 GiB budget (`-BuildCacheLimitGiB` adjusts it). Preview separately with `pwsh tools/clean-build-artifacts.ps1`; release outputs, packages, installations, SDKs and user data are retained. See [build cache maintenance](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md).
+Windows managed checks/builds now use `%LOCALAPPDATA%/AudioLibExplorerBuild/<checkout-hash>/target` on the local fixed disk, including temporary compiler files; an explicit `CARGO_TARGET_DIR` takes precedence. Successful checks/builds automatically remove compilation intermediates while keeping final executables. Release pipelines defer cleanup until delivery succeeds, and failures retain diagnostic caches. Use PowerShell 7.3+; `-CleanBuildArtifacts:$false` retains caches for repeated development runs. Removing dependency caches makes the next compilation slower. The standalone cleaner still previews a 40 GiB debug budget by default; packages, installations, SDKs and user data are retained. See [build cache maintenance](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md).
 
 Build the Mac client on an Apple Silicon Mac with Xcode command-line tools, the pinned native Rust toolchain and PowerShell 7.3 or newer. Use a clean checkout of the intended release tag (`v0.9.6`, commit `4606291`, in this example):
 
@@ -213,6 +254,10 @@ cargo test -p audiolib-db --test search_fragments --locked
 ```
 
 Documentation-only changes need a diff/link review and `git diff --check`. UI text/layout changes need compilation and a focused visual check. Stable, unaffected modules reuse their passing baseline and stay out of routine regressions. Select packages explicitly with `./tools/check-local.ps1 -Package <packages>`; for one package, add `-Lib`, `-Bin <name>` or `-Test <integration-target>` and optionally `-TestFilter <substring>` to run only affected tests. Use `-Workspace` only for broad/uncertain impact; omitting the scope fails before work starts. `-Asio` selects the Windows release features for that single pass. Check non-ASIO conditional code separately only when the change affects it. Reuse passing results while relevant source, dependencies, features, toolchain and environment remain unchanged. Run subsystem regressions and performance measurements when their behavior is affected. See [validation scope](AGENTS.md#development-checks-by-change-scope), [stable-module selection](doc/Testing_Strategy.md#稳定模块的回归精简) and [stage responsibilities](doc/Testing_Strategy.md#本地验证与云端最小检查).
+
+Daily code work finishes after the scoped development checks; the release build/package/portable acceptance/install sequence runs on an explicit local tryout, delivery or publication request. Risk-triggered regressions may still require a current executable or package, without triggering installation or deployment. Use an isolated development build for changed UI interactions. `check-local.ps1 -Stage Tests` runs another selected test without repeating still-valid format/Clippy checks; `-Stage Clippy` runs only strict static checks. The default remains `-Stage All`, and omitted stages are reported as `not-requested`. See [daily completion criteria](doc/Testing_Strategy.md#日常开发的完成条件).
+
+For a requested fast local tryout, select `tools/release-plans/windows-local.json` with the existing release pipeline. It skips ZIP compression, keeps full portable acceptance and installs into `local_release/`; valid stages resume without repeating work. See [fast local acceptance](doc/Rust_Release_Pipeline.md#本地快速验收) for commands and source identity requirements.
 
 ## Usage
 

@@ -17,6 +17,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Server packaging requires PowerShell 7.3 or newer.' }
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+. (Join-Path $PSScriptRoot 'build-cache.ps1')
 . (Join-Path $PSScriptRoot 'dependency-licenses.ps1')
 . (Join-Path $PSScriptRoot 'server-package-layout.ps1')
 $pathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
@@ -127,8 +128,8 @@ foreach ($relative in $publicFiles) {
     Assert-Unlinked (Join-Path $taskRoot $relative)
 }
 if (!$BinaryPath) {
-    # Match Cargo and package-portable.ps1: honor CARGO_TARGET_DIR when it is set.
-    $targetRoot = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR, $taskRoot) } else { Join-Path $taskRoot 'target' }
+    # Match managed builds and the portable packager, including the local default.
+    $targetRoot = Get-AudioLibTargetDirectory $taskRoot
     $BinaryPath = Join-Path $targetRoot "$Target/release"
 }
 $binarySource = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BinaryPath)) { $BinaryPath } else { Join-Path $taskRoot $BinaryPath }))

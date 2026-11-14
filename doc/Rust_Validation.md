@@ -1,5 +1,15 @@
 # Rust 验证报告
 
+## 本机构建目录与成功后自动清理（2026-11-14）
+
+基于 `6e4ea1d` 的工作流脚本变更。Windows 开发检查和 release 构建默认解析到本机固定磁盘 `%LOCALAPPDATA%/AudioLibExplorerBuild/<checkout-hash>/target`，构建期间的 `TEMP`/`TMP` 同步到该 target，退出后恢复；独立打包和验证脚本使用同一解析规则。工作区已有的其他 Rust 改动保留，本节不为这些改动提供验收结论。
+
+PowerShell 语法检查、`git diff --check`、`test-build-environment.ps1`、`test-validator-build-routing.ps1`、`test-development-pipeline.ps1`、`test-build-artifacts.ps1`、`test-release-pipeline.ps1`（All）、`test-package-boundary.ps1` 和 `test-server-package.ps1` 的合成回归通过。覆盖本地/显式/相对目录、所有权及链接拒绝、环境恢复、成功清理/失败保留、占用和租约、最终 EXE 保留、清理后的 build/交付收据复用，以及客户端/服务端包边界。目录与验证路径辅助测试另外通过 Windows PowerShell 5.1 兼容检查；自动清理执行仍要求 PowerShell 7.3+。
+
+`windows-local` 的实际 Plan 预览解析为 C 盘的 `%LOCALAPPDATA%/AudioLibExplorerBuild/<checkout-hash>/target`，在 install 后列出清理；只读 `release-assets` 预览不含清理。预览未创建该构建目录。清理器以 `Intermediate -MaxGiB 0` 删除中间目录和 tmp，保留最终 EXE/库/PDB；下一次实际编译需要重新生成依赖缓存。未运行 Rust 编译、应用回归或重新安装；脚本路由变更按工作流验证范围检查，不重跑未涉及的应用功能矩阵，也不触发真实缓存扫描。
+
+清理与续跑证据：`%TEMP%/AudioLibCacheTest-c7ca4b2e01a043d2ae4f44aff762142d/`；完整管线路由证据：`.rust-validation/release-pipeline-tests/fca7365385f44388b8ba6ae95c1a317f/repo with spaces/`。首次新增清理收据复用测试发现 PowerShell 普通 hashtable 参数顺序导致身份不稳定，改为 ordered dictionary 后通过；原失败证据保留在自有临时目录。最终审查补充了独立初始化锁和双进程首次启动回归，PowerShell 7/5.1 helper 验证通过，确保并行构建不会读到部分归属标记；该修复不改变已经通过的显式 target 路由及包边界行为。
+
 ## 0.8.4 开发与平台交付（2026-10-29）
 
 发布基线为已经发布的 `v0.8.3`（最终提交 `f8c213f`）；其正式包、本机固定安装及人工验收结果见对应 GitHub Release。0.8.4 保留 API v1、schema 8 和原存储格式，新增 Linux x64 与 Docker 双架构交付，并修复侧栏箭头。

@@ -44,7 +44,9 @@ $taskRun=Join-Path $taskRoot '.rust-validation/release-pipeline/test'
 $taskRunner=Join-Path $PSScriptRoot 'release-pipeline.ps1'
 $taskPwsh=Join-Path $PSHOME ('pwsh'+$(if($IsWindows){'.exe'}else{''}))
 function Invoke-Pipeline([string]$Action='Run',[int]$ExpectedExit=0,[string[]]$ExtraArguments=@()) {
-    $taskOutput=& $taskPwsh -NoProfile -File $taskRunner -Root $taskRoot -PlanFile $taskPlanPath -RunDirectory $taskRun -Tag v0.0.1 -Action $Action @ExtraArguments 2>&1
+    # These routing fixtures contain synthetic call logs in target, not a real
+    # Cargo cache. Actual default cleanup/resume is covered by test-build-artifacts.
+    $taskOutput=& $taskPwsh -NoProfile -File $taskRunner -Root $taskRoot -PlanFile $taskPlanPath -RunDirectory $taskRun -Tag v0.0.1 -Action $Action '-CleanBuildArtifacts:$false' @ExtraArguments 2>&1
     if($LASTEXITCODE -ne $ExpectedExit){throw "Unexpected pipeline exit: $($taskOutput -join ' ')"}
     if(@($taskOutput).Count -gt (($taskPlan.stages.Count+2)*2+1)){throw ('Runner leaked stage output: ' + (($taskOutput | Select-Object -First 12) -join ' '))}
     return $taskOutput
@@ -61,6 +63,20 @@ try {
     # even when the caller uses an external build cache for actual releases.
     $env:CARGO_TARGET_DIR=Join-Path $taskRoot 'target'
     if($Scope -eq 'All') {
+    # A custom non-Rust plan must stay read-only even with automatic cleanup's
+    # default enabled. Resolving a default local target must not create it.
+    . (Join-Path $PSScriptRoot 'build-cache.ps1')
+    $taskExplicitTarget=$env:CARGO_TARGET_DIR
+    try {
+        $env:CARGO_TARGET_DIR=$null
+        $taskManagedTarget=Get-AudioLibTargetDirectory $taskRoot
+        $taskManagedTargetExisted=Test-Path -LiteralPath $taskManagedTarget
+        $taskDefaultPlanOutput=& $taskPwsh -NoProfile -File $taskRunner -Root $taskRoot -PlanFile $taskPlanPath -RunDirectory $taskRun -Tag v0.0.1 -Action Plan 2>&1
+        if($LASTEXITCODE -ne 0){throw 'Default non-Rust plan preview failed.'}
+        $taskDefaultPlan=($taskDefaultPlanOutput -join [Environment]::NewLine)|ConvertFrom-Json
+        if($taskDefaultPlan.stages.Count -ne $taskPlan.stages.Count -or @($taskDefaultPlan.stages|Where-Object id -eq 'build-cache-cleanup').Count -or
+            (Test-Path -LiteralPath $taskManagedTarget) -ne $taskManagedTargetExisted -or (Test-Path -LiteralPath $taskRun)){throw 'Non-Rust plan preview enabled cleanup or created managed cache/state.'}
+    } finally {$env:CARGO_TARGET_DIR=$taskExplicitTarget}
     $null=Invoke-Pipeline 'Plan'
     if(Test-Path -LiteralPath $taskRun){throw 'Plan created run state.'}
     $null=Invoke-Pipeline
@@ -191,11 +207,15 @@ if(Test-Path -LiteralPath target/move-head){
     }
     New-Item -ItemType Directory -Path (Join-Path $taskRoot 'target') -Force | Out-Null
     $taskStub=@'
-param($Tag,$Profile,[switch]$WithoutAsio,[switch]$SkipBuild,$BinaryDirectory,$Source,$Destination,$VersionManifest,[string[]]$Package,[switch]$Asio)
+param($Tag,$Profile,[switch]$WithoutAsio,[switch]$SkipBuild,[switch]$SkipArchive,$BinaryDirectory,$Source,$Destination='local_release',$VersionManifest='Cargo.toml',[string[]]$Package,[switch]$Asio)
 $ErrorActionPreference='Stop'
-$fixtureRoot=[IO.Path]::GetFullPath((Get-Location).Path)
-$fixtureTarget=Join-Path $fixtureRoot 'target'
+$fixtureRoot=[IO.Path]::GetFullPath((Get-Location).ProviderPath)
+. (Join-Path $PSScriptRoot 'build-cache.ps1')
+$fixtureTarget=Get-AudioLibCanonicalPath (Join-Path $fixtureRoot 'target')
 if (!$env:CARGO_TARGET_DIR -or [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR) -cne $fixtureTarget) { throw 'Fake tools require the owned fixture target directory.' }
+if ($env:AUDIOLIB_DEFER_BUILD_CLEANUP -ne '1') { throw 'Child stages could prune the parent pipeline cache.' }
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
+    ($env:TEMP -cne (Join-Path $fixtureTarget 'tmp') -or $env:TMP -cne $env:TEMP)) { throw 'Child stages lost the isolated compiler TEMP/TMP.' }
 function Write-FixtureFile([string]$Relative,[string]$Contents) {
     $path=[IO.Path]::GetFullPath($Relative,$fixtureRoot)
     if (!$path.StartsWith($fixtureRoot+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { throw 'Fake output escaped the fixture.' }
@@ -203,7 +223,7 @@ function Write-FixtureFile([string]$Relative,[string]$Contents) {
     [IO.File]::WriteAllText($path,$Contents)
 }
 $scriptName=[IO.Path]::GetFileName($MyInvocation.MyCommand.Path)
-@{script=$scriptName;profile=$Profile;without_asio=[bool]$WithoutAsio;asio=[bool]$Asio;packages=@($Package);destination=$Destination;version_manifest=$VersionManifest} | ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $fixtureTarget 'profile-calls.jsonl')
+@{script=$scriptName;profile=$Profile;without_asio=[bool]$WithoutAsio;asio=[bool]$Asio;skip_archive=[bool]$SkipArchive;packages=@($Package);destination=$Destination;version_manifest=$VersionManifest} | ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $fixtureTarget 'profile-calls.jsonl')
 # Model what each real tool produces, independently of the plan's declarations.
 switch -Exact ($scriptName) {
     'check-release-licenses.ps1' {
@@ -218,12 +238,14 @@ switch -Exact ($scriptName) {
         if (!$SkipBuild) { throw 'Profile packaging must reuse its build.' }
         Write-FixtureFile 'dist/latest/portable/AudioLibExplorer.exe' ([IO.File]::ReadAllText((Join-Path $fixtureTarget 'x86_64-pc-windows-msvc/release/AudioLibExplorer.exe')))
         Write-FixtureFile 'dist/latest/portable/AudioLibCli.exe' ([IO.File]::ReadAllText((Join-Path $fixtureTarget 'x86_64-pc-windows-msvc/release/AudioLibCli.exe')))
+        if ($SkipArchive) { break }
         Write-FixtureFile 'dist/latest/AudioLibExplorer-latest-win-x64-portable.zip' "portable tag=$Tag without_asio=$WithoutAsio"
         $hash=(Get-FileHash -LiteralPath (Join-Path $fixtureRoot 'dist/latest/AudioLibExplorer-latest-win-x64-portable.zip') -Algorithm SHA256).Hash
         Write-FixtureFile 'dist/latest/AudioLibExplorer-latest-win-x64-portable.zip.sha256' ($hash+'  AudioLibExplorer-latest-win-x64-portable.zip')
     }
     'validate-portable.ps1' {
         if ($BinaryDirectory -cne 'dist/latest/portable') { throw 'Profile acceptance selected another payload.' }
+        if (Test-Path -LiteralPath (Join-Path $fixtureTarget 'fail-accept')) { throw 'Synthetic acceptance failure.' }
     }
     'install-local-release.ps1' {
         if ($Source -cne 'dist/latest/portable') { throw 'Profile installation selected another payload.' }
@@ -240,6 +262,7 @@ switch -Exact ($scriptName) {
     $taskPlan.require_tag=$false; $taskPlan.host='any'; $taskPlan.environment_tools=@()
     [IO.File]::WriteAllText((Join-Path $taskRoot 'Cargo.toml'),"[workspace.package]`nversion = `"0.0.1`"`n")
     New-Item -ItemType Directory -Path (Join-Path $taskRoot 'tools') -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'build-cache.ps1') -Destination (Join-Path $taskRoot 'tools/build-cache.ps1')
     foreach($taskStep in $taskPlan.stages){[IO.File]::WriteAllText((Join-Path $taskRoot $taskStep.script),$taskStub)}
     [IO.File]::WriteAllText((Join-Path $taskRoot 'tools/check-local.ps1'),$taskStub)
     $taskChecksPath=Join-Path $PSScriptRoot 'release-plans/checks.example.json'
@@ -322,6 +345,50 @@ switch -Exact ($scriptName) {
     $taskCalls=Get-Content -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl') | ForEach-Object{$_|ConvertFrom-Json}
     if(@($taskCalls).Count -ne 7 -or (Read-State).stages.build.status -ne 'passed'){throw 'Slint build configuration changed without invalidating receipts.'}
     Write-Host 'PASS: Slint build environment changes invalidate the selected configuration.'
+    # The local plan has no Git tag gate and no archive output, but must retain
+    # acceptance-before-installation and resume only the failed downstream work.
+    $taskPlan=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'release-plans/windows-local.json') -Raw | ConvertFrom-Json -AsHashtable
+    $taskPlan.host='any'; $taskPlan.environment_tools=@()
+    $taskPlan | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $taskPlanPath -Encoding utf8
+    Invoke-FixtureGit @('add','.'); Invoke-FixtureGit @('commit','-qm','local delivery profile')
+    $taskRun=Join-Path $taskRoot '.rust-validation/release-pipeline/local-profile'
+    $taskLocalVariables=Join-Path $taskRoot 'target/local-without-asio.json'
+    [IO.File]::WriteAllText($taskLocalVariables,'{"WithoutAsio":true}')
+    foreach ($taskExtra in @(@(), @('-VariablesFile',$taskLocalVariables))) {
+        Remove-Item -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl')
+        [IO.File]::WriteAllText((Join-Path $taskRoot 'target/fail-accept'),'fail')
+        $null=Invoke-Pipeline 'Run' 1 $taskExtra
+        $taskCalls=Get-Content -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl') | ForEach-Object{$_|ConvertFrom-Json}
+        if (($taskCalls.script -join ',') -cne 'check-release-licenses.ps1,build-release.ps1,package-portable.ps1,validate-portable.ps1' -or
+            !($taskCalls | Where-Object script -eq 'package-portable.ps1').skip_archive -or
+            @($taskCalls | Where-Object { $_.without_asio -ne [bool]$taskExtra.Count }).Count -or
+            (Read-State).stages.Contains('install')) { throw 'Local plan lost selected features, skipped directory-only mode, or installed before acceptance.' }
+        Remove-Item -LiteralPath (Join-Path $taskRoot 'target/fail-accept')
+        Remove-Item -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl')
+        $null=Invoke-Pipeline 'Run' 0 $taskExtra
+        $taskCalls=Get-Content -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl') | ForEach-Object{$_|ConvertFrom-Json}
+        if (($taskCalls.script -join ',') -cne 'check-release-licenses.ps1,validate-portable.ps1,install-local-release.ps1' -or
+            (Read-State).stages.build.status -ne 'reused' -or (Read-State).stages.package.status -ne 'reused' -or
+            (Read-State).source_checks -ne 'not-requested') { throw 'Local delivery retry repeated build/package or reported unrequested source checks as passed.' }
+    }
+    Write-Host 'PASS: local plan routes both feature configurations, gates installation on acceptance and resumes without rebuilding or repackaging.'
+    # The local plan must also target the original fixed installation when its
+    # accepted source lives in an isolated checkout, without redoing the payload.
+    Remove-Item -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl')
+    $null=Invoke-Pipeline 'Run' 0 @('-VariablesFile',$taskVariables)
+    $taskCalls=Get-Content -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl') | ForEach-Object{$_|ConvertFrom-Json}
+    $taskInstallCall=@($taskCalls|Where-Object script -eq 'install-local-release.ps1')
+    if(($taskCalls.script -join ',') -cne 'check-release-licenses.ps1,install-local-release.ps1' -or
+        $taskInstallCall[0].destination -cne $taskSelectedInstall -or $taskInstallCall[0].version_manifest -cne $taskSelectedManifest -or
+        @('build','package','accept'|Where-Object{(Read-State).stages[$_].status -ne 'reused'}).Count){throw 'Local plan lost fixed-install routing or repeated accepted payload stages.'}
+    Remove-Item -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl')
+    [IO.File]::AppendAllText($taskSelectedManifest,"# changed local delivery manifest identity`n")
+    $null=Invoke-Pipeline 'Run' 0 @('-VariablesFile',$taskVariables)
+    $taskCalls=Get-Content -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl') | ForEach-Object{$_|ConvertFrom-Json}
+    if(($taskCalls.script -join ',') -cne 'check-release-licenses.ps1,install-local-release.ps1' -or
+        (Read-State).stages.install.status -ne 'passed' -or
+        [IO.File]::ReadAllText((Join-Path $taskSelectedInstall 'user-file.keep')) -cne 'preserve original installation data'){throw 'Local manifest identity did not invalidate only installation or original data changed.'}
+    Write-Host 'PASS: local delivery routes fixed installation and selected manifest; only installation reruns on routing/manifest changes.'
 } finally {
     [Environment]::SetEnvironmentVariable('AUDIOLIB_PIPELINE_TEST',$taskSaved)
     $env:GH_TOKEN=$taskSavedGhToken

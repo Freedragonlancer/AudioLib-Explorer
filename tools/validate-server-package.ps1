@@ -270,7 +270,8 @@ try {
 
     $database = Join-Path $testRoot 'library.db'
     if ($IsWindows) {
-        $targetRoot = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR, $taskRoot) } else { Join-Path $taskRoot 'target' }
+        . (Join-Path $PSScriptRoot 'build-cache.ps1')
+        $targetRoot = Get-AudioLibTargetDirectory $taskRoot
         $benchmark = Join-Path $targetRoot "$Target/release/search-benchmark.exe"
         if (!(Test-Path -LiteralPath $benchmark -PathType Leaf)) { throw 'Build the Windows release search-benchmark before server validation.' }
         Assert-UnlinkedTree $benchmark

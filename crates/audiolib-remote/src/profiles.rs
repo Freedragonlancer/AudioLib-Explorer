@@ -2,7 +2,7 @@
 //! Server profile operations that change settings and secrets together: the current
 //! single-server dialog saved against the active profile, "use the external address",
 //! switching the active source and removing a profile. Pure functions on owned values;
-//! the caller saves (`AppConfig::save`, [`crate::save_secrets`]) and swaps providers.
+//! the caller saves (`AppConfig::save`, [`crate::save_profile_secrets`]) and swaps providers.
 use crate::secrets::RemoteSecrets;
 use audiolib_core::config::{
     ActiveSource, DataSourceMode, DataSourceSettings, ProfileKind, ServerProfile,

@@ -1601,7 +1601,35 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - 波形：服务器模式下 `GET /audio/{id}/waveform?buckets=<像素宽>&colors=1&start_frame=&end_frame=`（`Accept-Encoding: zstd`，`If-None-Match`），与音频解耦单独绘制：内存缓存（按 revision）→ 磁盘缓存 `cache/waveforms/server/<库>/<键>.json` + `.etag`（有则立即发条件请求，`304` 直接用）→ 无缓存时等音频预缓冲完成（最多 3 秒）再请求，以免拖慢首个声音。服务器拿不到波形时，只有在试听数据已完整在内存中时才本地计算，不会为波形整条下载。
 - 本地专属能力保持本地：播放引擎、ASIO/WASAPI、SoundTouch 试听、命名管道 IPC（仅本机，不监听网络）。
 
-## 12. 待决问题
+## 12. AI 请求转发
+
+`POST /api/v1/ai/models` 和 `POST /api/v1/ai/generate` 复用 AudioLib 服务器连接，独立于当前音库、快照和 Metadata 写权限；库尚未就绪时也可使用。两者始终验证有效的 AudioLib Bearer 令牌，即使普通 LAN 读取无需认证，仍保留同源请求保护。
+
+转发默认禁用。管理员在服务器 TOML 中配置精确协议／Base URL 允许列表，重启后生效。例如（将 `<magpie-host>` 替换为实际部署主机）：
+
+```toml
+max_ai_requests = 4
+
+[[ai_upstreams]]
+protocol = "magpie"
+base_url = "http://<magpie-host>:3425/v1"
+
+[[ai_upstreams]]
+protocol = "chat_completions"
+base_url = "https://api.openai.com/v1"
+```
+
+仅允许匹配的协议、主机、端口和基础路径；Magpie 与 Go 使用供应商传输相同的路径规范化，拒绝百分号、重复斜杠和点路径段的歧义，不跟随重定向。客户端不能选择任意服务器内网地址。
+
+请求为 `audiolib_ai::relay::RelayRequest`：`profile` 只含 `protocol`、`base_url`、`model`、`timeout_seconds`；`api_key` 为临时供应商密钥；`operation.type` 为 `models` 或 `generate`，必须与路由一致。生成另含 `intent`、`layers`、`guidance` 和有界 `session`。不发送本地配置 ID、凭据引用、音频、文件路径或音库 Metadata。密钥不写配置、错误或日志。
+
+请求体最多 64 KiB，供应商完整响应最多 512 KiB。供应商期限 2–600 秒；AI 路由独立期限 620 秒，客户端保留配置期限加 5 秒转发余量，均不继承普通 API 的短超时。并发默认 4，允许配置 1–64；槽位由实际阻塞网络 worker 持有到结束，断开客户端不会提前腾出槽位。调用不自动重试。
+
+成功返回 tagged JSON：`type=models` 含 `models`；`type=generated` 含 `plan`、`input_tokens`、`output_tokens`、可选 `decision`。上游失败返回 HTTP 200 的 `type=error` 与有界 `error.type`（如 `timeout`／`http`），与 AudioLib 自身的 HTTP 状态区分。客户端再次验证模型 ID、查询结构、出处及模式，然后在当前音库核验命中。
+
+AudioLib 拒绝状态：401 为服务器令牌无效；403 `AI_DISABLED`／`AI_UPSTREAM_FORBIDDEN` 为未启用或地址未获允许；400 为无效请求；413 为请求过大；503 `BUSY` 为并发已满，`AI_RELAY_UNAVAILABLE` 为转发 worker 异常。AI 端点不读取音库迁移状态或添加迁移响应头；`UNAVAILABLE` 继续只表示音库未就绪。旧服务器返回 404 时客户端提示升级，不回退直连。
+
+## 13. 待决问题
 
 1. 文件 ID 用数据库 id 还是相对路径？（草案：数据库 id，路径只做显示）
 2. 分页 v1 用 offset 还是游标？（草案：offset，游标预留）
