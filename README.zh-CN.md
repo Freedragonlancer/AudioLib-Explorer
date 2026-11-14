@@ -6,9 +6,9 @@
 
 AudioLib Explorer 是一款本地优先音效库管理软件，使用 Rust 编写，桌面界面基于 [Slint](https://slint.dev)。当前源码将大型 WAV/BWF、MP3、AIFF、FLAC、Ogg Vorbis/OGA 音效库索引到 SQLite（FTS5），支持路径、内嵌标签及厂商 Metadata 搜索，在 Windows 上通过 WASAPI（可选 ASIO）试听，也可以浏览由 `audiolib-server` 提供的远程音效库。macOS arm64 客户端使用 CoreAudio；0.8.4 增加 Linux x64 服务端和 Docker amd64/arm64 离线镜像。
 
-v1.0.0 起，桌面端提供 AI 智能搜索：用自然语言描述声音，得到经当前资料库命中核验的英文关键词，当前 beta 主声音最多 6 个，有有效分层素材时总计最多 8 个（已发布的 v1.0.0 最多 5 个）。离线词表无需账号；云端模型需自备 HTTPS 供应商、API Key 和模型。搜索入口在桌面端；当前服务端可按配置转发供应商请求，`AudioLibCli` 不提供交互式 AI 搜索。详见 [AI 智能搜索](#ai-智能搜索)。
+v1.0.0 起，桌面端提供 AI 智能搜索：用自然语言描述声音，得到经当前资料库命中核验的英文关键词，1.0.1 主声音最多 6 个，有有效分层素材时总计最多 8 个（已发布的 v1.0.0 最多 5 个）。离线词表无需账号；云端模型需自备 HTTPS 供应商、API Key 和模型。搜索入口在桌面端；当前服务端可按配置转发供应商请求，`AudioLibCli` 不提供交互式 AI 搜索。详见 [AI 智能搜索](#ai-智能搜索)。
 
-- **当前正式版：** [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0)，于 2026-11-13 发布；七份正式包、十四项线上资产与 SHA256、实际平台验收及发布后固定安装同步见 [1.0.0 发布记录](doc/Rust_Release_1.0.0.md)。发布产物来自最终 main/tag `1fc6f825`；后续文档与当前 beta 的源码更新不重建或替换这些已发布文件。
+- **当前正式版：** [v1.0.1](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.1)，于 2026-11-14 11:22:02 UTC（北京时间 19:22:02）发布。七份已验收产物来自最终 main/tag `21a0e1c`；十四项线上资产与校验正文、固定安装同步及平台限制见 [1.0.1 发布记录](doc/Rust_Release_1.0.1.md)。历史 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0) 保留源码 `1fc6f825` 及其[原始发布记录](doc/Rust_Release_1.0.0.md)。
 - **HTTP API：** `/api/v1/`（客户端与服务端）
 - **数据库 schema：** 普通本地 writer 为8；服务端显式迁移后为9，使用专用 writer；客户端只读校验快照3..=9。
 - **可写库格式：** 本地 base 为 `ale-s8-cld1-t3-m2-p1-a1`，专用服务端 schema-9 base 为 `ale-s9-cld1-t3-m2-p1-a1-sd1`；首次新源成功写入的同一事务启用必需 `audio_sources:1` 及对应 `-af1` 完整格式，旧客户端须升级，详见[兼容说明](doc/api/Library_Migration_Compatibility.md)。受支持的 schema 3–7 仅作为只读迁移来源。schema 8 使用共享专辑实体，Metadata 保留为原始 JSON TEXT。Metadata 压缩暂缓，快照传输仍使用 zstd。
@@ -32,7 +32,7 @@ v1.0.0 起，桌面端提供 AI 智能搜索：用自然语言描述声音，得
 
 Windows 客户端解压后通过 `Start-AudioLibExplorer.cmd` 启动。Mac 客户端面向 Apple Silicon，校验 ZIP 的 SHA256 后解压得到 `AudioLib Explorer.app`，手动安装；替换旧 app 前先正常退出，并保留原数据目录和资料库。详见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
 
-首次 Mac 分发计划使用 ad-hoc 签名，未经 Apple 公证。原生签名、隔离启动和包边界检查须在 Mac 上通过后才可发布，Windows 验证结果不能替代这些检查。Windows 服务端包自 0.8.5 起提供，见 [Windows 服务端发布](doc/Rust_Windows_Server_Release.md)。独立 Linux arm64 服务端包不发布。Docker 离线包校验后使用 `docker load` 导入；详见 [Linux 与 Docker 交付](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md)。
+当前 Mac 客户端采用 ad-hoc 签名，未经 Apple 公证。原生签名、隔离启动和包边界检查须在 Mac 上通过后才可发布，Windows 验证结果不能替代这些检查。Windows 服务端包自 0.8.5 起提供，见 [Windows 服务端发布](doc/Rust_Windows_Server_Release.md)。独立 Linux arm64 服务端包不发布。Docker 离线包校验后使用 `docker load` 导入；详见 [Linux 与 Docker 交付](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md)。
 
 ## AI 智能搜索
 
@@ -48,13 +48,13 @@ v1.0 同一搜索的详情。选中的声音在列表旁显示内嵌封面、描
 
 v1.0 details for the same search. The selected sound shows its embedded cover, description, and waveform next to the list.
 
-桌面端 AI 智能搜索随 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0) 发布，该正式版最多保留 5 个已核验标签。当前 beta 主声音标签最多 6 个；允许分层且有有效分层素材时，总计最多 8 个，主声音和分层标签以颜色及“主／层”标识区分。“查询全部”搜索当前整组标签，自动搜索仍最多 3 项。搜索入口在桌面端；当前服务端可按配置转发供应商请求，`AudioLibCli` 不提供交互式 AI 搜索。行为与限制见 [实现说明](doc/Rust_AI_Search.md)。[研究与设计](doc/AI_Keyword_Search_Design.md) 保留了 1.0 未交付的概念；其中的 SVG 线框不是应用截图。英文对照见 [README.md](README.md#ai-search)。
+桌面端 AI 智能搜索随 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0) 发布，该正式版最多保留 5 个已核验标签。1.0.1 主声音标签最多 6 个；允许分层且有有效分层素材时，总计最多 8 个，主声音和分层标签以颜色及“主／层”标识区分。“查询全部”搜索当前整组标签，自动搜索仍最多 3 项。搜索入口在桌面端；当前服务端可按配置转发供应商请求，`AudioLibCli` 不提供交互式 AI 搜索。行为与限制见 [实现说明](doc/Rust_AI_Search.md)。[研究与设计](doc/AI_Keyword_Search_Design.md) 保留了 1.0 未交付的概念；其中的 SVG 线框不是应用截图。英文对照见 [README.md](README.md#ai-search)。
 
-在桌面搜索条打开 AI，用 1–500 个字符描述声音，再点 **Tag生成**。离线词表或已配置的模型给出纯文本关键词，再按当前目录、搜索范围和筛选做实际检索；当前 beta 从最多 12 条原始候选中保留有命中的查询：无有效分层时最多 6 条；有有效分层时主声音与素材层总计最多 8 条，主声音本身仍最多 6 条。每条是 1 或 2 个英文词，空格表示 AND。能核验出单词时把它放在第一位。点击标签正文在当前任务搜索；标签上的 **+** 用相同目录、范围和筛选新建一个任务，不再请求模型。**允许分层** 默认勾选，允许按声音设计需求评估冲击、低频、碎片等独立素材层；需要分层且素材层通过命中核验时才扩展到 8 条。普通需求仍最多 6 条；取消后只推荐主声音。**查询全部** 为每个已核验标签各建一个任务，无分层最多 6 个、有分层总计最多 8 个，任务名额不足时整批拒绝。**生成后自动搜索 3 个任务** 默认关闭，开启后仍最多搜索前 3 项。
+在桌面搜索条打开 AI，用 1–500 个字符描述声音，再点 **Tag生成**。离线词表或已配置的模型给出纯文本关键词，再按当前目录、搜索范围和筛选做实际检索；1.0.1 从最多 12 条原始候选中保留有命中的查询：无有效分层时最多 6 条；有有效分层时主声音与素材层总计最多 8 条，主声音本身仍最多 6 条。每条是 1 或 2 个英文词，空格表示 AND。能核验出单词时把它放在第一位。点击标签正文在当前任务搜索；标签上的 **+** 用相同目录、范围和筛选新建一个任务，不再请求模型。**允许分层** 默认勾选，允许按声音设计需求评估冲击、低频、碎片等独立素材层；需要分层且素材层通过命中核验时才扩展到 8 条。普通需求仍最多 6 条；取消后只推荐主声音。**查询全部** 为每个已核验标签各建一个任务，无分层最多 6 个、有分层总计最多 8 个，任务名额不足时整批拒绝。**生成后自动搜索 3 个任务** 默认关闭，开启后仍最多搜索前 3 项。
 
 离线词表版本 `1.0.0-UCS8.2.1`，含 431 条关键词、753 条 UCS 8.2.1 子类和 19 个场景配方，按条目排序，不是通用语言模型，也不需要账号、网络或 API Key。在 **设置 → AI智能搜索…** 选择 **本地词表（离线）**。
 
-云端模型可选。需要自行填写 HTTPS 地址、API Key 和模型 ID；保存配置前可以获取模型列表。协议包括 OpenAI 兼容 Chat、OpenAI Responses、Anthropic Messages、Gemini、Jev TypeSafe、OpenCode Go 和 DeepSeek。HTTP 允许显式 loopback，Magpie 另支持明确配置的私网 IP 网关。服务端转发可选且默认关闭，需要音库服务器认证和明确的上游允许列表。Windows 用当前用户 DPAPI 保存密钥；macOS 与 Linux 只在本次会话保留。当前 beta 移除应用内月请求限制和订阅字段，供应商账单仍由供应商管理。Jev 只在有限的本地候选中选择，也可以返回不确定。接受阈值是应用策略，尚未用音效库校准。1.0 的发布验收没有调用付费供应商账户。
+云端模型可选。需要自行填写 HTTPS 地址、API Key 和模型 ID；保存配置前可以获取模型列表。协议包括 OpenAI 兼容 Chat、OpenAI Responses、Anthropic Messages、Gemini、Jev TypeSafe、OpenCode Go 和 DeepSeek。HTTP 允许显式 loopback，Magpie 另支持明确配置的私网 IP 网关。服务端转发可选且默认关闭，需要音库服务器认证和明确的上游允许列表。Windows 用当前用户 DPAPI 保存密钥；macOS 与 Linux 只在本次会话保留。1.0.1 移除应用内月请求限制和订阅字段，供应商账单仍由供应商管理。Jev 只在有限的本地候选中选择，也可以返回不确定。接受阈值是应用策略，尚未用音效库校准。1.0 的发布验收没有调用付费供应商账户。
 
 请求只包含描述、所选提示词和有限参考摘录。除非写进描述或提示词，否则不发送音频、文件路径或当前音库 Metadata。模型不能提交 SQL，也不能写入资料库。
 
