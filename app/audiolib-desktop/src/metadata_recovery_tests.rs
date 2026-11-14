@@ -703,19 +703,23 @@ fn child_explicit_recovery_exit() {
 }
 
 #[test]
-fn restore_discards_only_current_failed_draft_and_menu_favorite_stays_a_draft() {
+fn restore_discards_only_current_failed_draft_and_favorite_is_not_a_draft() {
     isolated("child_restore_current_draft");
 }
 
 #[test]
-#[ignore = "isolated explicit restore and consistent inspector/menu favorite semantics"]
+#[ignore = "isolated explicit restore; a favorite click is its own write, not an inspector draft"]
 fn child_restore_current_draft() {
     let fixture = fixture(false);
     let before = fixture.controller.metadata.lock().unwrap().sequence;
+    let dirty_before = fixture.ui.get_metadata_dirty();
     fixture.controller.file_action(fixture.file.id, 5);
     assert!(fixture.ui.get_edit_favorite());
-    assert!(fixture.ui.get_metadata_dirty());
-    assert_eq!(fixture.controller.metadata.lock().unwrap().sequence, before);
+    assert_eq!(fixture.ui.get_metadata_dirty(), dirty_before);
+    let sequence = fixture.controller.metadata.lock().unwrap().sequence;
+    assert!(sequence > before);
+    assert!(fixture.controller.wait_metadata(sequence, false).is_ok());
+    assert!(!fixture.ui.get_edit_favorite());
     fixture.controller.metadata.lock().unwrap().edit(
         -9,
         MetadataPatch {

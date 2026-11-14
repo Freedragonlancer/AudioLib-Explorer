@@ -1463,7 +1463,7 @@ export component AppWindow inherits Window {
     }
     // Fixed width: the album column is informational, sorted/filtered from the sidebar.
     private property <length> table-album-size: round(160 * Theme.ui-scale) * 1px;
-    private property <length> table-state-size: Theme.modern-style ? 64px * Theme.ui-scale : 0px;
+    private property <length> table-state-size: (Theme.modern-style ? 64px : 36px) * Theme.ui-scale;
     private property <length> table-columns-size: root.table-state-size + root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size + root.table-tags-size + root.table-album-size;
     private property <length> table-content-size: max(root.table-columns-size, (Theme.modern-style ? studio-result-list.visible-width : result-list.visible-width));
     private property <bool> table-empty: root.rows.length == 0;
@@ -2316,8 +2316,9 @@ export component AppWindow inherits Window {
     in property <string> selected-id: "";
     property <AudioRow> context-file;
     property <FolderRow> context-folder;
-    property <int> filter-count: (root.sample-filter > 0 ? 1 : 0) + (root.bit-filter > 0 ? 1 : 0) + (root.channel-filter > 0 ? 1 : 0) + (root.tagged-only ? 1 : 0) + (root.tag-filter != "" ? max(1, root.tag-term-count) : 0) + (root.color-filter != "" ? 1 : 0) + (root.album-filter != "" ? 1 : 0) + (root.duration-min != "" || root.duration-max != "" ? 1 : 0);
+    property <int> filter-count: (root.sample-filter > 0 ? 1 : 0) + (root.bit-filter > 0 ? 1 : 0) + (root.channel-filter > 0 ? 1 : 0) + (root.favorites-only ? 1 : 0) + (root.tagged-only ? 1 : 0) + (root.tag-filter != "" ? max(1, root.tag-term-count) : 0) + (root.color-filter != "" ? 1 : 0) + (root.album-filter != "" ? 1 : 0) + (root.duration-min != "" || root.duration-max != "" ? 1 : 0);
     callback file-action-requested(string, int);
+    callback favorite-set-requested(string, bool);
     callback folder-action-requested(string, int);
     callback selection-step-requested(int);
     // Keep the native menu state stable when a search crosses an empty page.
@@ -2479,6 +2480,16 @@ export component AppWindow inherits Window {
     }
     function edit-sound-annotations() { root.show-details-page(); root.annotation-editor-visible = true; }
     function file-action(action: int) { root.file-action-requested(root.context-file.id, action); }
+    // Favorites in the folder that is already open. This does not jump to the
+    // library-wide favorites page.
+    public function toggle-folder-favorites() {
+        if root.background-blocked { return; }
+        root.favorites-only = !root.favorites-only;
+        root.filter-requested();
+    }
+    function folder-favorites-label() -> string {
+        return root.favorites-only ? (root.chinese ? "正在只显示当前文件夹的收藏" : "Showing favorites in this folder") : (root.chinese ? "只显示当前文件夹的收藏" : "Show favorites in this folder");
+    }
     public function copy-text(value: string) {
         clipboard-input.text = value;
         clipboard-input.select-all();
@@ -3163,6 +3174,12 @@ main-scroll := ScrollView {
                     Rectangle { y: (parent.height - self.height) / 2; height: 30px * Theme.ui-scale; background: Theme.trough; border-radius: 7px * Theme.ui-scale; border-width: 1px; border-color: Theme.border;
                         accessible-role: none;
                         HorizontalLayout { padding: 2px * Theme.ui-scale; spacing: 2px * Theme.ui-scale;
+                            IconSegment {
+                                icon: root.favorites-only ? @image-url("icons/task-star-filled.svg") : @image-url("icons/star.svg");
+                                label: root.folder-favorites-label(); active: root.favorites-only;
+                                enabled: !root.background-blocked;
+                                clicked => { root.toggle-folder-favorites(); }
+                            }
                             if root.search-tasks.length > root.active-search-task-index: IconSegment {
                                 private property <SearchTaskRow> task: root.search-tasks[root.active-search-task-index];
                                 icon: self.task.favorite ? @image-url("icons/task-star-filled.svg") : @image-url("icons/task-star.svg");
@@ -3195,14 +3212,21 @@ main-scroll := ScrollView {
                         Rectangle { height: 33px * Theme.ui-scale; background: Theme.raised; clip: true;
                             // Both empty and populated results share the header's horizontal position.
                             Rectangle { x: root.table-viewport-x; width: root.table-content-size; height: parent.height;
+                                IconSegment {
+                                    x: 1px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+                                    icon: root.favorites-only ? @image-url("icons/task-star-filled.svg") : @image-url("icons/star.svg");
+                                    label: root.folder-favorites-label();
+                                    active: root.favorites-only; enabled: !root.background-blocked;
+                                    clicked => { root.toggle-folder-favorites(); }
+                                }
                                 if root.list-waveforms-visible: table-wave-header := Text {
-                                    x: 8px * Theme.ui-scale; width: root.table-wave-size - 16px * Theme.ui-scale; height: parent.height;
+                                    x: root.table-state-size + 8px * Theme.ui-scale; width: root.table-wave-size - 16px * Theme.ui-scale; height: parent.height;
                                     text: root.chinese ? "波形" : "WAVE"; font-size: Theme.font(10); color: Theme.dim;
                                     overflow: elide; vertical-alignment: center;
                                     accessible-role: text; accessible-label: root.chinese ? "波形" : "Waveform";
                                 }
                                 table-name-header := TableHeader {
-                                    x: root.table-wave-size; width: root.table-name-size - 8px * Theme.ui-scale; height: parent.height;
+                                    x: root.table-state-size + root.table-wave-size; width: root.table-name-size - 8px * Theme.ui-scale; height: parent.height;
                                     label: root.chinese ? "文件名" : "NAME";
                                     action-label: root.chinese ? "按文件名排序" : "Sort by filename";
                                     help: root.chinese ? "按文件名排序；再次点击切换升序 / 降序" : "Sort by filename; click again to reverse ascending / descending";
@@ -3210,7 +3234,7 @@ main-scroll := ScrollView {
                                     clicked => { root.sort-table(1); } context-requested(position) => { root.show-table-menu(position); }
                                 }
                                 table-duration-header := TableHeader {
-                                    x: root.table-wave-size + root.table-name-size; width: root.table-duration-size - 8px * Theme.ui-scale; height: parent.height;
+                                    x: root.table-state-size + root.table-wave-size + root.table-name-size; width: root.table-duration-size - 8px * Theme.ui-scale; height: parent.height;
                                     label: root.chinese ? "时长" : "TIME";
                                     action-label: root.chinese ? "按时长排序" : "Sort by duration";
                                     help: root.chinese ? "按时长排序；再次点击切换升序 / 降序" : "Sort by duration; click again to reverse ascending / descending";
@@ -3218,7 +3242,7 @@ main-scroll := ScrollView {
                                     clicked => { root.sort-table(2); } context-requested(position) => { root.show-table-menu(position); }
                                 }
                                 table-format-header := TableHeader {
-                                    x: root.table-wave-size + root.table-name-size + root.table-duration-size; width: root.table-format-size - 8px * Theme.ui-scale; height: parent.height;
+                                    x: root.table-state-size + root.table-wave-size + root.table-name-size + root.table-duration-size; width: root.table-format-size - 8px * Theme.ui-scale; height: parent.height;
                                     label: root.chinese ? "格式" : "FORMAT";
                                     action-label: root.chinese ? "按采样率排序" : "Sort by sample rate";
                                     help: root.chinese ? "按采样率排序；再次点击切换升序 / 降序" : "Sort by sample rate; click again to reverse ascending / descending";
@@ -3226,7 +3250,7 @@ main-scroll := ScrollView {
                                     clicked => { root.sort-table(3); } context-requested(position) => { root.show-table-menu(position); }
                                 }
                                 table-channels-header := TableHeader {
-                                    x: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size; width: root.table-channels-size - 8px * Theme.ui-scale; height: parent.height;
+                                    x: root.table-state-size + root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size; width: root.table-channels-size - 8px * Theme.ui-scale; height: parent.height;
                                     label: root.chinese ? "声道" : "CH";
                                     action-label: root.chinese ? "按声道排序" : "Sort by channels";
                                     help: root.chinese ? "按声道数排序；再次点击切换升序 / 降序" : "Sort by channel count; click again to reverse ascending / descending";
@@ -3234,7 +3258,7 @@ main-scroll := ScrollView {
                                     clicked => { root.sort-table(4); } context-requested(position) => { root.show-table-menu(position); }
                                 }
                                 table-tags-header := TableHeader {
-                                    x: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size; width: root.table-tags-size - 8px * Theme.ui-scale; height: parent.height;
+                                    x: root.table-state-size + root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size; width: root.table-tags-size - 8px * Theme.ui-scale; height: parent.height;
                                     label: root.chinese ? "标签" : "TAGS";
                                     action-label: root.chinese ? "按标签排序" : "Sort by tags";
                                     help: root.chinese ? "按素材库标签排序，空白时使用源标签；再次点击切换升序 / 降序" : "Sort by library tags, using source tags when empty; click again to reverse ascending / descending";
@@ -3243,31 +3267,31 @@ main-scroll := ScrollView {
                                 }
                                 // Informational column: albums are filtered from the sidebar.
                                 Text {
-                                    x: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size + root.table-tags-size + 12px * Theme.ui-scale;
+                                    x: root.table-state-size + root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size + root.table-tags-size + 12px * Theme.ui-scale;
                                     width: root.table-album-size - 24px * Theme.ui-scale; height: parent.height;
                                     text: root.chinese ? "专辑" : "ALBUM"; color: Theme.dim; vertical-alignment: center;
                                     font-size: Theme.font(10); overflow: elide;
                                 }
                                 table-name-divider := TableDivider {
-                                    x: root.table-wave-size + root.table-name-size - 8px * Theme.ui-scale; height: parent.height; column-width: root.table-name-size;
+                                    x: root.table-state-size + root.table-wave-size + root.table-name-size - 8px * Theme.ui-scale; height: parent.height; column-width: root.table-name-size;
                                     label: root.chinese ? "调整文件名列宽" : "Resize Filename column"; help: root.table-resize-help; enabled: !root.background-blocked;
                                     resized(width) => { root.resize-table-column(1, width); } finished => { root.table-layout-changed(); }
                                     reset => { root.table-name-width = 360; root.table-layout-changed(); }
                                 }
                                 table-duration-divider := TableDivider {
-                                    x: root.table-wave-size + root.table-name-size + root.table-duration-size - 8px * Theme.ui-scale; height: parent.height; column-width: root.table-duration-size;
+                                    x: root.table-state-size + root.table-wave-size + root.table-name-size + root.table-duration-size - 8px * Theme.ui-scale; height: parent.height; column-width: root.table-duration-size;
                                     label: root.chinese ? "调整时长列宽" : "Resize Duration column"; help: root.table-resize-help; enabled: !root.background-blocked;
                                     resized(width) => { root.resize-table-column(2, width); } finished => { root.table-layout-changed(); }
                                     reset => { root.table-duration-width = 80; root.table-layout-changed(); }
                                 }
                                 table-format-divider := TableDivider {
-                                    x: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size - 8px * Theme.ui-scale; height: parent.height; column-width: root.table-format-size;
+                                    x: root.table-state-size + root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size - 8px * Theme.ui-scale; height: parent.height; column-width: root.table-format-size;
                                     label: root.chinese ? "调整格式列宽" : "Resize Format column"; help: root.table-resize-help; enabled: !root.background-blocked;
                                     resized(width) => { root.resize-table-column(3, width); } finished => { root.table-layout-changed(); }
                                     reset => { root.table-format-width = 100; root.table-layout-changed(); }
                                 }
                                 table-channels-divider := TableDivider {
-                                    x: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size - 8px * Theme.ui-scale; height: parent.height; column-width: root.table-channels-size;
+                                    x: root.table-state-size + root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size - 8px * Theme.ui-scale; height: parent.height; column-width: root.table-channels-size;
                                     label: root.chinese ? "调整声道列宽" : "Resize Channels column"; help: root.table-resize-help; enabled: !root.background-blocked;
                                     resized(width) => { root.resize-table-column(4, width); } finished => { root.table-layout-changed(); }
                                     reset => { root.table-channels-width = 64; root.table-layout-changed(); }
@@ -3336,7 +3360,7 @@ main-scroll := ScrollView {
                                 for row[index] in root.rows: Rectangle { width: root.table-content-size; height: root.classic-result-row-height; accessible-role: list-item; accessible-label: (row.played ? (root.chinese ? "已播放：" : "Played: ") : "") + row.name;
                                     background: row.checked ? (root.selected-row == index ? Theme.selected : Theme.checked) : (result-hit.has-hover ? Theme.hover : (Math.mod(index, 2) == 0 ? Theme.alternate : Theme.panel));
                                     Rectangle { x: 0px; y: 0px; height: parent.height; width: 3px * Theme.ui-scale; background: root.selected-row == index ? Theme.accent : row.marker; }
-                                    HorizontalLayout { alignment: start; padding-left: 12px * Theme.ui-scale; padding-right: 12px * Theme.ui-scale; spacing: 24px * Theme.ui-scale;
+                                    HorizontalLayout { alignment: start; padding-left: root.table-state-size + 12px * Theme.ui-scale; padding-right: 12px * Theme.ui-scale; spacing: 24px * Theme.ui-scale;
                                         if root.list-waveforms-visible: table-wave-cell := Rectangle { width: root.table-wave-size - 24px * Theme.ui-scale;
                                             accessible-role: none;
                                             // Placeholder until loaded; no Waveform is a fainter short bar.
@@ -3371,7 +3395,7 @@ main-scroll := ScrollView {
                                         table-tags-cell := Text { width: root.table-tags-size - 24px * Theme.ui-scale; text: row.tags; color: Theme.dim; vertical-alignment: center; overflow: elide; font-size: Theme.list-font(10); }
                                         table-album-cell := Text { width: root.table-album-size - 24px * Theme.ui-scale; text: row.album; color: Theme.dim; vertical-alignment: center; overflow: elide; font-size: Theme.list-font(10); }
                                     }
-                                    result-hit := TouchArea { mouse-cursor: pointer;
+                                    result-hit := TouchArea { x: root.table-state-size; width: parent.width - root.table-state-size; mouse-cursor: pointer;
                                         property <bool> toggle-selection;
                                         property <bool> range-selection;
                                         // One drag-out request per press, after a small movement threshold.
@@ -3397,6 +3421,12 @@ main-scroll := ScrollView {
                                             }
                                             if event.button == PointerEventButton.right && event.kind == PointerEventKind.down { results-focus.focus(); root.show-file-menu(row, {x: self.absolute-position.x + self.mouse-x, y: self.absolute-position.y + self.mouse-y}); }
                                         }
+                                    }
+                                    IconSegment { x: 2px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+                                        icon: row.favorite ? @image-url("icons/task-star-filled.svg") : @image-url("icons/star.svg"); active: row.favorite;
+                                        label: (row.favorite ? (root.chinese ? "取消收藏：" : "Unfavorite: ") : (root.chinese ? "收藏：" : "Favorite: ")) + row.name;
+                                        enabled: !root.background-blocked && !root.remote-writes-blocked && !root.metadata-writes-blocked;
+                                        clicked => { root.favorite-set-requested(row.id, !row.favorite); }
                                     }
                                 }
                             }
@@ -3574,7 +3604,7 @@ main-scroll := ScrollView {
                                     enabled: !root.background-blocked && !root.remote-writes-blocked && !root.metadata-writes-blocked;
                                     glyph: root.edit-favorite ? "★" : "☆"; glyph-color: root.edit-favorite ? Theme.accent : Theme.dim;
                                     label: root.edit-favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "收藏" : "Add to favorites");
-                                    clicked => { root.edit-favorite = !root.edit-favorite; root.metadata-dirty = true; root.metadata-edited(); }
+                                    clicked => { root.edit-favorite = !root.edit-favorite; root.favorite-set-requested(root.selected-id, root.edit-favorite); }
                                 }
                             }
                             Label { height: root.short-layout ? 16px * Theme.ui-scale : 28px * Theme.ui-scale; text: root.selected-format; color: Theme.accent; wrap: word-wrap; overflow: elide; font-size: Theme.font(10); }
@@ -4026,6 +4056,12 @@ main-scroll := ScrollView {
                         Rectangle { y: (parent.height - self.height) / 2; height: 30px * Theme.ui-scale; background: Theme.trough; border-radius: 7px * Theme.ui-scale; border-width: 1px; border-color: Theme.border;
                             accessible-role: none;
                             HorizontalLayout { padding: 2px * Theme.ui-scale; spacing: 2px * Theme.ui-scale;
+                                StudioIconSegment {
+                                    icon: root.favorites-only ? @image-url("icons/task-star-filled.svg") : @image-url("icons/star.svg");
+                                    label: root.folder-favorites-label(); active: root.favorites-only;
+                                    enabled: !root.background-blocked;
+                                    clicked => { root.toggle-folder-favorites(); }
+                                }
                                 if root.search-tasks.length > root.active-search-task-index: StudioIconSegment {
                                     private property <SearchTaskRow> task: root.search-tasks[root.active-search-task-index];
                                     icon: self.task.favorite ? @image-url("icons/task-star-filled.svg") : @image-url("icons/task-star.svg");
@@ -4047,7 +4083,13 @@ main-scroll := ScrollView {
                         Rectangle { height: 32px * Theme.ui-scale; background: Theme.table-header-surface; clip: true;
                             // Both empty and populated results share the header's horizontal position.
                             Rectangle { x: root.table-viewport-x; width: root.table-content-size; height: parent.height;
-                                Image { x: 10px * Theme.ui-scale; y: (parent.height - self.height) / 2; width: 16px * Theme.ui-scale; height: self.width; source: @image-url("icons/star.svg"); colorize: Theme.dim; accessible-role: none; }
+                                StudioIconSegment {
+                                    x: 2px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+                                    icon: root.favorites-only ? @image-url("icons/task-star-filled.svg") : @image-url("icons/star.svg");
+                                    label: root.folder-favorites-label(); active: root.favorites-only;
+                                    enabled: !root.background-blocked;
+                                    clicked => { root.toggle-folder-favorites(); }
+                                }
                                 if root.list-waveforms-visible: studio-table-wave-header := Text {
                                     x: root.table-state-size + root.table-name-size + 12px * Theme.ui-scale; width: root.table-wave-size - 24px * Theme.ui-scale; height: parent.height;
                                     text: root.chinese ? "波形" : "WAVE"; font-size: Theme.font(10); color: Theme.dim;
@@ -4215,7 +4257,7 @@ main-scroll := ScrollView {
                                     }
                                     Tooltip { text: @markdown("\{row.name}\n\{row.file-path}"); }
 
-                                    studio-result-hit := TouchArea { mouse-cursor: pointer;
+                                    studio-result-hit := TouchArea { x: root.table-state-size; width: parent.width - root.table-state-size; mouse-cursor: pointer;
                                         property <bool> toggle-selection;
                                         property <bool> range-selection;
                                         // One drag-out request per press, after a small movement threshold.
@@ -4246,7 +4288,7 @@ main-scroll := ScrollView {
                                         icon: row.favorite ? @image-url("icons/task-star-filled.svg") : @image-url("icons/star.svg"); active: row.favorite; highlighted: root.selected-row == index; indicator-only: true;
                                         label: (row.favorite ? (root.chinese ? "取消收藏：" : "Unfavorite: ") : (root.chinese ? "收藏：" : "Favorite: ")) + row.name;
                                         enabled: !root.background-blocked && !root.remote-writes-blocked && !root.metadata-writes-blocked;
-                                        clicked => { root.file-action-requested(row.id, 5); }
+                                        clicked => { root.favorite-set-requested(row.id, !row.favorite); }
                                     }
                                     if root.playback-path != "" && row.file-path == root.playback-path && (root.playing || root.playback-state == 4): StudioIconSegment { x: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; width: 30px * Theme.ui-scale; height: 28px * Theme.ui-scale;
                                         icon: root.playback-state == 4 ? @image-url("icons/pause.svg") : @image-url("icons/play.svg"); active: true; indicator-only: true;
@@ -4428,7 +4470,7 @@ main-scroll := ScrollView {
                                     enabled: !root.background-blocked && !root.remote-writes-blocked && !root.metadata-writes-blocked;
                                     glyph: root.edit-favorite ? "★" : "☆"; glyph-color: root.edit-favorite ? Theme.accent : Theme.dim;
                                     label: root.edit-favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "收藏" : "Add to favorites");
-                                    clicked => { root.edit-favorite = !root.edit-favorite; root.metadata-dirty = true; root.metadata-edited(); }
+                                    clicked => { root.edit-favorite = !root.edit-favorite; root.favorite-set-requested(root.selected-id, root.edit-favorite); }
                                 }
                             }
                             Rectangle { height: 1px; background: Theme.border; }
