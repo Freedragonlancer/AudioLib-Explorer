@@ -308,12 +308,11 @@ export component AiSearchPanel inherits Rectangle {
     in property <int> saved-protocol: -1;
     private property <bool> advanced: false;
     property <bool> key-reusable: root.saved-key && root.endpoint == root.saved-endpoint && root.protocol == root.saved-protocol;
-    public function profile-edited() { root.dirty = true; root.status = ""; root.error = false; }
+    public function profile-edited() { root.dirty = true; root.status = ""; root.error = false; root.action(26,0); }
     in-out property <bool> clear-key;
-    in-out property <bool> subscription;
     in-out property <bool> go-authorized;
-    in-out property <int> request-cap: 1000;
-    in-out property <int> timeout: 15;
+    in-out property <int> request-mode: 0;
+    in-out property <int> timeout: 180;
     in-out property <[string]> models;
     in property <string> usage;
     // 0 open, 1 close, 2 generate, 3 cancel/invalidate, 4 profile selection,
@@ -393,13 +392,13 @@ export component AiSearchPanel inherits Rectangle {
         if root.settings && root.settings-page == 0: ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
             VerticalLayout { spacing: 8px * Theme.ui-scale;
                 HorizontalLayout {
-                    ComboBox { model: root.providers; current-index <=> root.provider-index; enabled: !root.busy; selected(value) => { root.action(4,self.current-index); } }
-                    Button { text: root.chinese ? "新增" : "New"; enabled: !root.busy; clicked => { root.action(9,0); } }
+                    ComboBox { model: root.providers; current-index <=> root.provider-index; accessible-label: root.chinese ? "AI 供应商预设" : "AI provider preset"; enabled: !root.busy; selected(value) => { root.action(4,self.current-index); } }
+                    Button { text: root.chinese ? "新增" : "New"; accessible-label: root.chinese ? "新增供应商预设" : "New provider preset"; enabled: !root.busy; clicked => { root.action(9,0); } }
                 }
                 Text { text: root.chinese ? "配置名称" : "Profile name"; color: Theme.dim; font-size: Theme.font(12); }
                 LineEdit { input-label: "AI profile name"; text <=> root.profile-name; enabled: !root.busy; placeholder-text: (root.chinese ? "留空自动命名：" : "Automatic name: ") + root.auto-name; edited => { root.profile-edited(); } }
                 Text { text: root.chinese ? "1 · 供应商与地址" : "1 · Provider and endpoint"; color: Theme.accent; font-size: Theme.font(12); font-weight: 600; }
-                ComboBox { model: ["OpenAI compatible / Chat", "OpenAI Responses", "Anthropic Messages", "Google Gemini", "Jev TypeSafe", "OpenCode Go", root.chinese ? "DeepSeek 官方" : "DeepSeek Official"];
+                ComboBox { model: ["OpenAI compatible / Chat", "OpenAI Responses", "Anthropic Messages", "Google Gemini", "Jev TypeSafe", "OpenCode Go", root.chinese ? "DeepSeek 官方" : "DeepSeek Official", "Magpie"];
                     current-index <=> root.protocol; enabled: !root.busy; selected(value) => { root.action(12,self.current-index); }
                 }
                 Text { text: "Base URL"; color: Theme.dim; font-size: Theme.font(12); }
@@ -407,6 +406,7 @@ export component AiSearchPanel inherits Rectangle {
                 Text { text: root.chinese ? "2 · API Key" : "2 · API key"; color: Theme.accent; font-size: Theme.font(12); font-weight: 600; }
                 Text { text: root.clear-key ? (root.chinese ? "保存后将移除密钥" : "Key will be removed when saved") : root.key != "" ? (root.chinese ? "新密钥尚未保存" : "New key has not been saved") : root.key-reusable ? (root.chinese ? "密钥已保存（隐藏显示），留空即可复用" : "Key saved (hidden); leave blank to reuse") : root.saved-key ? (root.chinese ? "地址或协议已更改，请重新填写密钥" : "Endpoint or protocol changed; re-enter the key") : (root.chinese ? "尚未保存密钥" : "No saved key"); color: root.key-reusable && !root.clear-key ? Theme.accent : Theme.dim; font-size: Theme.font(11); wrap: word-wrap; }
                 LineEdit { input-label: "AI API Key"; text <=> root.key; input-type: password; enabled: !root.busy; placeholder-text: root.key-reusable ? (root.chinese ? "已保存；填写可替换" : "Saved; enter a replacement") : (root.chinese ? "粘贴供应商 API Key" : "Paste the provider API key"); edited => { root.models = []; root.profile-edited(); } }
+                if root.protocol == 7: Text { text: root.chinese ? "先启动 Magpie；端口可在地址中修改。本机网关通常可留空密钥；共享或启用认证的网关需填写 Gateway Key。" : "Start Magpie first; change the port in Base URL if needed. Local gateways usually accept a blank key; shared or authenticated gateways need a gateway key."; color: Theme.dim; font-size: Theme.font(11); wrap: word-wrap; }
                 CheckBox { text: root.chinese ? "清除已保存密钥" : "Remove saved key"; checked <=> root.clear-key; enabled: !root.busy; toggled => { root.profile-edited(); } }
                 Text { text: root.chinese ? "3 · 模型与测试" : "3 · Model and test"; color: Theme.accent; font-size: Theme.font(12); font-weight: 600; }
                 LineEdit { input-label: "AI Model ID"; text <=> root.model; enabled: !root.busy; placeholder-text: root.chinese ? "从列表选择或直接填写模型 ID" : "Select or enter a model ID"; edited => { root.profile-edited(); } }
@@ -416,15 +416,18 @@ export component AiSearchPanel inherits Rectangle {
                 }
                 if root.models.length > 0: ComboBox { model: root.models; enabled: !root.busy; selected(value) => { root.model = value; root.profile-edited(); } }
                 Text { text: root.chinese ? "无需先保存或填写模型 ID；获取后选择模型，再保存配置。" : "No saved profile or model ID needed. Fetch, select a model, then save."; color: Theme.muted; font-size: Theme.font(11); wrap: word-wrap; }
-                Text { text: root.chinese ? "测试调用会发送固定示例并消耗供应商额度；已保存配置计入本地请求上限。" : "Model testing sends a fixed example and uses provider quota; saved profiles count toward the local request cap."; color: Theme.muted; font-size: Theme.font(11); wrap: word-wrap; }
+                Text { text: root.chinese ? "测试调用会发送固定示例并消耗供应商额度。" : "Model testing sends a fixed example and uses provider quota."; color: Theme.muted; font-size: Theme.font(11); wrap: word-wrap; }
                 Button { text: root.advanced ? (root.chinese ? "收起高级选项" : "Hide advanced options") : (root.chinese ? "高级选项" : "Advanced options"); clicked => { root.advanced = !root.advanced; } }
                 if root.advanced: HorizontalLayout {
-                    Text { text: root.chinese ? "每月请求上限" : "Monthly request cap"; color: Theme.dim; font-size: Theme.font(12); }
-                    SpinBox { value <=> root.request-cap; minimum: 1; maximum: 100000; enabled: !root.busy; edited(value) => { root.profile-edited(); } }
                     Text { text: root.chinese ? "超时 / 秒" : "Timeout / s"; color: Theme.dim; font-size: Theme.font(12); }
-                    SpinBox { value <=> root.timeout; minimum: 2; maximum: 60; enabled: !root.busy; edited(value) => { root.profile-edited(); } }
+                    SpinBox { value <=> root.timeout; minimum: 2; maximum: 600; accessible-label: root.chinese ? "AI 超时秒数" : "AI timeout seconds"; enabled: !root.busy; edited(value) => { root.profile-edited(); } }
                 }
-                if root.advanced: CheckBox { text: root.chinese ? "订阅计划（仅标记，不代扣费）" : "Subscription plan (label only)"; checked <=> root.subscription; enabled: !root.busy; toggled => { root.profile-edited(); } }
+                if root.advanced: Text { text: root.chinese ? "默认 180 秒，最多 600 秒；修改后保存配置" : "Default 180 seconds, maximum 600; save the profile after changes."; color: Theme.muted; font-size: Theme.font(11); wrap: word-wrap; }
+                if root.advanced: HorizontalLayout {
+                    Text { text: root.chinese ? "AI 请求模式" : "AI request mode"; color: Theme.dim; font-size: Theme.font(12); }
+                    ComboBox { min-width: 0px; horizontal-stretch: 1; model: root.chinese ? ["客户端", "服务器"] : ["Client", "Server"]; current-index <=> root.request-mode; accessible-label: root.chinese ? "AI 请求模式" : "AI request mode"; enabled: !root.busy; selected(value) => { root.profile-edited(); } }
+                }
+                if root.advanced: Text { text: root.request-mode == 1 ? (root.chinese ? "复用当前或最近使用的音库服务器，转发模型列表、测试和生成；供应商密钥随请求发送给该服务器。需服务器允许此供应商地址。" : "Uses the current or most recent library server for models, tests and generation. The provider key is sent with each request. The server must allow this provider endpoint.") : (root.chinese ? "由本机直接请求 AI 供应商。" : "This device calls the AI provider directly."); color: Theme.muted; font-size: Theme.font(11); wrap: word-wrap; }
                 if root.protocol == 5: Text { text: root.chinese ? "Go：使用 Console 中已订阅工作区的个人 API Key。官方定位为编码 Agent 服务，是否接受音效检索请求由供应商决定。公开模型列表不验证订阅。" : "Go: use a personal API key from a subscribed Console workspace. Go is intended for coding agents; acceptance of sound-search requests is up to the provider. Its public catalogue does not verify subscriptions."; color: Theme.dim; font-size: Theme.font(11); wrap: word-wrap; }
                 if root.protocol == 4: Text { text: root.chinese ? "Jev：Choice 选配方、Score 评估匹配、Noul 判断是否需澄清。低置信度不自动采用。" : "Jev: Choice selects recipes, Score rates fit, Noul estimates clarification. Uncertain decisions are not applied."; color: Theme.dim; wrap: word-wrap; font-size: Theme.font(11); }
                 Text { text: root.usage; color: Theme.muted; font-size: Theme.font(11); wrap: word-wrap; }

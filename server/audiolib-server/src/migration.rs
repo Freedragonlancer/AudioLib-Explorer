@@ -176,6 +176,16 @@ pub(crate) async fn headers(
     mut request: Request,
     next: Next,
 ) -> Response {
+    // AI is independent of the served library. Even a status read can wait on a
+    // sleeping volume or the report publication lease, before route auth/timeouts.
+    // Keep this exception exact so library and administrative routes retain their
+    // migration admission and canonical status headers.
+    if matches!(
+        request.uri().path(),
+        "/api/v1/ai/models" | "/api/v1/ai/generate"
+    ) {
+        return next.run(request).await;
+    }
     let report = match service.app_state() {
         Ok(state) => tokio::task::spawn_blocking(move || {
             migration9::status(state.provider().database_path())

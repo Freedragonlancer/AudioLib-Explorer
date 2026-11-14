@@ -19,6 +19,7 @@ $CleanCheckout = !$LegacyImport
 try {
 if ($PublishedReleaseReport -and $PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Published release validation requires pwsh (PowerShell 7.3 or newer).' }
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+. (Join-Path $PSScriptRoot 'build-cache.ps1')
 $binaryRoot = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $taskRoot $BinaryDirectory }))
 $cli = Join-Path $binaryRoot 'AudioLibCli.exe'
 $desktop = Join-Path $binaryRoot 'AudioLibExplorer.exe'
@@ -91,8 +92,7 @@ try {
         $identityCheck = 'packaged EXE hashes match published release report'
     } else {
         if ($ExpectedTag -or $ExpectedCommit) { throw 'Expected tag/commit requires a published release report.' }
-        # Same release output as package-portable.ps1: CARGO_TARGET_DIR when set, else <repo>/target.
-        $targetRoot = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) { $env:CARGO_TARGET_DIR } else { Join-Path $taskRoot $env:CARGO_TARGET_DIR })) } else { Join-Path $taskRoot 'target' }
+        $targetRoot = Get-AudioLibTargetDirectory $taskRoot
         foreach ($binary in @('AudioLibExplorer.exe','AudioLibCli.exe')) {
             $sourceHash = (Get-FileHash -LiteralPath (Join-Path $targetRoot ('x86_64-pc-windows-msvc/release/' + $binary)) -Algorithm SHA256).Hash
             $packageHash = (Get-FileHash -LiteralPath (Join-Path $binaryRoot $binary) -Algorithm SHA256).Hash

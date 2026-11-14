@@ -2,6 +2,533 @@
 //! Real controller callbacks with an owned library and no external provider traffic.
 use super::*;
 
+#[test]
+fn new_ai_profiles_stay_unsaved_until_saved_and_preserve_their_drafts() {
+    isolated("ai_search::child_unsaved_provider");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_unsaved_provider() {
+    use audiolib_ai::{config::Profile, storage::ProfileStore};
+    use i_slint_backend_testing::ElementHandle;
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    let preferences = fixture.root.join("preferences");
+    let mut store = ProfileStore::open(&preferences).unwrap();
+    store
+        .save(
+            Profile {
+                name: "Existing profile".into(),
+                model: "saved-model".into(),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    let retained = store.selected().unwrap().clone();
+    drop(store);
+    ui.show().unwrap();
+    ui.invoke_ai_action(22, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert_eq!(ui.get_ai_provider_index(), 1);
+    let new = ElementHandle::find_by_accessible_label(ui, "New provider preset")
+        .next()
+        .unwrap();
+    // This fixture uses the real clock; mock_single_click advances only Slint's
+    // clock and would make the next real-time timer appear to move backwards.
+    let origin = new.absolute_position();
+    let size = new.size();
+    let position =
+        slint::LogicalPosition::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
+    ui.window()
+        .dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+    ui.window()
+        .dispatch_event(slint::platform::WindowEvent::PointerPressed {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        });
+    ui.window()
+        .dispatch_event(slint::platform::WindowEvent::PointerReleased {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        });
+    wait_for(ui, |ui| ui.get_ai_provider_index() == 2);
+    let selector = ElementHandle::find_by_accessible_label(ui, "AI provider preset")
+        .next()
+        .unwrap();
+    assert_eq!(selector.accessible_value().as_deref(), Some("Unsaved"));
+    assert!(ui.get_ai_profile_id().is_empty());
+    assert!(ui.get_ai_selected_model().is_empty());
+    assert!(ui.get_ai_dirty());
+    ui.set_ai_profile_name("Retained draft".into());
+    ui.set_ai_model("draft-model".into());
+    ui.set_ai_key("owned-unsaved-key".into());
+    // Real ComboBox binding writes the requested index before its callback.
+    ui.set_ai_provider_index(0);
+    ui.invoke_ai_action(4, 0);
+    assert!(ui.get_ai_model().is_empty());
+    assert!(ui.get_ai_key().is_empty());
+    ui.set_ai_provider_index(2);
+    ui.invoke_ai_action(4, 2);
+    assert_eq!(ui.get_ai_profile_name(), "Retained draft");
+    assert_eq!(ui.get_ai_model(), "draft-model");
+    assert_eq!(ui.get_ai_key(), "owned-unsaved-key");
+    ui.invoke_ai_action(1, 0);
+    ui.invoke_ai_action(22, 0);
+    assert_eq!(ui.get_ai_provider_index(), 2);
+    assert_eq!(ui.get_ai_model(), "draft-model");
+    ui.set_chinese(true);
+    ui.invoke_language_requested(true);
+    let ready = fixture.controller.clone();
+    wait_for(ui, move |ui| {
+        !ui.get_searching()
+            && fully_published(&ready)
+            && ui.get_ai_providers().row_data(2).as_deref() == Some("未保存")
+    });
+    assert_eq!(ui.get_ai_key(), "owned-unsaved-key");
+    ui.set_ai_prompt("wind".into());
+    ui.invoke_ai_action(2, 0);
+    assert!(ui.get_ai_error());
+    assert!(ui.get_ai_status().contains("请先保存"));
+    assert!(!ui.get_ai_busy());
+    assert_eq!(
+        ProfileStore::open(&preferences).unwrap().profiles(),
+        std::slice::from_ref(&retained)
+    );
+    ui.set_ai_settings(true);
+    ui.invoke_ai_action(18, 0);
+    assert_eq!(ui.get_ai_provider_index(), 2);
+    assert!(ui.get_ai_model().is_empty());
+    assert!(ui.get_ai_key().is_empty());
+    ui.set_ai_profile_name("New saved profile".into());
+    ui.set_ai_model("new-model".into());
+    ui.invoke_ai_action(8, 0);
+    wait_for(ui, |ui| {
+        !ui.get_ai_busy() && !ui.get_ai_profile_id().is_empty()
+    });
+    assert_eq!(ui.get_ai_provider_index(), 2);
+    assert_eq!(
+        ui.get_ai_providers().row_data(2).as_deref(),
+        Some("New saved profile")
+    );
+    assert_eq!(ui.get_ai_selected_model(), "new-model");
+    assert_eq!(
+        ProfileStore::open(&preferences).unwrap().profiles()[0],
+        retained
+    );
+    ui.invoke_ai_action(10, 0);
+    wait_for(ui, |ui| {
+        !ui.get_ai_busy() && ui.get_ai_provider_index() == 0
+    });
+    assert_eq!(ui.get_ai_providers().row_count(), 3);
+    assert_eq!(
+        ui.get_ai_providers().row_data(0).as_deref(),
+        Some("本地词表（离线）")
+    );
+    ui.set_ai_model("implicit-new-draft".into());
+    ui.invoke_ai_action(26, 0);
+    assert_eq!(ui.get_ai_provider_index(), 2);
+    assert_eq!(ui.get_ai_model(), "implicit-new-draft");
+    ui.set_ai_provider_index(1);
+    ui.invoke_ai_action(4, 1);
+    ui.set_ai_model("edited-saved-model".into());
+    ui.invoke_ai_action(26, 0);
+    assert_eq!(ui.get_ai_provider_index(), 1);
+    assert_eq!(ui.get_ai_selected_model(), "saved-model");
+    finish(&fixture);
+}
+
+#[test]
+fn provider_timeouts_show_the_configured_deadline_and_how_to_raise_it() {
+    isolated("ai_search::child_provider_timeout_notice");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_provider_timeout_notice() {
+    use std::io::Read;
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    ui.invoke_ai_action(22, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    ui.invoke_ai_action(9, 0);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    ui.set_ai_endpoint(format!("http://{}", listener.local_addr().unwrap()).into());
+    ui.set_ai_model("owned-slow-model".into());
+    ui.set_ai_timeout(2);
+    let worker = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        std::thread::sleep(Duration::from_millis(2200));
+    });
+    ui.invoke_ai_action(17, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_error());
+    assert!(ui.get_ai_status().contains("after 2 seconds"));
+    assert!(ui.get_ai_status().contains("advanced options"));
+    assert!(ui.get_ai_status().contains("600"));
+    assert!(
+        ui.get_ai_providers()
+            .row_data(ui.get_ai_provider_index().max(0) as usize)
+            .as_deref()
+            == Some("Unsaved")
+    );
+    assert!(!fixture.root.join("preferences/ai/profiles.json").exists());
+    worker.join().unwrap();
+    finish(&fixture);
+}
+
+#[test]
+fn ai_server_mode_forwards_models_probes_and_generation_without_switching_library() {
+    isolated("ai_search::child_ai_server_mode");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_ai_server_mode() {
+    use audiolib_ai::relay::{RelayRequest, RelayResponse};
+    use audiolib_ai::{
+        AiError,
+        config::{Profile, RequestMode},
+        provider,
+        reference::ReferenceIndex,
+        storage::ProfileStore,
+    };
+    use std::io::{Read, Write};
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    let relay = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let provider = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    provider.set_nonblocking(true).unwrap();
+    let relay_url = format!("http://{}", relay.local_addr().unwrap());
+    let provider_url = format!("http://{}/v1", provider.local_addr().unwrap());
+    let (root, settings) = {
+        use audiolib_core::profiles::ActiveSource;
+        let mut config = fixture.controller.config.lock().unwrap();
+        let settings = &mut config.data_source;
+        let id = settings
+            .add_profile("AI relay fixture", &relay_url)
+            .unwrap();
+        settings
+            .set_active(&ActiveSource::Profile(id.clone()))
+            .unwrap();
+        settings.set_active(&ActiveSource::Local).unwrap();
+        let settings = settings.clone();
+        let root = config.data_root();
+        let mut secrets = audiolib_remote::RemoteSecrets::default();
+        secrets.set_token(&id, "owned-server-token");
+        audiolib_remote::save_secrets(&root, &secrets).unwrap();
+        (root, settings)
+    };
+    let before = serde_json::to_value(&settings).unwrap();
+    let retained_provider = fixture.controller.provider();
+    let (sent, received) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        relay.set_nonblocking(true).unwrap();
+        for index in 0..4 {
+            let started = Instant::now();
+            let mut stream = loop {
+                match relay.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(started.elapsed() < Duration::from_secs(10));
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("owned relay accept: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8(head).unwrap();
+            assert!(
+                head.to_ascii_lowercase()
+                    .contains("authorization: bearer owned-server-token")
+            );
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            let request: RelayRequest = serde_json::from_slice(&body).unwrap();
+            request.validate().unwrap();
+            assert_eq!(request.profile.timeout_seconds, 180);
+            let response = if index == 0 {
+                assert!(head.starts_with("POST /api/v1/ai/models "));
+                RelayResponse::from_models(Ok(vec!["owned-model".into()]))
+            } else {
+                if index < 3 {
+                    assert!(head.starts_with("POST /api/v1/ai/generate "));
+                } else {
+                    assert!(head.starts_with("POST /api/v1/ai/models "));
+                }
+                RelayResponse::from_output(Ok(provider::Output {
+                    plan: ReferenceIndex::embedded()
+                        .local_plan("wind", false)
+                        .unwrap(),
+                    input_tokens: 7,
+                    output_tokens: 3,
+                    decision: None,
+                }))
+            };
+            let body = serde_json::to_vec(&response).unwrap();
+            let status = if index == 3 {
+                "404 Not Found"
+            } else {
+                "200 OK"
+            };
+            write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            stream.write_all(&body).unwrap();
+            sent.send(()).unwrap();
+        }
+    });
+    ui.invoke_ai_action(22, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    ui.invoke_ai_action(9, 0);
+    assert_eq!(ui.get_ai_request_mode(), 0);
+    assert_eq!(ui.get_ai_timeout(), 180);
+    ui.set_ai_request_mode(1);
+    ui.set_ai_endpoint(provider_url.into());
+    ui.set_ai_key("owned-provider-key".into());
+    ui.invoke_ai_action(11, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_error(), "{}", ui.get_ai_status());
+    assert_eq!(
+        ui.get_ai_models().row_data(0).as_deref(),
+        Some("owned-model")
+    );
+    ui.set_ai_model("owned-model".into());
+    ui.invoke_ai_action(17, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_error(), "{}", ui.get_ai_status());
+    ui.invoke_ai_action(8, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    let stored = ProfileStore::open(&root).unwrap();
+    assert_eq!(stored.selected().unwrap().request_mode, RequestMode::Server);
+    drop(stored);
+    ui.set_ai_auto_search(false);
+    ui.set_ai_prompt("wind".into());
+    ui.invoke_ai_action(2, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_error(), "{}", ui.get_ai_status());
+    assert!(ui.get_ai_rows().row_count() > 0);
+    // An older server must show its own failure, never contact the provider here.
+    ui.invoke_ai_action(11, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_error());
+    assert!(ui.get_ai_status().contains("upgrade the server"));
+    worker.join().unwrap();
+    assert_eq!(received.try_iter().count(), 4);
+    assert_eq!(
+        provider.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert!(Arc::ptr_eq(
+        &retained_provider,
+        &fixture.controller.provider()
+    ));
+    assert_eq!(
+        serde_json::to_value(&fixture.controller.config.lock().unwrap().data_source).unwrap(),
+        before
+    );
+    assert!(!fixture.controller.remote_mode.load(Ordering::Acquire));
+    // A queued admission must not combine its old endpoint with credentials
+    // saved for the same profile's replacement server.
+    {
+        let mut config = fixture.controller.config.lock().unwrap();
+        let id = config.data_source.legacy_profile_id().unwrap();
+        config.data_source.profile_mut(&id).unwrap().server_url =
+            format!("http://{}", provider.local_addr().unwrap());
+        config.data_source.server_url = config.data_source.profile(&id).unwrap().server_url.clone();
+        let mut secrets = audiolib_remote::RemoteSecrets::default();
+        secrets.set_token(&id, "owned-replacement-token");
+        audiolib_remote::save_secrets(&root, &secrets).unwrap();
+    }
+    let admitted = Profile {
+        request_mode: RequestMode::Server,
+        ..Default::default()
+    };
+    assert!(matches!(
+        fixture.controller.ai_transport(&admitted, &root, &settings),
+        Err(AiError::Cancelled)
+    ));
+    assert_eq!(
+        provider.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    finish(&fixture);
+}
+
+#[test]
+fn ai_server_mode_requires_a_configured_server_without_direct_fallback() {
+    isolated("ai_search::child_ai_server_missing");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_ai_server_missing() {
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    let provider = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    provider.set_nonblocking(true).unwrap();
+    ui.invoke_ai_action(22, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    ui.invoke_ai_action(9, 0);
+    ui.set_ai_request_mode(1);
+    ui.set_ai_endpoint(format!("http://{}/v1", provider.local_addr().unwrap()).into());
+    ui.set_ai_model("owned-model".into());
+    for action in [11, 17, 8, 2] {
+        ui.set_ai_prompt("wind".into());
+        ui.invoke_ai_action(action, 0);
+        wait_for(ui, |ui| !ui.get_ai_busy());
+        if action == 8 {
+            assert!(!ui.get_ai_error(), "{}", ui.get_ai_status());
+        } else {
+            assert!(ui.get_ai_error());
+            assert!(ui.get_ai_status().contains("Configure an AudioLib server"));
+        }
+    }
+    assert_eq!(
+        provider.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    finish(&fixture);
+}
+
+#[test]
+fn ai_relay_never_forwards_a_token_from_a_failed_server_settings_save() {
+    isolated("ai_search::child_ai_relay_failed_settings_save");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_ai_relay_failed_settings_save() {
+    use audiolib_core::config::ActiveSource;
+    use audiolib_remote::{RemoteSecrets, load_profile_secrets, save_profile_secrets};
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    let old_server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let replacement_server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    old_server.set_nonblocking(true).unwrap();
+    replacement_server.set_nonblocking(true).unwrap();
+    let (root, committed, id, unrelated) = {
+        let mut config = fixture.controller.config.lock().unwrap();
+        let id = config
+            .data_source
+            .add_profile(
+                "Committed server",
+                &format!("http://{}", old_server.local_addr().unwrap()),
+            )
+            .unwrap();
+        config
+            .data_source
+            .set_active(&ActiveSource::Profile(id.clone()))
+            .unwrap();
+        config.data_source.set_active(&ActiveSource::Local).unwrap();
+        let unrelated = config
+            .data_source
+            .add_profile("Unrelated server", "https://unrelated.example.test/Audio")
+            .unwrap();
+        config.save().unwrap();
+        (
+            config.data_root(),
+            config.data_source.clone(),
+            id,
+            unrelated,
+        )
+    };
+    let mut secrets = RemoteSecrets::default();
+    secrets.set_token(&id, "owned-committed-token");
+    secrets.set_token(&unrelated, "owned-unrelated-token");
+    save_profile_secrets(&root, &committed, &mut secrets).unwrap();
+    let mut edited = committed.clone();
+    let replacement_url = format!("http://{}", replacement_server.local_addr().unwrap());
+    edited.profile_mut(&id).unwrap().server_url = replacement_url.clone();
+    edited.server_url = replacement_url;
+    secrets.set_token(&id, "owned-replacement-token");
+    // Both paths are in this fixture's preferences directory. A directory in
+    // place of settings.json deterministically rejects its atomic replacement,
+    // while remote/secrets.bin remains writable on Windows and macOS.
+    let settings_path = root.join("settings.json");
+    let retained = root.join("settings-before-failure.json");
+    std::fs::rename(&settings_path, &retained).unwrap();
+    std::fs::create_dir(&settings_path).unwrap();
+    let result = fixture
+        .controller
+        .save_data_source(edited.clone(), secrets, false, true);
+    std::fs::remove_dir(&settings_path).unwrap();
+    std::fs::rename(&retained, &settings_path).unwrap();
+    assert!(result.is_err());
+    assert_eq!(
+        fixture.controller.config.lock().unwrap().data_source,
+        committed
+    );
+    assert_eq!(
+        load_profile_secrets(&root, &edited).unwrap().token_for(&id),
+        "owned-replacement-token"
+    );
+    let masked = load_profile_secrets(&root, &committed).unwrap();
+    assert!(masked.token_for(&id).is_empty());
+    assert_eq!(masked.token_for(&unrelated), "owned-unrelated-token");
+    // Reloading the committed settings models a fresh process: it must reject
+    // the mismatched persisted token just like the still-open controller.
+    let restarted = AppConfig::load_in(root.clone()).unwrap();
+    assert_eq!(restarted.data_source, committed);
+    let mut restarted_secrets = load_profile_secrets(&root, &restarted.data_source).unwrap();
+    assert!(restarted_secrets.token_for(&id).is_empty());
+    assert_eq!(
+        restarted_secrets.token_for(&unrelated),
+        "owned-unrelated-token"
+    );
+    ui.invoke_ai_action(22, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    ui.invoke_ai_action(9, 0);
+    ui.set_ai_request_mode(1);
+    ui.set_ai_timeout(2);
+    ui.invoke_ai_action(11, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_error());
+    assert!(ui.get_ai_status().contains("Configure an AudioLib server"));
+    assert_eq!(
+        old_server.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert_eq!(
+        replacement_server.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    // Repairing the failed profile must retain other valid profiles' keys.
+    restarted_secrets.set_token(&id, "owned-recovered-token");
+    fixture
+        .controller
+        .save_data_source(committed.clone(), restarted_secrets, false, true)
+        .unwrap();
+    let recovered = load_profile_secrets(&root, &committed).unwrap();
+    assert_eq!(recovered.token_for(&id), "owned-recovered-token");
+    assert_eq!(recovered.token_for(&unrelated), "owned-unrelated-token");
+    finish(&fixture);
+}
+
 fn owned_ai_plan(
     queries: &[(&str, audiolib_core::ai_search::AiQueryKind)],
 ) -> audiolib_core::ai_search::AiQueryPlan {
@@ -1939,7 +2466,7 @@ fn child_sidebar_missing_provider() {
     assert!(ui.get_ai_visible());
     assert!(!ui.get_ai_collapsed());
     assert!(ui.get_ai_settings());
-    assert_eq!(ui.get_ai_providers().row_count(), 1);
+    assert_eq!(ui.get_ai_providers().row_count(), 2);
     ui.set_ai_profile_name("Unsaved provider".into());
     ui.set_ai_model("draft-model".into());
     ui.set_ai_dirty(true);
@@ -2095,7 +2622,7 @@ fn child_sidebar_collapse_during_load() {
     wait_for(ui, |ui| !ui.get_ai_busy());
     assert!(ui.get_ai_visible());
     assert!(ui.get_ai_collapsed());
-    assert_eq!(ui.get_ai_providers().row_count(), 1);
+    assert_eq!(ui.get_ai_providers().row_count(), 2);
     ui.invoke_ai_action(22, 0);
     assert!(!ui.get_ai_collapsed());
     assert!(ui.get_ai_settings());
@@ -2823,6 +3350,153 @@ fn child_jev_provider_probe() {
 }
 
 #[test]
+fn ai_magpie_discovers_probes_and_reopens_without_replacing_saved_providers() {
+    isolated("ai_search::child_magpie_provider");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_magpie_provider() {
+    use audiolib_ai::{
+        config::{ApiKey, Profile, Protocol},
+        storage::ProfileStore,
+    };
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    let preferences = fixture.root.join("preferences");
+    let mut store = ProfileStore::open(&preferences).unwrap();
+    let existing = Profile {
+        name: "Existing DeepSeek".into(),
+        protocol: Protocol::DeepSeek,
+        base_url: Protocol::DeepSeek.default_url().into(),
+        model: "saved-model".into(),
+        ..Default::default()
+    };
+    store
+        .save(
+            existing.clone(),
+            Some(ApiKey::new("existing-fixture-key".into()).unwrap()),
+        )
+        .unwrap();
+    let retained = store.profiles()[0].clone();
+    drop(store);
+    ui.invoke_ai_action(0, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    ui.invoke_ai_action(9, 0);
+    ui.set_ai_settings(true);
+    ui.set_ai_protocol(7);
+    ui.invoke_ai_action(12, 7);
+    assert_eq!(ui.get_ai_endpoint(), "http://127.0.0.1:3425/v1");
+    assert_eq!(ui.get_ai_auto_name(), "Magpie 1");
+    assert!(ui.get_ai_model().is_empty());
+    assert!(ui.get_ai_key().is_empty());
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    ui.set_ai_endpoint(endpoint.clone().into());
+    let server = std::thread::spawn(move || {
+        for step in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut head = vec![];
+            let mut byte = [0];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let request = String::from_utf8(head).unwrap();
+            assert!(request.starts_with(if step == 0 {
+                "GET /v1/models HTTP/1.1"
+            } else {
+                "POST /v1/chat/completions HTTP/1.1"
+            }));
+            let headers = request.to_ascii_lowercase();
+            assert!(headers.contains("user-agent: audiolibexplorer/"));
+            assert!(!headers.contains("existing-fixture-key"));
+            let body = if step == 0 {
+                serde_json::json!({"data":[{"id":"vendor/model"},{"id":"group/sound-design"},{"id":"models/retained-prefix"}]}).to_string()
+            } else {
+                let length: usize = request
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|s| s.trim().parse().unwrap())
+                    })
+                    .unwrap();
+                let mut bytes = vec![0; length];
+                stream.read_exact(&mut bytes).unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body["model"], "models/retained-prefix");
+                let plan = audiolib_ai::reference::ReferenceIndex::embedded()
+                    .local_plan("wind", false)
+                    .unwrap();
+                serde_json::json!({"choices":[{"finish_reason":"stop","message":{"content":serde_json::to_string(&plan).unwrap()}}],"usage":{"prompt_tokens":10,"completion_tokens":20}}).to_string()
+            };
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    ui.invoke_ai_action(11, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert_eq!(
+        ui.get_ai_models()
+            .iter()
+            .map(|model| model.to_string())
+            .collect::<Vec<_>>(),
+        [
+            "group/sound-design",
+            "models/retained-prefix",
+            "vendor/model"
+        ]
+    );
+    assert_eq!(ui.get_ai_model(), "group/sound-design");
+    assert!(ui.get_ai_profile_id().is_empty());
+    ui.set_ai_model("models/retained-prefix".into());
+    // Re-selecting Magpie preserves a customized port and the chosen raw model ID.
+    ui.invoke_ai_action(12, 7);
+    assert_eq!(ui.get_ai_endpoint(), endpoint.as_str());
+    assert_eq!(ui.get_ai_model(), "models/retained-prefix");
+    ui.invoke_ai_action(17, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_status().contains("Model test passed"));
+    assert_eq!(
+        ProfileStore::open(&preferences).unwrap().profiles().len(),
+        1
+    );
+    ui.invoke_ai_action(8, 0);
+    wait_for(ui, |ui| {
+        !ui.get_ai_busy() && ui.get_ai_provider_index() == 2
+    });
+    assert_eq!(ui.get_ai_profile_name(), "Magpie 1");
+    let reopened = ProfileStore::open(&preferences).unwrap();
+    assert_eq!(reopened.profiles().len(), 2);
+    assert_eq!(reopened.profiles()[0], retained);
+    assert_eq!(reopened.selected().unwrap().protocol, Protocol::Magpie);
+    assert_eq!(reopened.selected().unwrap().model, "models/retained-prefix");
+    assert_eq!(reopened.selected().unwrap().base_url, endpoint);
+    assert!(
+        reopened
+            .key(reopened.selected().unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    ui.invoke_ai_action(1, 0);
+    ui.invoke_ai_action(0, 0);
+    assert_eq!(ui.get_ai_protocol(), 7);
+    assert_eq!(ui.get_ai_model(), "models/retained-prefix");
+    ui.invoke_ai_action(17, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_status().contains("Model test passed"));
+    server.join().unwrap();
+    finish(&fixture);
+}
+
+#[test]
 fn repeated_ai_search_and_quick_queries_survive_result_refresh() {
     isolated("ai_search::child_repeated_ai_search");
 }
@@ -2988,7 +3662,7 @@ fn child_local_ai() {
     assert!(!stored.contains("isolated-test-key"));
     ui.invoke_ai_action(10, 0);
     wait_for(ui, |ui| {
-        !ui.get_ai_busy() && ui.get_ai_providers().row_count() == 1
+        !ui.get_ai_busy() && ui.get_ai_providers().row_count() == 2
     });
     ui.set_ai_instruction("优先推荐可用于分层的原始声音素材".into());
     ui.set_ai_preset_index(1);

@@ -3,7 +3,7 @@
 use super::*;
 use audiolib_ai::{
     AiError,
-    config::{ApiKey, DEFAULT_PROMPT, Profile, Protocol, validate_instruction},
+    config::{ApiKey, DEFAULT_PROMPT, Profile, Protocol, RequestMode, validate_instruction},
     provider,
     reference::ReferenceIndex,
     storage::ProfileStore,
@@ -139,6 +139,9 @@ pub(super) struct Runtime {
     save_wake: Condvar,
     save_error: Mutex<Option<String>>,
     draft_protocol: std::sync::atomic::AtomicI32,
+    // ComboBox updates its bound index before invoking selected; retain the
+    // owner of the still-displayed form until that callback switches profiles.
+    editor_selection: std::sync::atomic::AtomicI32,
     drafts: Mutex<std::collections::HashMap<String, FormDraft>>,
     batch_revision: AtomicU64,
     verified_search: Mutex<Option<VerifiedSearch>>,
@@ -415,8 +418,10 @@ impl Controller {
                     c.cancel_ai_task_batch(&ui);
                     c.ai.cancel();
                     c.clear_ai_suggestions(&ui);
-                    ui.set_ai_provider_index(0);
-                    c.select_ai_profile(&ui, 0);
+                    let unsaved = c.ai_unsaved_profile_index();
+                    ui.set_ai_provider_index(unsaved);
+                    c.select_ai_profile(&ui, unsaved);
+                    ui.set_ai_dirty(true);
                     ui.set_ai_status("".into());
                 }
                 10 => {
@@ -425,6 +430,7 @@ impl Controller {
                     }
                 }
                 11 | 17 => {
+                    c.activate_ai_unsaved_profile(&ui);
                     // Discover directly from the form; the worker resolves a saved key
                     // only when its endpoint and protocol still match this draft.
                     let input = draft(&ui, kind == 17).and_then(|profile| {
@@ -463,12 +469,13 @@ impl Controller {
                         });
                         ui.set_ai_key("".into());
                         ui.set_ai_go_authorized(false);
-                        ui.set_ai_subscription(protocol == Protocol::OpenCodeGo);
                         ui.set_ai_models(ModelRc::default());
                         ui.set_ai_dirty(true);
                         c.refresh_ai_name_hint(&ui);
+                        c.activate_ai_unsaved_profile(&ui);
                     }
                 }
+                26 => c.activate_ai_unsaved_profile(&ui),
                 18 => {
                     c.ai.drafts
                         .lock()
@@ -1119,15 +1126,17 @@ impl Controller {
         ui.set_ai_model(p.model.clone().into());
         ui.set_ai_key("".into());
         ui.set_ai_clear_key(false);
-        ui.set_ai_subscription(p.subscription);
+        ui.set_ai_request_mode(p.request_mode.index());
         ui.set_ai_go_authorized(p.go_use_authorized);
         ui.set_ai_timeout(p.timeout_seconds as i32);
-        ui.set_ai_request_cap(p.max_requests_per_month as i32);
         ui.set_ai_models(ModelRc::default());
         ui.set_ai_dirty(false);
     }
 
     fn remember_ai_draft(&self, ui: &AppWindow) {
+        if self.ai.editor_selection.load(Ordering::Acquire) == 0 {
+            return;
+        }
         // Keep at most one draft per saved profile plus the new-profile form.
         let profile = Profile {
             id: ui.get_ai_profile_id().to_string(),
@@ -1136,8 +1145,7 @@ impl Controller {
             base_url: ui.get_ai_endpoint().to_string(),
             model: ui.get_ai_model().to_string(),
             timeout_seconds: ui.get_ai_timeout().max(0) as u64,
-            max_requests_per_month: ui.get_ai_request_cap().max(0) as u64,
-            subscription: ui.get_ai_subscription(),
+            request_mode: RequestMode::from_index(ui.get_ai_request_mode()).unwrap_or_default(),
             go_use_authorized: ui.get_ai_go_authorized(),
             ..Default::default()
         };
@@ -1162,7 +1170,35 @@ impl Controller {
         ui.set_ai_auto_name(name.into());
     }
 
+    fn ai_unsaved_profile_index(&self) -> i32 {
+        self.ai
+            .store
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(1, |store| store.profiles().len() as i32 + 1)
+    }
+
+    // Editing the offline setup form creates a new profile draft, not a change
+    // to the local reference. Preserve the typed values while selecting it.
+    fn activate_ai_unsaved_profile(&self, ui: &AppWindow) {
+        if self.ai.editor_selection.load(Ordering::Acquire) != 0
+            || !ui.get_ai_profile_id().is_empty()
+        {
+            return;
+        }
+        self.cancel_ai_task_batch(ui);
+        self.ai.cancel();
+        self.clear_ai_suggestions(ui);
+        let unsaved = self.ai_unsaved_profile_index();
+        ui.set_ai_provider_index(unsaved);
+        self.ai.editor_selection.store(unsaved, Ordering::Release);
+        ui.set_ai_selected_model("".into());
+        ui.set_ai_dirty(true);
+    }
+
     fn select_ai_profile(&self, ui: &AppWindow, index: i32) {
+        self.ai.editor_selection.store(index, Ordering::Release);
         let store = self.ai.store.lock().unwrap();
         let saved = if let Some(s) = store.as_ref()
             && let Some(p) = index
@@ -1190,7 +1226,11 @@ impl Controller {
         // restoring an unsaved editor draft below must not change this value.
         ui.set_ai_selected_model(saved.model.clone().into());
         drop(store);
-        let cached = self.ai.drafts.lock().unwrap().get(&saved.id).cloned();
+        let cached = if index == 0 {
+            None
+        } else {
+            self.ai.drafts.lock().unwrap().get(&saved.id).cloned()
+        };
         if let Some(cached) = cached {
             self.set_ai_draft(ui, &cached.profile);
             ui.set_ai_key(cached.key.into());
@@ -1212,10 +1252,9 @@ impl Controller {
         let u = store.usage(&p.id);
         ui.set_ai_usage(
             format!(
-                "{} · {} / {} {} · tokens {} + {}\n{}",
+                "{} · {} {} · tokens {} + {}\n{}",
                 u.month,
                 u.requests,
-                p.max_requests_per_month,
                 if self.chinese.load(Ordering::Acquire) {
                     "本应用请求（失败尝试也计入）"
                 } else {
@@ -1232,7 +1271,8 @@ impl Controller {
             .into(),
         );
     }
-    fn publish_ai_profiles(&self, ui: &AppWindow) {
+    /// Refresh localized selector labels without replacing the active editor draft.
+    pub(super) fn publish_ai_profiles(&self, ui: &AppWindow) {
         let store = self.ai.store.lock().unwrap();
         let mut names = vec![self.localized("本地词表（离线）", "Local reference (offline)")];
         if let Some(s) = store.as_ref() {
@@ -1245,6 +1285,7 @@ impl Controller {
                 self.publish_ai_usage(ui, s, p);
             }
         }
+        names.push(self.localized("未保存", "Unsaved"));
         ui.set_ai_providers(ModelRc::new(VecModel::from(names)));
         drop(store);
         self.refresh_ai_name_hint(ui);
@@ -1264,15 +1305,44 @@ impl Controller {
             AiError::Uncertain=>self.localized("Jev 判断不够确定；请细化描述或切换本地词表", "Jev decision uncertain; refine the description or use local reference"),
             AiError::Response=>self.localized("未找到合适词条，或供应商结果未通过校验；请细化描述", "No matching reference or invalid provider result; refine the description"),
             AiError::Storage=>self.localized("AI 配置保存/读取失败；原配置已保留", "AI configuration could not be read/saved; original retained"),
-            AiError::Transport=>self.localized("连接失败或超时；检查地址、网络和密钥", "Connection failed or timed out; check endpoint, network and key"),
+            AiError::Transport=>self.localized("连接失败；检查地址、网络和密钥", "Connection failed; check endpoint, network and key"),
+            AiError::Timeout(seconds)=>self.localized(
+                &format!("请求在 {seconds} 秒后超时；可在供应商高级选项中提高超时（最多 {} 秒），修改后保存配置", audiolib_ai::config::MAX_TIMEOUT_SECONDS),
+                &format!("Request timed out after {seconds} seconds; raise the timeout in provider advanced options (up to {} seconds), then save the profile", audiolib_ai::config::MAX_TIMEOUT_SECONDS),
+            ),
             AiError::Http(401)=>self.localized("认证失败（401）；请检查 API Key", "Authentication failed (401); check the API key"),
             AiError::Http(403)=>self.localized("访问被拒绝（403）；请检查账户或订阅权限", "Access denied (403); check account or subscription permissions"),
             AiError::Http(404)=>self.localized("接口不存在（404）；请检查 Base URL，也可手动填写模型 ID", "Endpoint not found (404); check Base URL or enter a model ID manually"),
             AiError::Http(429)=>self.localized("供应商限流或额度不足（429）；请稍后重试或检查账户", "Provider rate/quota limit (429); retry later or check the account"),
-            AiError::Budget=>self.localized("已达到本应用的每月请求上限", "This app's monthly request cap has been reached"),
+            AiError::RelayUnavailable=>self.localized("请先在音库服务器设置中配置服务器地址和访问令牌，再使用 AI 服务器模式", "Configure an AudioLib server address and access token in library server settings before using server AI mode"),
+            AiError::RelayTransport=>self.localized("无法连接 AI 转发服务器；请检查 AudioLib 音库服务器连接", "Cannot reach the AI relay; check the AudioLib library server connection"),
+            AiError::RelayHttp(401)=>self.localized("音库服务器认证失败（401）；请检查服务器访问令牌", "AudioLib server authentication failed (401); check its access token"),
+            AiError::RelayHttp(403)=>self.localized("音库服务器未允许此 AI 供应商地址；请在服务器配置中启用 AI 转发并允许该地址", "The AudioLib server has not allowed this provider endpoint; enable AI relay and allow the endpoint in its configuration"),
+            AiError::RelayHttp(404)=>self.localized("音库服务器不支持 AI 转发（404）；请升级服务器", "The AudioLib server does not support AI relay (404); upgrade the server"),
+            AiError::RelayHttp(503)=>self.localized("AI 转发服务器繁忙或暂时不可用；请稍后重试", "The AI relay is busy or temporarily unavailable; retry later"),
+            AiError::RelayHttp(status)=>self.localized(&format!("AI 转发服务器返回 HTTP {status}"), &format!("AI relay returned HTTP {status}")),
             other=>other.to_string().into(),
         };
         self.ai_failure(ui, message);
+    }
+
+    pub(super) fn ai_transport(
+        &self,
+        profile: &Profile,
+        root: &std::path::Path,
+        settings: &audiolib_core::config::DataSourceSettings,
+    ) -> audiolib_ai::Result<AiTransport> {
+        if profile.request_mode == RequestMode::Client {
+            return Ok(AiTransport::Client);
+        }
+        // save_data_source holds this same lock across credentials and settings
+        // replacement. Never pair an admitted old address with a newly saved token.
+        // This disk/DPAPI work is called exclusively on the AI worker thread.
+        let config = self.config.lock().unwrap();
+        if config.data_source != *settings || config.data_root() != root {
+            return Err(AiError::Cancelled);
+        }
+        AiTransport::for_profile(profile, root, settings)
     }
 
     fn ai_job(self: &Arc<Self>, ui: &AppWindow, job: Job) {
@@ -1316,7 +1386,12 @@ impl Controller {
         }
         self.clear_ai_suggestions(ui);
         ui.set_ai_generating(generating);
-        let root = self.config.lock().unwrap().data_root();
+        // Capture one server choice for the entire admitted request. AI relay
+        // does not switch libraries, initialize remote snapshots or use a writer.
+        let (root, relay_settings) = {
+            let config = self.config.lock().unwrap();
+            (config.data_root(), config.data_source.clone())
+        };
         let c = self.clone();
         std::thread::spawn(move || {
             let result = (|| -> audiolib_ai::Result<Reply> {
@@ -1355,6 +1430,7 @@ impl Controller {
                         Ok(Reply::PromptSaved)
                     }
                     Job::Models(profile, supplied) => {
+                        let transport = c.ai_transport(&profile, &root, &relay_settings)?;
                         let key =
                             c.ai.store
                                 .lock()
@@ -1362,10 +1438,11 @@ impl Controller {
                                 .as_ref()
                                 .unwrap()
                                 .discovery_key(&profile, supplied)?;
-                        Ok(Reply::Models(provider::models(&profile, &key, &cancel)?))
+                        Ok(Reply::Models(transport.models(&profile, &key, &cancel)?))
                     }
                     Job::Probe(profile, supplied) => {
                         profile.validate_request()?;
+                        let transport = c.ai_transport(&profile, &root, &relay_settings)?;
                         let (key, tracked) = {
                             let mut store = c.ai.store.lock().unwrap();
                             let store = store.as_mut().unwrap();
@@ -1379,7 +1456,7 @@ impl Controller {
                                 .find(|p| p.id == profile.id)
                                 .cloned();
                             if let Some(saved) = &saved {
-                                store.reserve(
+                                store.record_request(
                                     saved,
                                     &chrono::Utc::now().format("%Y-%m").to_string(),
                                 )?;
@@ -1388,7 +1465,7 @@ impl Controller {
                         };
                         // A real structured round trip, not the often-public model list.
                         // Uses a fixed example, never the user's library or current prompt.
-                        let output = provider::generate(
+                        let output = transport.generate(
                             &profile,
                             &key,
                             "wind",
@@ -1412,10 +1489,11 @@ impl Controller {
                     }
                     Job::Generate(profile, intent, layers, guidance) => {
                         profile.validate_request()?;
+                        let transport = c.ai_transport(&profile, &root, &relay_settings)?;
                         audiolib_core::ai_search::validate_intent(&intent)
                             .map_err(|_| AiError::Invalid)?;
                         validate_instruction(&guidance)?;
-                        // Validate the finite request before reserving provider usage.
+                        // Validate the finite request before recording an attempt.
                         if profile.protocol == Protocol::Jev {
                             audiolib_ai::jev::request(&profile.model, &intent, layers, &guidance)?;
                         }
@@ -1429,10 +1507,13 @@ impl Controller {
                                 return Err(AiError::Cancelled);
                             }
                             let key = s.key(&profile)?;
-                            s.reserve(&profile, &chrono::Utc::now().format("%Y-%m").to_string())?;
+                            s.record_request(
+                                &profile,
+                                &chrono::Utc::now().format("%Y-%m").to_string(),
+                            )?;
                             key
                         };
-                        let output = provider::generate(
+                        let output = transport.generate(
                             &profile,
                             &key,
                             &intent,
@@ -1774,6 +1855,73 @@ fn same_batch_controls(left: &BatchControls, right: &BatchControls, restoring: b
         && (restoring || left.scroll == right.scroll)
 }
 
+// One dispatch point for model discovery, connection probes and generation.
+// Server mode never falls back to a client-side provider request.
+pub(super) enum AiTransport {
+    Client,
+    Server(Box<audiolib_remote::RemoteClient>),
+}
+
+impl AiTransport {
+    fn for_profile(
+        profile: &Profile,
+        root: &std::path::Path,
+        settings: &audiolib_core::config::DataSourceSettings,
+    ) -> audiolib_ai::Result<Self> {
+        if profile.request_mode == RequestMode::Client {
+            return Ok(Self::Client);
+        }
+        // Local-library mode retains the most recently selected server. Reading
+        // its connection and credentials does not alter library/source state.
+        let id = settings
+            .legacy_profile_id()
+            .ok_or(AiError::RelayUnavailable)?;
+        let server = settings.profile(&id).ok_or(AiError::RelayUnavailable)?;
+        let secrets = audiolib_remote::load_profile_secrets(root, settings)
+            .map_err(|_| AiError::RelayUnavailable)?;
+        let token = secrets.token_for(&id);
+        if token.is_empty() {
+            return Err(AiError::RelayUnavailable);
+        }
+        let client = audiolib_remote::RemoteClient::new(&server.server_url, token)
+            .map_err(|_| AiError::RelayUnavailable)?;
+        Ok(Self::Server(Box::new(client)))
+    }
+
+    fn models(
+        &self,
+        profile: &Profile,
+        key: &ApiKey,
+        cancel: &AtomicBool,
+    ) -> audiolib_ai::Result<Vec<String>> {
+        match self {
+            Self::Client => provider::models(profile, key, cancel),
+            Self::Server(client) => client.ai_models(profile, key, cancel),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn generate(
+        &self,
+        profile: &Profile,
+        key: &ApiKey,
+        intent: &str,
+        layers: bool,
+        guidance: &str,
+        session: &str,
+        cancel: &AtomicBool,
+    ) -> audiolib_ai::Result<provider::Output> {
+        match self {
+            Self::Client => {
+                provider::generate(profile, key, intent, layers, guidance, session, cancel)
+            }
+            Self::Server(client) => {
+                client.ai_generate(profile, key, intent, layers, guidance, session, cancel)
+            }
+        }
+    }
+}
+
 fn draft(ui: &AppWindow, model_required: bool) -> audiolib_ai::Result<Profile> {
     let mut p = Profile {
         name: if ui.get_ai_profile_name().trim().is_empty() {
@@ -1785,8 +1933,7 @@ fn draft(ui: &AppWindow, model_required: bool) -> audiolib_ai::Result<Profile> {
         base_url: ui.get_ai_endpoint().trim().trim_end_matches('/').into(),
         model: ui.get_ai_model().trim().into(),
         timeout_seconds: ui.get_ai_timeout().max(0) as u64,
-        max_requests_per_month: ui.get_ai_request_cap().max(0) as u64,
-        subscription: ui.get_ai_subscription(),
+        request_mode: RequestMode::from_index(ui.get_ai_request_mode())?,
         go_use_authorized: ui.get_ai_go_authorized(),
         ..Default::default()
     };

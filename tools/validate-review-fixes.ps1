@@ -1,11 +1,13 @@
 # tools/validate-review-fixes.ps1
 [CmdletBinding()]
-param([string]$BinaryDirectory = 'target/x86_64-pc-windows-msvc/release', [switch]$CleanCheckout)
+param([string]$BinaryDirectory, [switch]$CleanCheckout)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'console-utf8.ps1')
 try {
 $PSNativeCommandUseErrorActionPreference = $false
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+. (Join-Path $PSScriptRoot 'build-cache.ps1')
+if (!$BinaryDirectory) { $BinaryDirectory = Join-Path (Get-AudioLibTargetDirectory $taskRoot) 'x86_64-pc-windows-msvc/release' }
 $binaryRoot = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $taskRoot $BinaryDirectory }))
 $cli = Join-Path $binaryRoot 'AudioLibCli.exe'
 $tempParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar)

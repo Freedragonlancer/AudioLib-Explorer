@@ -42,6 +42,7 @@
 //!   active profile, "use the external address" as a sibling profile, switching and
 //!   removal, with per-profile tokens in [`RemoteSecrets`].
 mod abort;
+mod ai_relay;
 mod artwork;
 mod bandwidth;
 mod cache_cleanup;
@@ -123,7 +124,8 @@ pub use route::{
     RouteOptions, choose_route, is_wav, pcm_output_rate, preview_rate, raw_bitrate,
 };
 pub use secrets::{
-    ProfileSecret, RemoteSecrets, load_profile_secrets, load_secrets, save_secrets, secrets_path,
+    ProfileSecret, RemoteSecrets, load_profile_secrets, load_secrets, save_profile_secrets,
+    save_secrets, secrets_path,
 };
 pub use snapshot_transfer::{PendingSync, SyncControl, SyncOptions};
 pub use stream::{

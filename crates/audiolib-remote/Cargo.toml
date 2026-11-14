@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+audiolib-ai = { path = "../audiolib-ai" }
 audiolib-core = { path = "../audiolib-core" }
 audiolib-db = { path = "../audiolib-db", default-features = false }
 audiolib-windows = { path = "../audiolib-windows" }

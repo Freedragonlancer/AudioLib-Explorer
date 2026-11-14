@@ -5,12 +5,15 @@
 param(
     [Parameter(Mandatory)]
     [ValidateSet('x86_64-pc-windows-msvc', 'x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'aarch64-apple-darwin')]
-    [string]$Target
+    [string]$Target,
+    [switch]$CleanBuildArtifacts = $true
 )
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 . (Join-Path $PSScriptRoot 'build-cache.ps1')
 $buildLease = $null
+$buildEnvironment = $null
+if ($CleanBuildArtifacts -and !$env:AUDIOLIB_DEFER_BUILD_CLEANUP -and $PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Use pwsh 7.3+ for automatic build cleanup, or -CleanBuildArtifacts:$false.' }
 $isWindowsTarget = $Target -ceq 'x86_64-pc-windows-msvc'
 if ($isWindowsTarget -ne [bool]$IsWindows) { throw 'The server release target must be built on its native OS.' }
 $compilerDetails = & rustc -vV
@@ -59,7 +62,7 @@ $userProfile = if ($env:USERPROFILE) {
 if (!$userProfile) { throw 'Could not determine the native user home for path remapping.' }
 $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $userProfile '.cargo' }
 $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $userProfile '.rustup' }
-$targetDirectory = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $taskRoot 'target' }
+$targetDirectory = Get-AudioLibTargetDirectory $taskRoot
 $pathMappings = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
 $pathMappings[[IO.Path]::GetFullPath($taskRoot)] = '/audiolib/source'
 $pathMappings[[IO.Path]::GetFullPath($userProfile, $taskRoot)] = '/audiolib/user'
@@ -96,6 +99,7 @@ $combinedNativeFlags = ($savedEnvironment[$nativeFlagKey] + ' ' + $quotedNativeF
 $enteredWorkspace = $false
 try {
     $buildLease = Enter-AudioLibBuildLease $taskRoot
+    $buildEnvironment = Enter-AudioLibBuildEnvironment $taskRoot
     Push-Location -LiteralPath $taskRoot
     $enteredWorkspace = $true
     [Environment]::SetEnvironmentVariable($encodedFlagKey, ($releaseFlags -join $flagSeparator))
@@ -108,8 +112,12 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Rust server release build failed.' }
 } finally {
     if ($buildLease) { $buildLease.Dispose() }
+    if ($buildEnvironment) { Exit-AudioLibBuildEnvironment $buildEnvironment }
     foreach ($key in $savedEnvironment.Keys) {
         [Environment]::SetEnvironmentVariable($key, $savedEnvironment[$key])
     }
     if ($enteredWorkspace) { Pop-Location }
+}
+if ($CleanBuildArtifacts -and !$env:AUDIOLIB_DEFER_BUILD_CLEANUP) {
+    Invoke-AudioLibPostBuildCleanup $taskRoot $buildEnvironment.TargetDirectory
 }

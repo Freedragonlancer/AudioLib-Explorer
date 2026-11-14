@@ -44,7 +44,9 @@ $taskRun=Join-Path $taskRoot '.rust-validation/release-pipeline/test'
 $taskRunner=Join-Path $PSScriptRoot 'release-pipeline.ps1'
 $taskPwsh=Join-Path $PSHOME ('pwsh'+$(if($IsWindows){'.exe'}else{''}))
 function Invoke-Pipeline([string]$Action='Run',[int]$ExpectedExit=0,[string[]]$ExtraArguments=@()) {
-    $taskOutput=& $taskPwsh -NoProfile -File $taskRunner -Root $taskRoot -PlanFile $taskPlanPath -RunDirectory $taskRun -Tag v0.0.1 -Action $Action @ExtraArguments 2>&1
+    # These routing fixtures contain synthetic call logs in target, not a real
+    # Cargo cache. Actual default cleanup/resume is covered by test-build-artifacts.
+    $taskOutput=& $taskPwsh -NoProfile -File $taskRunner -Root $taskRoot -PlanFile $taskPlanPath -RunDirectory $taskRun -Tag v0.0.1 -Action $Action '-CleanBuildArtifacts:$false' @ExtraArguments 2>&1
     if($LASTEXITCODE -ne $ExpectedExit){throw "Unexpected pipeline exit: $($taskOutput -join ' ')"}
     if(@($taskOutput).Count -gt (($taskPlan.stages.Count+2)*2+1)){throw ('Runner leaked stage output: ' + (($taskOutput | Select-Object -First 12) -join ' '))}
     return $taskOutput
@@ -61,6 +63,20 @@ try {
     # even when the caller uses an external build cache for actual releases.
     $env:CARGO_TARGET_DIR=Join-Path $taskRoot 'target'
     if($Scope -eq 'All') {
+    # A custom non-Rust plan must stay read-only even with automatic cleanup's
+    # default enabled. Resolving a default local target must not create it.
+    . (Join-Path $PSScriptRoot 'build-cache.ps1')
+    $taskExplicitTarget=$env:CARGO_TARGET_DIR
+    try {
+        $env:CARGO_TARGET_DIR=$null
+        $taskManagedTarget=Get-AudioLibTargetDirectory $taskRoot
+        $taskManagedTargetExisted=Test-Path -LiteralPath $taskManagedTarget
+        $taskDefaultPlanOutput=& $taskPwsh -NoProfile -File $taskRunner -Root $taskRoot -PlanFile $taskPlanPath -RunDirectory $taskRun -Tag v0.0.1 -Action Plan 2>&1
+        if($LASTEXITCODE -ne 0){throw 'Default non-Rust plan preview failed.'}
+        $taskDefaultPlan=($taskDefaultPlanOutput -join [Environment]::NewLine)|ConvertFrom-Json
+        if($taskDefaultPlan.stages.Count -ne $taskPlan.stages.Count -or @($taskDefaultPlan.stages|Where-Object id -eq 'build-cache-cleanup').Count -or
+            (Test-Path -LiteralPath $taskManagedTarget) -ne $taskManagedTargetExisted -or (Test-Path -LiteralPath $taskRun)){throw 'Non-Rust plan preview enabled cleanup or created managed cache/state.'}
+    } finally {$env:CARGO_TARGET_DIR=$taskExplicitTarget}
     $null=Invoke-Pipeline 'Plan'
     if(Test-Path -LiteralPath $taskRun){throw 'Plan created run state.'}
     $null=Invoke-Pipeline
@@ -194,8 +210,12 @@ if(Test-Path -LiteralPath target/move-head){
 param($Tag,$Profile,[switch]$WithoutAsio,[switch]$SkipBuild,[switch]$SkipArchive,$BinaryDirectory,$Source,$Destination='local_release',$VersionManifest='Cargo.toml',[string[]]$Package,[switch]$Asio)
 $ErrorActionPreference='Stop'
 $fixtureRoot=[IO.Path]::GetFullPath((Get-Location).ProviderPath)
-$fixtureTarget=Join-Path $fixtureRoot 'target'
+. (Join-Path $PSScriptRoot 'build-cache.ps1')
+$fixtureTarget=Get-AudioLibCanonicalPath (Join-Path $fixtureRoot 'target')
 if (!$env:CARGO_TARGET_DIR -or [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR) -cne $fixtureTarget) { throw 'Fake tools require the owned fixture target directory.' }
+if ($env:AUDIOLIB_DEFER_BUILD_CLEANUP -ne '1') { throw 'Child stages could prune the parent pipeline cache.' }
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
+    ($env:TEMP -cne (Join-Path $fixtureTarget 'tmp') -or $env:TMP -cne $env:TEMP)) { throw 'Child stages lost the isolated compiler TEMP/TMP.' }
 function Write-FixtureFile([string]$Relative,[string]$Contents) {
     $path=[IO.Path]::GetFullPath($Relative,$fixtureRoot)
     if (!$path.StartsWith($fixtureRoot+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { throw 'Fake output escaped the fixture.' }
@@ -242,6 +262,7 @@ switch -Exact ($scriptName) {
     $taskPlan.require_tag=$false; $taskPlan.host='any'; $taskPlan.environment_tools=@()
     [IO.File]::WriteAllText((Join-Path $taskRoot 'Cargo.toml'),"[workspace.package]`nversion = `"0.0.1`"`n")
     New-Item -ItemType Directory -Path (Join-Path $taskRoot 'tools') -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'build-cache.ps1') -Destination (Join-Path $taskRoot 'tools/build-cache.ps1')
     foreach($taskStep in $taskPlan.stages){[IO.File]::WriteAllText((Join-Path $taskRoot $taskStep.script),$taskStub)}
     [IO.File]::WriteAllText((Join-Path $taskRoot 'tools/check-local.ps1'),$taskStub)
     $taskChecksPath=Join-Path $PSScriptRoot 'release-plans/checks.example.json'

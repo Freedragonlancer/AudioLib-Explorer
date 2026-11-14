@@ -342,6 +342,120 @@ fn staged_updates_exclude_another_updater_for_the_same_installation() {
 }
 
 #[test]
+fn startup_cleans_successful_update_stage_and_retains_reusable_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let stage = root.path().join(".audiolib-update-complete");
+    std::fs::create_dir(&stage).unwrap();
+    std::fs::write(
+        stage.join("update-result.txt"),
+        "Update installed and application restarted.\n",
+    )
+    .unwrap();
+    std::fs::write(stage.join("update-helper.exe"), b"old helper").unwrap();
+    std::fs::write(root.path().join(".audiolib-update.lock"), b"").unwrap();
+
+    UpdateClient::for_install(NATIVE_PRODUCT, "1.0.0", root.path()).unwrap();
+
+    assert!(!stage.exists(), "successful update stage was retained");
+    assert!(
+        root.path().join(".audiolib-update.lock").is_file(),
+        "update lock sidecar must survive successful cleanup"
+    );
+    UpdateClient::for_install(NATIVE_PRODUCT, "1.0.0", root.path()).unwrap();
+    assert!(root.path().join(".audiolib-update.lock").is_file());
+}
+
+#[test]
+fn startup_preserves_lock_identity_for_existing_handles_and_future_updaters() {
+    let root = tempfile::tempdir().unwrap();
+    let lock_path = root.path().join(".audiolib-update.lock");
+    // A contender may already have opened the sidecar before startup cleanup.
+    let contender = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+        .unwrap();
+
+    UpdateClient::for_install(NATIVE_PRODUCT, "1.0.0", root.path()).unwrap();
+    let first_stage = tempfile::Builder::new()
+        .prefix(".audiolib-update-")
+        .tempdir_in(root.path())
+        .unwrap();
+    let first = PreparedUpdate::new(first_stage, root.path(), NATIVE_PRODUCT).unwrap();
+    assert!(
+        contender.try_lock().is_err(),
+        "cleanup replaced the lock file held by the staged updater"
+    );
+    drop(first);
+
+    contender.try_lock().unwrap();
+    let second_stage = tempfile::Builder::new()
+        .prefix(".audiolib-update-")
+        .tempdir_in(root.path())
+        .unwrap();
+    assert!(PreparedUpdate::new(second_stage, root.path(), NATIVE_PRODUCT).is_err());
+    std::fs::File::unlock(&contender).unwrap();
+
+    let next_stage = tempfile::Builder::new()
+        .prefix(".audiolib-update-")
+        .tempdir_in(root.path())
+        .unwrap();
+    assert!(PreparedUpdate::new(next_stage, root.path(), NATIVE_PRODUCT).is_ok());
+}
+
+#[test]
+fn startup_retains_unsuccessful_update_stage_and_its_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let stage = root.path().join(".audiolib-update-recovery");
+    std::fs::create_dir(&stage).unwrap();
+    std::fs::write(
+        stage.join("update-result.txt"),
+        "Update failed; recovery backup retained",
+    )
+    .unwrap();
+    std::fs::write(stage.join("backup.exe"), b"recovery data").unwrap();
+    let lock = root.path().join(".audiolib-update.lock");
+    std::fs::write(&lock, b"").unwrap();
+
+    UpdateClient::for_install(NATIVE_PRODUCT, "1.0.0", root.path()).unwrap();
+
+    assert!(
+        stage.exists(),
+        "recovery stage must never be swept as success"
+    );
+    assert!(lock.exists(), "recovery stage must retain its lock marker");
+}
+
+#[test]
+fn startup_never_cleans_a_success_stage_while_the_helper_holds_the_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let stage = root.path().join(".audiolib-update-active");
+    std::fs::create_dir(&stage).unwrap();
+    std::fs::write(
+        stage.join("update-result.txt"),
+        "Update installed and application restarted.\n",
+    )
+    .unwrap();
+    let lock_path = root.path().join(".audiolib-update.lock");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+        .unwrap();
+    lock.lock().unwrap();
+
+    UpdateClient::for_install(NATIVE_PRODUCT, "1.0.0", root.path()).unwrap();
+    assert!(stage.exists() && lock_path.exists());
+
+    std::fs::File::unlock(&lock).unwrap();
+    drop(lock);
+    UpdateClient::for_install(NATIVE_PRODUCT, "1.0.0", root.path()).unwrap();
+    assert!(!stage.exists() && lock_path.is_file());
+}
+
+#[test]
 fn tar_pax_paths_are_validated_and_bounded() {
     for malicious in [false, true] {
         let root = tempfile::tempdir().unwrap();
@@ -727,6 +841,113 @@ fn default_releases_api_is_unchanged() {
         RELEASES_API,
         "https://api.github.com/repos/Freedragonlancer/AudioLib-Explorer/releases"
     );
+}
+
+#[cfg(all(feature = "test-update-source", windows))]
+#[test]
+fn test_source_switch_checks_downloads_and_verifies_a_local_server_package() {
+    use sha2::{Digest, Sha256};
+
+    let root = tempfile::tempdir().unwrap();
+    let mut archive = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut archive);
+        for name in package::required(Product::Server) {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(format!("fixture {name}").as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+    let archive = archive.into_inner();
+    let hash = format!("{:x}", Sha256::digest(&archive));
+    let tag = "v1.0.0";
+    let name =
+        asset_names_for_platform(Product::Server, tag, Platform::WindowsX64).unwrap()[0].clone();
+    let checksum = format!("{hash}  {name}\n").into_bytes();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let release = serde_json::json!([{
+        "tag_name": tag,
+        "body": "local fixture",
+        "draft": false,
+        "prerelease": false,
+        "assets": [
+            {
+                "name": name,
+                "browser_download_url": format!("{base}/download/{tag}/{name}"),
+                "size": archive.len(),
+                "digest": format!("sha256:{hash}"),
+            },
+            {
+                "name": format!("{name}.sha256"),
+                "browser_download_url": format!("{base}/download/{tag}/{name}.sha256"),
+                "size": checksum.len(),
+            }
+        ]
+    }])
+    .to_string()
+    .into_bytes();
+    let archive_target = format!("/download/{tag}/{name}");
+    let checksum_target = format!("{archive_target}.sha256");
+    let server_archive = archive.clone();
+    let server_checksum = checksum.clone();
+    let server = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut targets = Vec::new();
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut header = Vec::new();
+            let mut byte = [0];
+            while !header.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                header.push(byte[0]);
+            }
+            let request = String::from_utf8_lossy(&header);
+            let target = request.split(' ').nth(1).unwrap_or_default().to_owned();
+            let body = if target.starts_with("/releases?") {
+                release.clone()
+            } else if target == checksum_target {
+                server_checksum.clone()
+            } else if target == archive_target {
+                server_archive.clone()
+            } else {
+                panic!("unexpected local update request: {target}");
+            };
+            targets.push(target);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        }
+        targets
+    });
+
+    // SAFETY: this feature-only regression is the sole writer of this test-only variable.
+    unsafe { std::env::set_var("AUDIOLIB_UPDATE_TEST_SOURCE", &base) };
+    let client = UpdateClient::for_install(Product::Server, "0.9.0", root.path()).unwrap();
+    unsafe { std::env::remove_var("AUDIOLIB_UPDATE_TEST_SOURCE") };
+    assert_eq!(client.releases_api(), format!("{base}/releases"));
+    let update = client.check().unwrap().unwrap();
+    assert_eq!(update.tag, tag);
+    let prepared = client.prepare(&update, root.path()).unwrap();
+    for required in package::required(Product::Server) {
+        assert!(
+            prepared
+                .stage_root()
+                .join("payload")
+                .join(required)
+                .is_file()
+        );
+    }
+    let targets = server.join().unwrap();
+    assert_eq!(targets.len(), 3);
+    assert!(targets[0].starts_with("/releases?"));
+    assert_eq!(targets[1], format!("/download/{tag}/{name}.sha256"));
+    assert_eq!(targets[2], format!("/download/{tag}/{name}"));
 }
 
 #[test]

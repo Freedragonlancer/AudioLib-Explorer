@@ -2,11 +2,13 @@
 //! Who may call the API: authentication modes, external-request detection, bearer tokens
 //! generated on the admin page, and the admin settings file.
 //!
-//! * `off`: no endpoint needs a token.
+//! * `off`: ordinary endpoints need no token.
 //! * `external` (default): requests that came through a reverse proxy (any forwarding
 //!   header) or from a socket peer outside the loopback / private LAN ranges need
 //!   `Authorization: Bearer <token>`; LAN-direct requests with a trusted Host need none.
 //! * `all`: every endpoint except `/health` needs a token (the old `auth = true`).
+//!
+//! AI relay always requires a valid token, independently of these LAN exemptions.
 //!
 //! Accepted tokens: the environment token (`AUDIOLIB_SERVER_TOKEN`, when set) and tokens
 //! generated on the admin page. Only the SHA-256 hash of a generated token is stored
@@ -1026,13 +1028,33 @@ impl Security {
         headers: &HeaderMap,
         connection: Option<&ConnectionInfo>,
     ) -> Result<(), ApiError> {
+        self.authorize_with_requirement(headers, connection, false)
+    }
+
+    /// Require a valid bearer token even when ordinary LAN reads need none. The
+    /// regular peer-based authentication limiter and generated-token handling apply.
+    pub fn authorize_required_token(
+        self: &Arc<Self>,
+        headers: &HeaderMap,
+        connection: Option<&ConnectionInfo>,
+    ) -> Result<(), ApiError> {
+        self.authorize_with_requirement(headers, connection, true)
+    }
+
+    fn authorize_with_requirement(
+        self: &Arc<Self>,
+        headers: &HeaderMap,
+        connection: Option<&ConnectionInfo>,
+        force_token: bool,
+    ) -> Result<(), ApiError> {
         let mode = self.auth_mode();
         let origin = self.classify(headers, connection);
-        let required = match mode {
-            AuthMode::Off => false,
-            AuthMode::All => true,
-            AuthMode::External => origin == RequestOrigin::External,
-        };
+        let required = force_token
+            || match mode {
+                AuthMode::Off => false,
+                AuthMode::All => true,
+                AuthMode::External => origin == RequestOrigin::External,
+            };
         let presented = headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -1092,6 +1114,9 @@ impl Security {
         Err(if !required {
             host_forbidden()
         } else if presented.is_none() {
+            if force_token {
+                return Err(ApiError::unauthorized());
+            }
             match mode {
                 AuthMode::External => ApiError::token_required(
                     "A bearer token is required: this request is not from a trusted direct LAN peer",

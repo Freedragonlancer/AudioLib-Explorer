@@ -36,9 +36,17 @@ Windows 客户端解压后通过 `Start-AudioLibExplorer.cmd` 启动。Mac 客�
 
 ## AI 智能搜索
 
-![AudioLib Explorer AI 智能搜索](resources/screenshot-main.png)
+![v1.0 AI 智能搜索、关键词标签和声音列表 / v1.0 AI search with keyword tags and a populated sound list](resources/screenshot-main.png)
 
-桌面端 AI 智能搜索界面，使用示例描述和关键词。声音列表为空，没有连接服务器。
+v1.0 AI 智能搜索。搜索条已打开 Generate Tags，旁边是声音描述和已核验的关键词标签；当前任务列出命中的声音和 Waveform。
+
+v1.0 AI search. Generate Tags is on, with the description and verified keyword tags. The current task lists the matching sounds and their waveforms.
+
+![v1.0 声音详情与内嵌封面 / v1.0 sound details with embedded cover artwork](resources/screenshot-artwork.png)
+
+v1.0 同一搜索的详情。选中的声音在列表旁显示内嵌封面、描述和 Waveform。
+
+v1.0 details for the same search. The selected sound shows its embedded cover, description, and waveform next to the list.
 
 桌面端 AI 智能搜索随 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0) 发布，该正式版最多保留 5 个已核验标签。当前 beta 主声音标签最多 6 个；允许分层且有有效分层素材时，总计最多 8 个，主声音和分层标签以颜色及“主／层”标识区分。“查询全部”搜索当前整组标签，自动搜索仍最多 3 项。服务端和 `AudioLibCli` 不提供该功能。行为与限制见 [实现说明](doc/Rust_AI_Search.md)。[研究与设计](doc/AI_Keyword_Search_Design.md) 保留了 1.0 未交付的概念；其中的 SVG 线框不是应用截图。英文对照见 [README.md](README.md#ai-search)。
 

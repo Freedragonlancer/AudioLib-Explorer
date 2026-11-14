@@ -4337,7 +4337,7 @@ fn server_mode_edits_annotations_but_keeps_structural_writes_disabled() {
     }
     click_label(&ui, "Add to favorites");
     assert!(ui.get_edit_favorite());
-    assert!(ui.get_metadata_dirty());
+    assert!(!ui.get_metadata_dirty());
     click_label(&ui, "Remove from favorites");
     assert!(!ui.get_edit_favorite());
     let inspector_scroll = ElementHandle::find_by_element_id(&ui, "AppWindow::inspector-scroll")

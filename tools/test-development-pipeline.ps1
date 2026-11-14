@@ -8,7 +8,7 @@ $taskRoot = Split-Path -Parent $PSScriptRoot
 $taskArtifacts = Join-Path $taskRoot ('.rust-validation/development-pipeline-tests/' + [guid]::NewGuid().ToString('N'))
 $taskTools = Join-Path $taskArtifacts 'tools'
 New-Item -ItemType Directory -Path $taskTools -Force | Out-Null
-foreach ($taskScript in @('check-local.ps1', 'build-release.ps1','build-cache.ps1')) {
+foreach ($taskScript in @('check-local.ps1', 'build-release.ps1','build-server-release.ps1','build-cache.ps1')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $taskScript) -Destination $taskTools
 }
 @'
@@ -21,17 +21,18 @@ if ($taskState.FailPreparation) { throw 'Synthetic SDK preparation failed.' }
 $taskCalls = [Collections.Generic.List[object]]::new()
 $taskState = @{ Prepared=0; FailPreparation=$false; FailAt=0; TestOutput='test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' }
 @'
-param($Action,$Mode,$MaxGiB)
+param($Action,$Mode,$MaxGiB,$Root,$TargetDirectory)
 . (Join-Path $PSScriptRoot 'build-cache.ps1')
 $probe = Enter-AudioLibBuildLease (Split-Path -Parent $PSScriptRoot) -Exclusive
 try {
-    if ($Action -ne 'Run' -or $Mode -ne 'Debug' -or $MaxGiB -ne 40) { throw 'Unexpected post-check cleanup selection.' }
+    if ($Action -ne 'Run' -or $Mode -ne 'Intermediate' -or $MaxGiB -ne 0) { throw 'Unexpected post-check cleanup selection.' }
+    if ($TargetDirectory -and (Get-AudioLibCanonicalPath $TargetDirectory) -cne (Get-AudioLibCanonicalPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'target'))) { throw 'Cleanup selected another target directory.' }
     $taskState.Cleaned++
     $global:LASTEXITCODE=0
 } finally { $probe.Dispose() }
 '@ | Set-Content -LiteralPath (Join-Path $taskTools 'clean-build-artifacts.ps1') -Encoding UTF8
 $taskState.Cleaned = 0
-$taskEnvironmentKeys = @('CPAL_ASIO_DIR', 'LIBCLANG_PATH', 'CARGO_ENCODED_RUSTFLAGS', 'CXXFLAGS_x86_64_pc_windows_msvc', 'CXXFLAGS_x86_64-pc-windows-msvc', 'CARGO_BUILD_TARGET')
+$taskEnvironmentKeys = @('CPAL_ASIO_DIR', 'LIBCLANG_PATH', 'CARGO_ENCODED_RUSTFLAGS', 'CXXFLAGS_x86_64_pc_windows_msvc', 'CXXFLAGS_x86_64-pc-windows-msvc', 'CC_SHELL_ESCAPED_FLAGS', 'CARGO_BUILD_TARGET', 'CARGO_TARGET_DIR', 'TEMP', 'TMP', 'AUDIOLIB_DEFER_BUILD_CLEANUP')
 $taskOriginalEnvironment = @{}
 foreach ($taskKey in $taskEnvironmentKeys) {
     $taskOriginalEnvironment[$taskKey] = [Environment]::GetEnvironmentVariable($taskKey, 'Process')
@@ -44,15 +45,26 @@ function cargo {
         Arguments=@($args)
         Prepared=$taskState.Prepared
         Flags=$env:CARGO_ENCODED_RUSTFLAGS
+        TargetDirectory=$env:CARGO_TARGET_DIR
+        TempDirectory=$env:TEMP
+        TmpDirectory=$env:TMP
     })
     $global:LASTEXITCODE = if ($taskState.FailAt -eq $taskCalls.Count) { 17 } else { 0 }
     if ($args[0] -eq 'test') { Write-Output $taskState.TestOutput }
+}
+function rustc {
+    if (($args -join ' ') -cne '-vV') { throw 'Unexpected synthetic Rust compiler invocation.' }
+    $global:LASTEXITCODE = 0
+    'rustc synthetic-test-toolchain'
+    'host: x86_64-pc-windows-msvc'
 }
 if ((Get-Command cargo).CommandType -ne 'Function') { throw 'Synthetic Cargo is not active.' }
 
 function Invoke-PipelineCase([string]$Script, [hashtable]$Parameters, [string]$Failure = '') {
     $taskCalls.Clear()
     $taskState.Prepared = 0
+    $taskCleanedBefore = $taskState.Cleaned
+    if ($PSVersionTable.PSVersion -lt [version]'7.3' -and !$Parameters.ContainsKey('CleanBuildArtifacts')) { $Parameters.CleanBuildArtifacts = $false }
     $taskBeforeLocation = (Get-Location).Path
     $taskBeforeEnvironment = @{}
     foreach ($taskKey in $taskEnvironmentKeys) {
@@ -64,9 +76,16 @@ function Invoke-PipelineCase([string]$Script, [hashtable]$Parameters, [string]$F
     $taskState.LastOutput = Get-Content -LiteralPath $taskCaseLog -Raw
     if (!$Failure -and $taskCaught) { throw "Unexpected $Script failure: $taskCaught. Log: $taskCaseLog" }
     if ($Failure -and (!$taskCaught -or ($taskCaught.ToString() + ' ' + $taskCaught.FullyQualifiedErrorId) -notmatch $Failure)) { throw "Expected $Script failure ($Failure), got: $taskCaught. Log: $taskCaseLog" }
+    if ($Failure -and $taskState.Cleaned -ne $taskCleanedBefore) { throw "$Script cleaned build diagnostics after failure." }
     if ((Get-Location).Path -cne $taskBeforeLocation) { throw "$Script did not restore the working directory." }
     foreach ($taskKey in $taskEnvironmentKeys) {
         if ([string][Environment]::GetEnvironmentVariable($taskKey, 'Process') -cne [string]$taskBeforeEnvironment[$taskKey]) { throw "$Script did not restore $taskKey." }
+    }
+    foreach ($taskCall in $taskCalls) {
+        $taskExpectedTarget = Get-AudioLibCanonicalPath (Join-Path $taskArtifacts 'target')
+        if ($taskCall.TargetDirectory -cne $taskExpectedTarget) { throw "$Script did not route Cargo to the selected absolute build directory." }
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
+            ($taskCall.TempDirectory -cne (Join-Path $taskExpectedTarget 'tmp') -or $taskCall.TmpDirectory -cne $taskCall.TempDirectory)) { throw "$Script did not isolate compiler TEMP/TMP beside its Cargo output." }
     }
 }
 
@@ -103,6 +122,8 @@ try {
         throw 'Pipeline fixture did not isolate its build lease.'
     }
     $env:CARGO_BUILD_TARGET = 'x86_64-pc-windows-msvc'
+    $env:CARGO_TARGET_DIR = Join-Path $taskArtifacts 'target'
+    $env:AUDIOLIB_DEFER_BUILD_CLEANUP = $null
     Invoke-PipelineCase 'check-local.ps1' @{} 'Select -Package'
     if ($taskCalls.Count -or $taskState.Prepared) { throw 'Missing scope started workspace checks.' }
     Invoke-PipelineCase 'check-local.ps1' @{Package=@('audiolib-db');Workspace=$true} 'Select -Package'
@@ -113,6 +134,7 @@ try {
     Assert-SingleWorkspacePass
     if ($taskState.LastOutput -notmatch 'format=passed; clippy=passed; tests=passed') { throw 'Default check summary lost its executed scope.' }
     if ($taskCalls.Count -ne 3 -or $taskState.Prepared -ne 0) { throw 'Default checks unexpectedly add ASIO work.' }
+    if ($PSVersionTable.PSVersion -ge [version]'7.3' -and $taskState.Cleaned -ne 1) { throw 'Default successful development checks did not clean intermediate files.' }
     Write-Host 'PASS: explicit workspace checks run once without SDK preparation.'
 
     Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true;Asio=$true; Target='x86_64-pc-windows-msvc'}
@@ -243,6 +265,7 @@ try {
         if ($taskCalls.Count -or $taskState.Prepared) { throw 'Invalid test selection started work.' }
     }
     $taskPassedOutput = $taskState.TestOutput
+    $taskState.Cleaned = 0
     foreach ($taskEmptyOutput in @('', 'test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out;', 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out;')) {
         $taskState.TestOutput = $taskEmptyOutput
         Invoke-PipelineCase 'check-local.ps1' @{Package=@('audiolib-db');Test='search_fragments';TestFilter='missing'} 'did not report any passed tests'
@@ -280,6 +303,7 @@ try {
     Write-Host 'PASS: every failed check or SDK preparation stops later stages and restores the environment.'
 
     if ($PSVersionTable.PSVersion -ge [version]'7.3') {
+        $taskState.Cleaned = 0
         $taskState.TestOutput = 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out;'
         Invoke-PipelineCase 'check-local.ps1' @{Package=@('audiolib-db');Test='search_fragments';TestFilter='missing';CleanBuildArtifacts=$true} 'did not report any passed tests'
         if ($taskState.Cleaned) { throw 'Empty targeted results cleaned their diagnostic cache.' }
@@ -300,15 +324,30 @@ try {
             if ($taskState.Cleaned -ne ($taskCleanedBefore + 1)) { throw 'A failed single stage cleaned its diagnostic cache.' }
             $taskState.FailAt = 0
         }
+        $taskCleanedBefore = $taskState.Cleaned
+        Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true;CleanBuildArtifacts=$false}
+        if ($taskState.Cleaned -ne $taskCleanedBefore) { throw 'Explicit development cleanup opt-out was ignored.' }
+        $env:AUDIOLIB_DEFER_BUILD_CLEANUP = '1'
+        try {
+            Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true}
+            Invoke-PipelineCase 'build-release.ps1' @{WithoutAsio=$true}
+            if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { Invoke-PipelineCase 'build-server-release.ps1' @{Target='x86_64-pc-windows-msvc'} }
+            if ($taskState.Cleaned -ne $taskCleanedBefore) { throw 'Nested checks/build pruned the active release pipeline cache.' }
+        } finally { $env:AUDIOLIB_DEFER_BUILD_CLEANUP = $null }
+        $env:CARGO_TARGET_DIR = 'target'
+        try { Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true;CleanBuildArtifacts=$false} }
+        finally { $env:CARGO_TARGET_DIR = Join-Path $taskArtifacts 'target' }
     } else {
         Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true;CleanBuildArtifacts=$true} 'pwsh 7.3'
         if ($taskCalls.Count -or $taskState.Cleaned) { throw 'Unsupported cleanup started work.' }
     }
-    Write-Host 'PASS: optional cleanup runs only after successful checks and after releasing the build lease.'
+    Write-Host 'PASS: default cleanup follows successful checks, releases its lease, honors opt-out/defer and retains failed diagnostics; Cargo target and TEMP/TMP are restored.'
 
     $env:CARGO_BUILD_TARGET = 'aarch64-apple-darwin'
     foreach ($taskWithoutAsio in @($true, $false)) {
+        $taskCleanedBefore = $taskState.Cleaned
         Invoke-PipelineCase 'build-release.ps1' @{WithoutAsio=$taskWithoutAsio}
+        if ($PSVersionTable.PSVersion -ge [version]'7.3' -and $taskState.Cleaned -ne ($taskCleanedBefore + 1)) { throw 'A successful standalone release build did not clean intermediate files.' }
         $taskBuild = $taskCalls[0]
         if ($taskCalls.Count -ne 1 -or $taskBuild.Arguments[0] -ne 'build' -or
             (@(Get-SelectedPackages $taskBuild | Sort-Object) -join ',') -cne 'audiolib-cli,audiolib-desktop' -or
@@ -326,6 +365,34 @@ try {
         Invoke-PipelineCase 'build-release.ps1' @{WithoutAsio=$taskWithoutAsio} 'Rust release build failed'
     }
     Write-Host 'PASS: client-only builds preserve ASIO selection, release flags and build failures.'
+    $taskState.FailAt = 0
+    if ($PSVersionTable.PSVersion -ge [version]'7.3' -and [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $taskCleanedBefore = $taskState.Cleaned
+        Invoke-PipelineCase 'build-server-release.ps1' @{Target='x86_64-pc-windows-msvc'}
+        $taskBuild = $taskCalls[0]
+        $taskSelectedBins = @(for ($taskIndex = 0; $taskIndex -lt $taskBuild.Arguments.Count; $taskIndex++) {
+            if ($taskBuild.Arguments[$taskIndex] -eq '--bin') { $taskBuild.Arguments[$taskIndex + 1] }
+        })
+        $taskTargetIndex = [array]::IndexOf($taskBuild.Arguments, '--target')
+        if ($taskCalls.Count -ne 1 -or $taskBuild.Arguments[0] -ne 'build' -or
+            (@(Get-SelectedPackages $taskBuild | Sort-Object) -join ',') -cne 'audiolib-db,audiolib-server' -or
+            (@($taskSelectedBins | Sort-Object) -join ',') -cne 'audiolib-migrate,audiolib-server' -or
+            $taskBuild.Arguments -contains '--workspace' -or $taskBuild.Arguments -contains '--features' -or
+            $taskBuild.Arguments -notcontains '--release' -or $taskBuild.Arguments -notcontains '--locked' -or
+            $taskBuild.Arguments -notcontains '--no-default-features' -or
+            $taskTargetIndex -lt 0 -or $taskBuild.Arguments[$taskTargetIndex + 1] -cne 'x86_64-pc-windows-msvc' -or
+            $taskState.Prepared -or $taskState.Cleaned -ne ($taskCleanedBefore + 1)) { throw 'Native server build changed its selected binaries/features or did not clean after success.' }
+        if ($taskBuild.Flags -notmatch 'target-feature=\+crt-static' -or $taskBuild.Flags -notmatch '--remap-path-prefix=') { throw 'Native server build lost release privacy/static CRT flags.' }
+        $taskCleanedBefore = $taskState.Cleaned
+        Invoke-PipelineCase 'build-server-release.ps1' @{Target='x86_64-pc-windows-msvc';CleanBuildArtifacts=$false}
+        if ($taskState.Cleaned -ne $taskCleanedBefore) { throw 'Server cleanup opt-out was ignored.' }
+        $taskState.FailAt = 1
+        Invoke-PipelineCase 'build-server-release.ps1' @{Target='x86_64-pc-windows-msvc'} 'Rust server release build failed'
+        $taskState.FailAt = 0
+        Invoke-PipelineCase 'build-server-release.ps1' @{Target='x86_64-unknown-linux-gnu'} 'native OS'
+        if ($taskCalls.Count) { throw 'A non-native server target started Cargo.' }
+        Write-Host 'PASS: native server builds select only server/migrator, clean after success, retain failures and restore target/TEMP/flags; non-native targets are rejected.'
+    }
     Write-Host "Development pipeline routing passed. Synthetic artifacts: $taskArtifacts"
 } finally {
     foreach ($taskKey in $taskEnvironmentKeys) {

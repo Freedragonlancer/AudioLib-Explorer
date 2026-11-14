@@ -28,9 +28,17 @@ A free, open-source sound effects (SFX) library manager for sound design, game a
 - Scales to sound libraries of 10 TB and more.
 - From v1.0.0, the desktop app can turn a plain-language sound description into English keyword queries that hit the current library: up to six main queries in the current beta, expanding to eight total when useful source layers are verified, or five in the published v1.0.0. The offline lexicon needs no account; a cloud model needs your own HTTPS provider, API key and model. See [AI search](#ai-search).
 
-![AudioLib Explorer AI search / AI 智能搜索](resources/screenshot-main.png)
+![v1.0 AI search with keyword tags and a populated sound list / v1.0 AI 智能搜索、关键词标签和声音列表](resources/screenshot-main.png)
 
-Desktop AI search with a sample description and keyword tags. The sound list is empty and no server is connected.
+v1.0 AI search. Generate Tags is on, with the description and verified keyword tags. The current task lists the matching sounds and their waveforms.
+
+v1.0 AI 智能搜索。搜索条已打开 Generate Tags，旁边是声音描述和已核验的关键词标签；当前任务列出命中的声音和 Waveform。
+
+![v1.0 sound details with embedded cover artwork / v1.0 声音详情与内嵌封面](resources/screenshot-artwork.png)
+
+v1.0 details for the same search. The selected sound shows its embedded cover, description, and waveform next to the list.
+
+v1.0 同一搜索的详情。选中的声音在列表旁显示内嵌封面、描述和 Waveform。
 
 ## AI search
 
@@ -218,7 +226,7 @@ The release script builds only the desktop/CLI binaries. To deliver without ASIO
 
 For tagged local delivery, `pwsh tools/release-pipeline.ps1 -Action Run -Tag <tag>` combines preflight, build, package, portable acceptance and fixed local installation. It emits short JSON status, keeps full logs on disk and resumes valid stages. Preview with the default `Plan` action; select source checks by actual change scope. Native server/Mac and read-only asset-verification plans are described in the [release pipeline guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_Pipeline.md).
 
-After actual build/test work, add `-CleanBuildArtifacts` to local checks or the release pipeline to prune debug caches above the default 40 GiB budget (`-BuildCacheLimitGiB` adjusts it). Preview separately with `pwsh tools/clean-build-artifacts.ps1`; release outputs, packages, installations, SDKs and user data are retained. See [build cache maintenance](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md).
+Windows managed checks/builds now use `%LOCALAPPDATA%/AudioLibExplorerBuild/<checkout-hash>/target` on the local fixed disk, including temporary compiler files; an explicit `CARGO_TARGET_DIR` takes precedence. Successful checks/builds automatically remove compilation intermediates while keeping final executables. Release pipelines defer cleanup until delivery succeeds, and failures retain diagnostic caches. Use PowerShell 7.3+; `-CleanBuildArtifacts:$false` retains caches for repeated development runs. Removing dependency caches makes the next compilation slower. The standalone cleaner still previews a 40 GiB debug budget by default; packages, installations, SDKs and user data are retained. See [build cache maintenance](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md).
 
 Build the Mac client on an Apple Silicon Mac with Xcode command-line tools, the pinned native Rust toolchain and PowerShell 7.3 or newer. Use a clean checkout of the intended release tag (`v0.9.6`, commit `4606291`, in this example):
 

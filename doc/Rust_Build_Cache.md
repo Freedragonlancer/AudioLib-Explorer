@@ -1,6 +1,10 @@
 # 编译缓存维护
 
-开发、测试和发布使用的 Cargo `target` 是可重建缓存。完成一轮实际编译/测试后，先按预算维护；发布交付须先完成打包、验收和固定安装，再清理构建缓存。纯文档改动或复用未变化结果时，不需要重复扫描缓存。
+开发、测试和发布使用的 Cargo `target` 是可重建缓存。Windows 受管构建默认放在本机 `%LOCALAPPDATA%/AudioLibExplorerBuild/<checkout-hash>/target`（本机位于 C 盘），`TEMP`/`TMP` 也临时指向该目录下的 `tmp`，减少 SMB 上的编译读写。每个 checkout/worktree 分开存放；映射盘和同一 UNC 路径得到相同身份。显式 `CARGO_TARGET_DIR` 优先，相对路径按仓库根解析；Unix 默认仍是 `<Root>/target`。
+
+`check-local.ps1`、Windows 客户端/原生服务端 release 构建和有 Rust 构建阶段的 release 管线默认在成功后清理全部编译中间文件，无需再加开关。管线内的检查和构建延后到打包、验收、安装全部成功后统一清理。失败保留缓存和诊断；全部构建阶段复用且此前清理成功时也复用清理收据，不重复扫描。只读资产核验计划和 Plan/Status/Logs 不创建编译目录或自动清理。
+
+自动清理使用 `Intermediate -MaxGiB 0`：删除 `build`、`deps`、`.fingerprint`、`incremental`、`examples` 及 Cargo `tmp`，保留 profile 根目录的最终 EXE、库、PDB 和发布收据需要的二进制身份。下一次实际编译会重新生成依赖缓存，可能比保留缓存慢。正式包、固定安装、SDK、Cargo/Rustup 下载缓存和应用数据保留。
 
 ```powershell
 # 默认只预览：40 GiB 预算，选择 debug，保留 release。
@@ -8,16 +12,19 @@ pwsh tools/clean-build-artifacts.ps1
 # 超过预算才清理，已在预算内时不删除。
 pwsh tools/clean-build-artifacts.ps1 -Action Run
 
-# 开发检查成功后自动执行同一维护步骤。
-pwsh tools/check-local.ps1 -Package audiolib-db -CleanBuildArtifacts
-# 发布管线完成交付后维护；不要再在其 ChecksFile 内嵌一次清理。
-pwsh tools/release-pipeline.ps1 -Action Run -Tag v0.9.0 -CleanBuildArtifacts
+# 开发检查成功后自动清除中间文件。
+pwsh tools/check-local.ps1 -Package audiolib-db
+# 发布管线完成交付后自动清理；不要在 ChecksFile 内再清理。
+pwsh tools/release-pipeline.ps1 -Action Run -Tag v1.0.0
+# 连续多轮开发时可暂留缓存，最后一轮恢复默认清理。
+pwsh tools/check-local.ps1 -Package audiolib-db -CleanBuildArtifacts:$false
 ```
 
-统一入口的 `-BuildCacheLimitGiB` 可调整预算，默认 40。维护失败时保留已通过的检查/交付证据，日志说明清理未完成；重试先复用仍有效的结果。`check-local.ps1` 的维护开关要求使用 PowerShell 7.3+，不带该开关的既有 PowerShell 5.1 用法保持兼容。
+`check-local.ps1` 和 release 管线的 `-BuildCacheLimitGiB` 默认 0，表示清除全部合格中间文件；设为正数则在达到该逻辑空间预算后停止。独立清理器保持原有 `Debug`/40 GiB 默认，避免改变手工维护命令的删除范围。`-CleanBuildArtifacts:$false` 可关闭入口的自动清理。自动清理要求 PowerShell 7.3+；Windows PowerShell 5.1 调用开发/客户端构建时必须关闭该开关。维护失败保留已通过的检查/交付证据，并明确报告未完成，不终止占用进程。
 
 | 模式 | 删除范围 | 保留内容 |
 | --- | --- | --- |
+| `Intermediate`（工作流自动使用） | debug/release 的编译中间子目录和 Cargo tmp | profile 根目录最终 EXE/库/PDB、文档、归属标记、包及安装 |
 | `Debug`（默认） | 宿主机和 target triple 下的完整 `debug` profile | release 二进制、包、固定安装和正式验证记录 |
 | `Incremental` | profile 下的 `incremental` 目录 | 已编译依赖、测试程序与发布程序 |
 | `All`（显式） | debug/release、Cargo doc/tmp | target 根、Cargo/归属标记、源码、SDK、包、安装和数据 |
@@ -37,7 +44,7 @@ pwsh tools/clean-build-artifacts.ps1 -Action Run -OlderThanDays 14
 
 ## 外部目录与 worktree
 
-默认读取 `$env:CARGO_TARGET_DIR`，未设置时为 `<Root>/target`。项目自身的 target 需要真实 Cargo `CACHEDIR.TAG` 和可识别布局；外部 target 还需要与当前仓库/主机匹配的归属标记。先预览，确认目录是独占编译缓存后显式登记；不能把不同项目共用的缓存声明为本项目独占。
+构建、打包、验收和清理器通过 `build-cache.ps1` 的同一解析函数选择目录。Windows 默认位置要求位于本机固定磁盘；实际构建首次创建空专用目录时登记当前仓库/主机归属，只有 Cargo 自己生成 `CACHEDIR.TAG`。归属登记使用 target 父目录中的独立初始化锁，最多等待 10 秒，防止并行启动读取未写完的标记；锁文件保留，退出释放句柄。已有但未登记的非空目录不会自动认领。独立外部 `CARGO_TARGET_DIR` 仍需先预览并显式登记；不能把不同项目共用的缓存声明为本项目独占。
 
 ```powershell
 pwsh tools/clean-build-artifacts.ps1 -TargetDirectory C:/audiolib-cache
@@ -45,7 +52,9 @@ pwsh tools/clean-build-artifacts.ps1 -Action Register -TargetDirectory C:/audiol
 pwsh tools/clean-build-artifacts.ps1 -Action Run -TargetDirectory C:/audiolib-cache
 ```
 
-空目录登记不需要 `-AdoptExisting`，但不会伪造 Cargo 标记；后续 Cargo 编译自行生成标记。不能接管其他仓库/主机已经登记的目录，也不接受缺少 Cargo 标记的历史非空目录。旧 worktree 可通过 `-Root <仍存在的 AudioLib checkout>` 维护其默认 target；无 checkout 或归属不明的历史输出先保留，不猜测所有权。每个目录分别预览和维护，不递归扫描、清空整块构建盘。
+空目录登记不需要 `-AdoptExisting`，也不伪造 Cargo 标记。Cargo 对预先存在的目录可能不写入 `CACHEDIR.TAG`（参见 [Cargo 的目录创建逻辑](https://github.com/rust-lang/cargo/blob/rust-1.97.0/crates/cargo-util/src/paths.rs#L689-L759)）。此时仅在当前仓库／主机归属登记有效，并同时具有有界、可解析的 `.rustc_info.json` 编译器记录及已知 profile 的 `.fingerprint`／`deps` 编译产物证据时接受；全清后保留的编译器记录、空目录或仅含有效 Cargo 标记的 target triple 目录也支持重复预览和清理。未登记、错误归属或只有归属文件而无 Cargo 证据的非空目录仍被拒绝。不能接管其他仓库／主机的缓存。旧 worktree 可通过 `-Root <仍存在的 AudioLib checkout>` 维护其默认 target；无 checkout 或归属不明的历史输出先保留，不猜测所有权。每个目录分别预览和维护，不递归扫描、清空整块构建盘。
+
+底层直接运行 `cargo` 不会自动调用 PowerShell 工作流。优先用 `check-local.ps1`；确需直接运行时，先调用 `Enter-AudioLibBuildEnvironment`，在共享构建租约内执行 Cargo，检查退出码，finally 中释放租约并调用 `Exit-AudioLibBuildEnvironment` 恢复环境；成功后再用 `Invoke-AudioLibPostBuildCleanup` 清理返回的 `TargetDirectory`。这些接口都在 `tools/build-cache.ps1`，不修改系统级环境。
 
 ## 安全与并发
 
@@ -53,6 +62,6 @@ pwsh tools/clean-build-artifacts.ps1 -Action Run -TargetDirectory C:/audiolib-ca
 
 受管开发检查、客户端/服务端构建和 release 管线持有共享构建租约；清理使用同一 Git common directory 中的独占租约，因此不会撞上这些构建或其测试。预览只持有共享租约。管线的清理阶段在交付成功、释放构建租约后才运行，交付失败不清理缓存和诊断证据。直接运行 Cargo 等未受管命令时，清理器还会检查本机编译器及目标目录中运行的程序；发现占用返回 `blocked`（退出码 2），不会杀进程。退出码 1 为验证/删除失败，0 为完成预览、登记或所选维护。不要并行启动手工未受管的 Cargo 和清理；远程主机/容器的缓存须在匹配环境中单独确认占用和归属，不把本机检查当作远端覆盖。
 
-清掉编译产物后，依赖它们的管线收据会在下次 Run 中失效并重新构建；未变化的源码功能检查结果仍可按原身份复用。已经验收的 `dist` 包与安装不受影响，不因为清理而重跑应用验收。Mac 不可覆盖归档的规则继续有效；需要重新交付时用新的运行目录。
+自动清理保留正式 EXE，因此未变化的 build/package/accept/install 收据仍可复用。显式 `All` 删除最终产物后，依赖它们的收据在下次 Run 中失效并重新构建；未变化的源码功能检查结果仍可按原身份复用。已经验收的 `dist` 包与安装不受影响。Mac 不可覆盖归档的规则继续有效；需要重新交付时用新的运行目录。
 
-维护代码变更运行 `pwsh tools/test-build-artifacts.ps1`。删除、链接、占用、外部归属及管线联动均在自有临时 Git checkout 和伪 Cargo 目录中验证；不借此清理真实 SDK、数据库或音频。
+维护代码变更运行 `pwsh tools/test-build-environment.ps1`、`pwsh tools/test-build-artifacts.ps1` 和受影响的工作流路由/包边界测试。目录选择、环境恢复、删除、链接、占用、外部归属及管线联动均在自有临时 Git checkout 和伪 Cargo 目录中验证；不借此清理真实 SDK、数据库或音频。

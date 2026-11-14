@@ -6,6 +6,7 @@
 //! LAN-only admin page (`/admin`) manages the public URL, authentication and library
 //! management modes, tokens and optional native TLS.
 pub mod admin;
+mod ai_relay;
 mod artwork;
 pub mod auth;
 pub mod browse;
@@ -34,7 +35,7 @@ pub mod wf_job;
 pub mod wfdb;
 
 pub use auth::{AuthMode, ConnectionInfo, Listener, ManageMode, Security};
-pub use config::{BearerToken, RootConfig, ServerConfig};
+pub use config::{AiUpstream, BearerToken, RootConfig, ServerConfig};
 pub use error::{ApiError, ErrorBody};
 pub use manage::{
     CapabilitiesResponse, MAX_REMOVE_IDS, RemoveAudioRequest, RemoveAudioResponse,

@@ -86,7 +86,7 @@ Clippy 已检查的目标不再额外跑相同配置的 `cargo check`；测试�
 
 ### 本地验证与云端最小检查
 
-完成实际编译/测试后使用 `check-local.ps1 -CleanBuildArtifacts` 或独立缓存维护命令，按默认 40 GiB 预算清理 debug；发布在交付完成后用管线同名开关维护。未超过预算不删除，纯文档或复用未变检查不重复扫描。构建/测试期间不清理，失败时保留缓存和诊断；详见[编译缓存维护](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md)。
+Windows 受管开发/release 构建默认使用本机 `%LOCALAPPDATA%/AudioLibExplorerBuild/<checkout-hash>/target`，显式 `CARGO_TARGET_DIR` 优先；编译 `TEMP`/`TMP` 随之设置并在结束后恢复。`check-local.ps1` 成功后自动清理 `Intermediate` 全部编译中间文件，保留最终 EXE；发布管线在交付全部成功后统一清理。连续多轮开发可先传 `-CleanBuildArtifacts:$false`，最后一轮恢复默认，避免重复重编译。独立清理器仍默认预览 `Debug`/40 GiB 预算。纯文档或全部构建收据复用时不重复扫描；构建/测试期间不清理，失败保留缓存和诊断。详见[编译缓存维护](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md)。
 
 一个任务内的多个定向测试或单阶段补测共用一次最终缓存维护，不在每次 `-Stage Tests` 后扫描、清理缓存。只有本次任务实际编译/测试过 Rust 才触发维护；脚本使用 fake Cargo 的合成路由测试不属于 Rust 构建。
 

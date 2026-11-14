@@ -33,7 +33,8 @@ pub enum Answer {
 }
 
 /// UI-visible decision evidence. Probabilities are model estimates, not guarantees.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Decision {
     /// Selected registry ID; it may identify a recipe, keyword or UCS category.
     pub recipe: String,

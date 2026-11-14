@@ -4,7 +4,7 @@ members = ["crates/audiolib-core", "crates/audiolib-ai", "crates/audiolib-db", "
 exclude = ["vendor/libsqlite3-sys"]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.97"
 license = "GPL-3.0-only"

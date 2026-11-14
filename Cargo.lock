@@ -480,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-ai"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "audiolib-core",
  "audiolib-windows",
@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-audio"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "audioadapter-buffers",
  "audiolib-core",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-cli"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "audiolib-audio",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "schemars",
  "semver",
@@ -546,7 +546,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-db"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "audiolib-audio",
  "audiolib-core",
@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-desktop"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "audiolib-ai",
@@ -602,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-ipc"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "audiolib-core",
  "serde_json",
@@ -612,8 +612,9 @@ dependencies = [
 
 [[package]]
 name = "audiolib-remote"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
+ "audiolib-ai",
  "audiolib-core",
  "audiolib-db",
  "audiolib-windows",
@@ -634,9 +635,10 @@ dependencies = [
 
 [[package]]
 name = "audiolib-server"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
+ "audiolib-ai",
  "audiolib-audio",
  "audiolib-core",
  "audiolib-db",
@@ -671,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-update"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "flate2",
@@ -688,9 +690,10 @@ dependencies = [
 
 [[package]]
 name = "audiolib-windows"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "audiolib-core",
+ "audiolib-db",
  "cc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
