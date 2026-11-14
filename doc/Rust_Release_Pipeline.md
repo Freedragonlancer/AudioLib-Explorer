@@ -39,7 +39,7 @@ pwsh tools/release-pipeline.ps1 -PlanFile tools/release-plans/windows-local.json
 pwsh tools/release-pipeline.ps1 -PlanFile tools/release-plans/windows-local.json -Tag v1.0.0 -Action Status
 ```
 
-已有仍有效的源码检查无需再加入；还需执行时通过 `-ChecksFile` 选择实际影响范围，未选择记为 `not-requested`。成功交付且本次实际构建过 Rust 后维护一次编译缓存，可在 Run 添加 `-CleanBuildArtifacts`；同一任务不在每阶段清理。保留 release 缓存以利用 Cargo 增量判定，网络 checkout 可复用已配置的本机 SSD `CARGO_TARGET_DIR`；构建、打包、验收必须使用同一个目录和 ASIO 配置。无需为了试用增加版本提交或创建标签。
+已有仍有效的源码检查无需再加入；还需执行时通过 `-ChecksFile` 选择实际影响范围，未选择记为 `not-requested`。Windows 默认使用本机 `%LOCALAPPDATA%/AudioLibExplorerBuild/<checkout-hash>/target`，显式 `CARGO_TARGET_DIR` 优先；构建、打包、验收使用同一解析结果和 ASIO 配置。成功交付后自动统一清理编译中间文件，保留 release EXE 和已验收包；本次全部构建收据复用且清理已有通过收据时不重复扫描。清除依赖缓存会使下一次实际编译变慢，需要连跑多轮时可暂用 `-CleanBuildArtifacts:$false`。无需为了试用增加版本提交或创建标签。
 
 尚未提交的试用源码无法使用有干净身份要求的管线；可以按顺序单独调用 `check-release-licenses.ps1 -Profile WindowsClient`、`build-release.ps1`、`package-portable.ps1 -SkipBuild -SkipArchive`、`validate-portable.ps1 -BinaryDirectory dist/latest/portable`、`install-local-release.ps1`，每步成功才进入下一步。无 ASIO 时前四步都加 `-WithoutAsio`。检查对应最新源码，只复用输入仍一致的结果；不要使用旧 EXE，也不要为源码草稿伪造已提交身份。
 
@@ -185,7 +185,7 @@ pwsh tools/verify-release-assets.ps1 -Tag v0.9.6 -ListExpectedAssets
 
 这些检查不替代原生 payload 验收。恢复后的正式 Release 仍需做线上元数据/摘要核验和固定安装同步；同版本资产替换仍须单独授权。
 
-实际交付建议加 `-CleanBuildArtifacts`，在所有交付阶段成功后追加 debug 缓存维护，默认预算 40 GiB，可用 `-BuildCacheLimitGiB` 调整。管线先释放构建租约，再运行独占清理；交付失败不触发清理，清理失败保留已通过的交付收据供续跑。不要在 ChecksFile 中再清理一遍。SDK、正式包和固定安装均保留，详见[编译缓存维护](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md)。
+包含 Rust 构建/检查的计划默认在全部交付阶段成功后追加 `Intermediate` 清理，`-BuildCacheLimitGiB` 默认 0（清除全部合格中间文件），可显式设为正数按预算保留。管线先释放构建租约，再独占清理；子检查/构建自动延后清理，不在 ChecksFile 中再加一次。清理保留 profile 根目录的最终 EXE/库/PDB，不破坏 build/package/accept/install 身份或续跑；全部构建阶段复用时复用上次成功清理，显式 `-CleanBuildArtifacts` 可要求重新维护。交付失败不清理，清理失败保留已通过的交付收据供续跑。只读资产核验计划不自动创建或清理缓存。SDK、正式包和固定安装均保留，详见[编译缓存维护](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md)。
 
 多份计划共享同一受管缓存时，等它们的构建与交付全部结束，再集中维护一次；不要给每条并行计划都追加清理。只复用原有结果、未构建/测试 Rust 的文档或流程任务不触发维护扫描。
 

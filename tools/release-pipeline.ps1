@@ -20,8 +20,8 @@ param(
     [string]$Stage,
     [ValidateRange(1,80)][int]$Tail = 15,
     [ValidateRange(256,16000)][int]$MaxCharacters = 6000,
-    [switch]$CleanBuildArtifacts,
-    [ValidateRange(0,100000)][double]$BuildCacheLimitGiB = 40,
+    [switch]$CleanBuildArtifacts = $true,
+    [ValidateRange(0,100000)][double]$BuildCacheLimitGiB = 0,
     [string]$Root = (Split-Path -Parent $PSScriptRoot)
 )
 $ErrorActionPreference = 'Stop'
@@ -31,6 +31,12 @@ $Root = [IO.Path]::GetFullPath($Root)
 function Resolve-PathValue([string]$Path) { [IO.Path]::GetFullPath($Path, $Root) }
 function Hash-Text([string]$Value) { [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Value))).ToLowerInvariant() }
 function Emit($Value) { $Value | ConvertTo-Json -Compress -Depth 12 | Write-Output }
+function Test-RustBuildStage($Item) {
+    return $Item.id -eq 'build' -or
+        ($Item.Contains('script') -and [IO.Path]::GetFileName($Item.script) -in @('check-local.ps1','build-release.ps1','build-server-release.ps1','build-macos-client.ps1')) -or
+        ($Item.Contains('command') -and [IO.Path]::GetFileNameWithoutExtension($Item.command) -eq 'cargo' -and
+            $Item.Contains('arguments') -and @($Item.arguments | Where-Object { $_ -in @('build','check','clippy','test','run','bench','rustc','rustdoc') }).Count -gt 0)
+}
 function Assert-Unlinked([string]$Path) {
     $cursor = [IO.Path]::GetFullPath($Path)
     while ($cursor) {
@@ -122,6 +128,10 @@ function Read-LogTail([string]$Path) {
 $lock = $null
 $process = $null
 $buildLease = $null
+$buildEnvironment = $null
+$savedDeferredCleanup = $env:AUDIOLIB_DEFER_BUILD_CLEANUP
+$forceCleanup = $PSBoundParameters.ContainsKey('CleanBuildArtifacts') -and $CleanBuildArtifacts
+$rustWorkPerformed = $false
 . (Join-Path $PSScriptRoot 'build-cache.ps1')
 try {
     $plan = Get-Content -LiteralPath (Resolve-PathValue $PlanFile) -Raw | ConvertFrom-Json -AsHashtable
@@ -156,7 +166,7 @@ try {
         exit 0
     }
     $commit = Read-Git @('rev-parse','HEAD')
-    $variables = [ordered]@{Tag=$Tag;Commit=$commit;Root=$Root;RunDirectory=$RunDirectory;Asio=$false;TargetDirectory=$(if ($env:CARGO_TARGET_DIR) { Resolve-PathValue $env:CARGO_TARGET_DIR } else { Join-Path $Root 'target' })}
+    $variables = [ordered]@{Tag=$Tag;Commit=$commit;Root=$Root;RunDirectory=$RunDirectory;Asio=$false;TargetDirectory=(Get-AudioLibTargetDirectory $Root)}
     if (!$plan.Contains('variables')) { $plan.variables = @{} }
     if (!$plan.Contains('environment_variables')) { $plan.environment_variables = @() }
     if (!$plan.Contains('environment_tools')) { $plan.environment_tools = @() }
@@ -183,8 +193,10 @@ try {
         if ($steps[0].id -eq 'preflight') { $steps = @($steps[0]) + $checks + @($steps | Select-Object -Skip 1) }
         else { $steps = $checks + $steps }
     }
-    if ($CleanBuildArtifacts) {
-        $steps += @{id='build-cache-cleanup';script='tools/clean-build-artifacts.ps1';reuse='never';parameters=@{Action='Run';Mode='Debug';MaxGiB=$BuildCacheLimitGiB;Root=$Root};needs=@($steps[-1].id)}
+    $hasRustStages = @($steps | Where-Object { Test-RustBuildStage $_ }).Count -gt 0
+    $cleanupRequested = $CleanBuildArtifacts -and ($hasRustStages -or $forceCleanup)
+    if ($cleanupRequested) {
+        $steps += [ordered]@{id='build-cache-cleanup';script='tools/clean-build-artifacts.ps1';parameters=[ordered]@{Action='Run';Mode='Intermediate';MaxGiB=$BuildCacheLimitGiB;Root=$Root;TargetDirectory=$variables.TargetDirectory};needs=@($steps[-1].id)}
     }
     $ids = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $expandedSteps = @()
@@ -200,7 +212,7 @@ try {
         $stageOutputs[$item.id] = if ($item.Contains('outputs')) { @($item.outputs) } else { @() }
     }
     if ($Action -eq 'Plan') {
-        Emit @{status='planned';name=$plan.name;stages=@($expandedSteps | ForEach-Object { @{id=$_.id;command=$(if ($_.Contains('script')) {$_.script} else {$_.command})} });source_checks=$(if ($ChecksFile) {'selected'} else {'not-requested'});state=$statePath}
+        Emit @{status='planned';name=$plan.name;stages=@($expandedSteps | ForEach-Object { @{id=$_.id;command=$(if ($_.Contains('script')) {$_.script} else {$_.command})} });source_checks=$(if ($ChecksFile) {'selected'} else {'not-requested'});target_directory=$variables.TargetDirectory;state=$statePath}
         exit 0
     }
     if (!$Tag) { throw 'Run requires -Tag.' }
@@ -216,6 +228,11 @@ try {
     $childProbe = [IO.File]::Open($childLockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     $childProbe.Dispose()
     $buildLease = Enter-AudioLibBuildLease $Root
+    if ($hasRustStages -or $forceCleanup) {
+        $buildEnvironment = Enter-AudioLibBuildEnvironment $Root
+        # Child checks/builders share this target and defer cleanup to the final stage.
+        $env:AUDIOLIB_DEFER_BUILD_CLEANUP = '1'
+    }
     $previousState = if (Test-Path -LiteralPath $statePath) { Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json -AsHashtable } else { @{schema_version=2;cache=@{}} }
     if ($previousState.schema_version -notin @(1,2)) { throw 'Unsupported pipeline state schema.' }
     $cache = if ($previousState.Contains('cache')) { $previousState.cache } else { $previousState.stages }
@@ -225,7 +242,7 @@ try {
     $state = [ordered]@{schema_version=2;status='running';commit=$commit;source_checks=$(if ($ChecksFile) {'selected'} else {'not-requested'});stages=[ordered]@{};cache=$cache}
     $environment = [ordered]@{host=$hostName;architecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString();powershell=$PSVersionTable.PSVersion.ToString()}
     $nativeEnvironment = @([Environment]::GetEnvironmentVariables().Keys | Where-Object { $_ -match '^(CARGO_(BUILD_|TARGET_|PROFILE_|ENCODED_|HOME$)|RUST(UP_|FLAGS$|C($|_)|DOC($|FLAGS$|_))|SLINT_|CXX($|FLAGS|_)|CC($|_)|(HOST|TARGET)_(CC|CXX|CFLAGS|CXXFLAGS|AR)|AR($|_)|CFLAGS($|_)|CPPFLAGS($|_)|LDFLAGS($|_)|BINDGEN_|PKG_CONFIG|LIBCLANG|CPAL_ASIO|SDKROOT$|MACOSX_DEPLOYMENT_TARGET$|LIB(PATH)?$|LINK$|CL$|_CL_$|INCLUDE$|VCINSTALLDIR$|VCToolsInstallDir$|WindowsSdkDir$)' })
-    foreach ($name in (@('PATH','RUSTUP_TOOLCHAIN','CARGO_HOME','RUSTUP_HOME','CARGO_TARGET_DIR','CARGO_BUILD_TARGET','CARGO_ENCODED_RUSTFLAGS','RUSTFLAGS','CXXFLAGS','LIBCLANG_PATH','CPAL_ASIO_DIR') + $nativeEnvironment + @($plan.environment_variables) | Sort-Object -Unique)) {
+    foreach ($name in (@('PATH','RUSTUP_TOOLCHAIN','CARGO_HOME','RUSTUP_HOME','CARGO_TARGET_DIR','TEMP','TMP','CARGO_BUILD_TARGET','CARGO_ENCODED_RUSTFLAGS','RUSTFLAGS','CXXFLAGS','LIBCLANG_PATH','CPAL_ASIO_DIR') + $nativeEnvironment + @($plan.environment_variables) | Sort-Object -Unique)) {
         $environment[$name] = [Environment]::GetEnvironmentVariable($name)
     }
     Push-Location -LiteralPath $Root
@@ -237,14 +254,14 @@ try {
         }
     } finally { Pop-Location }
     $environmentKey = Hash-Text ($environment | ConvertTo-Json -Compress)
-    $runnerKey = (Get-FileHash -LiteralPath $PSCommandPath).Hash + (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'release-stage.ps1')).Hash
+    $runnerKey = (Get-FileHash -LiteralPath $PSCommandPath).Hash + (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'release-stage.ps1')).Hash + (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'build-cache.ps1')).Hash
     $artifactCache = @{}
     Save-State
     foreach ($item in $expandedSteps) {
         Assert-Source
         $id = $item.id
         Assert-Dependencies $item
-        if ($CleanBuildArtifacts -and $id -eq 'build-cache-cleanup' -and $buildLease) { $buildLease.Dispose();$buildLease=$null }
+        if ($cleanupRequested -and $id -eq 'build-cache-cleanup' -and $buildLease) { $buildLease.Dispose();$buildLease=$null }
         $command = [ordered]@{root=$Root;lock_path=$childLockPath}
         if ($item.Contains('github_auth')) { $command.github_auth = [bool]$item.github_auth }
         if ($item.Contains('script')) { $command.script = Resolve-PathValue $item.script; $command.parameters = if ($item.Contains('parameters')) {$item.parameters} else {@{}} }
@@ -257,7 +274,8 @@ try {
         $inputKey = Hash-Text (($item | ConvertTo-Json -Compress -Depth 12) + ($command | ConvertTo-Json -Compress -Depth 12) + $scriptKey + $sourceKey + $externalKey + $environmentKey + $runnerKey + ($dependencyKeys -join ','))
         $outputs = if ($item.Contains('outputs')) {@($item.outputs)} else {@()}
         $artifactKey = $null
-        if ($previous.stages.Contains($id) -and $previous.stages[$id].status -in @('passed','reused') -and $previous.stages[$id].input -ceq $inputKey -and !($item.Contains('reuse') -and $item.reuse -eq 'never')) {
+        $refreshCleanup = $id -eq 'build-cache-cleanup' -and ($rustWorkPerformed -or $forceCleanup)
+        if (!$refreshCleanup -and $previous.stages.Contains($id) -and $previous.stages[$id].status -in @('passed','reused') -and $previous.stages[$id].input -ceq $inputKey -and !($item.Contains('reuse') -and $item.reuse -eq 'never')) {
             try {
                 $artifactKey = Get-ArtifactKey $outputs
             } catch { $artifactKey = $null }
@@ -271,6 +289,7 @@ try {
         }
         # A rerun may mutate any artifacts. Invalidate the in-process hash cache.
         $artifactCache.Clear()
+        if (Test-RustBuildStage $item) { $rustWorkPerformed = $true }
         $attemptDirectory = Join-Path $RunDirectory ('attempts/' + $id + '-' + [guid]::NewGuid().ToString('N'))
         Assert-Unlinked $attemptDirectory
         New-Item -ItemType Directory -Path $attemptDirectory -Force | Out-Null
@@ -335,4 +354,9 @@ try {
     }
     Emit @{status='failed';error=$_.Exception.Message}
     exit 1
-} finally { if ($buildLease) { $buildLease.Dispose() }; if ($lock) { $lock.Dispose() } }
+} finally {
+    if ($buildLease) { $buildLease.Dispose() }
+    if ($buildEnvironment) { Exit-AudioLibBuildEnvironment $buildEnvironment }
+    $env:AUDIOLIB_DEFER_BUILD_CLEANUP = $savedDeferredCleanup
+    if ($lock) { $lock.Dispose() }
+}

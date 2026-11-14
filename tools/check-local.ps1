@@ -41,8 +41,9 @@ Override the repository Cargo target for Clippy/tests (for example,
 aarch64-apple-darwin or x86_64-unknown-linux-gnu). Format is target-independent.
 ASIO requires a Windows MSVC target; omitting Target retains repository defaults.
 .PARAMETER CleanBuildArtifacts
-After checks pass, prune debug caches above BuildCacheLimitGiB (default 40).
-Requires pwsh 7.3+; do not nest this cleanup inside an active release pipeline.
+After checks pass, remove compilation intermediates (default enabled, zero budget).
+Use -CleanBuildArtifacts:$false to retain caches across several development runs.
+Requires pwsh 7.3+; a release pipeline defers cleanup until delivery completes.
 .EXAMPLE
 ./tools/check-local.ps1 -Package audiolib-db -Test search_fragments
 .EXAMPLE
@@ -70,8 +71,8 @@ param(
     [ValidateNotNullOrEmpty()][string]$TestFilter,
     [switch]$NoDefaultFeatures,
     [ValidateNotNullOrEmpty()][string]$Target,
-    [switch]$CleanBuildArtifacts,
-    [ValidateRange(0,100000)][double]$BuildCacheLimitGiB = 40
+    [switch]$CleanBuildArtifacts = $true,
+    [ValidateRange(0,100000)][double]$BuildCacheLimitGiB = 0
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
@@ -114,8 +115,9 @@ if ($Asio) {
 if ($NoDefaultFeatures) { $featureArguments += '--no-default-features' }
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 . (Join-Path $PSScriptRoot 'build-cache.ps1')
-if ($CleanBuildArtifacts -and $PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Use pwsh 7.3+ for post-check build cache maintenance.' }
+if ($CleanBuildArtifacts -and !$env:AUDIOLIB_DEFER_BUILD_CLEANUP -and $PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Use pwsh 7.3+ for post-check build cache maintenance, or -CleanBuildArtifacts:$false.' }
 $buildLease = $null
+$buildEnvironment = $null
 $runId = [guid]::NewGuid().ToString('N')
 $logs = Join-Path (Join-Path $taskRoot '.rust-validation/local-checks') $runId
 $targetArguments = if ($Target) { @('--target', $Target) } else { @() }
@@ -156,6 +158,7 @@ function Invoke-CargoCheck([string]$Name, [string[]]$Arguments) {
 Push-Location -LiteralPath $taskRoot
 try {
     $buildLease = Enter-AudioLibBuildLease $taskRoot
+    $buildEnvironment = Enter-AudioLibBuildEnvironment $taskRoot
     New-Item -ItemType Directory -Path $logs -Force | Out-Null
     if ($Stage -eq 'All') {
         Invoke-CargoCheck 'format' @('fmt', '--all', '--', '--check')
@@ -191,11 +194,11 @@ try {
     Write-Host "Selected local checks passed ($scope). $results. Logs: $logs"
 } finally {
     if ($buildLease) { $buildLease.Dispose() }
+    if ($buildEnvironment) { Exit-AudioLibBuildEnvironment $buildEnvironment }
     [Environment]::SetEnvironmentVariable('CPAL_ASIO_DIR', $savedAsioDirectory, 'Process')
     [Environment]::SetEnvironmentVariable('LIBCLANG_PATH', $savedClangDirectory, 'Process')
     Pop-Location
 }
-if ($CleanBuildArtifacts) {
-    & (Join-Path $PSScriptRoot 'clean-build-artifacts.ps1') -Action Run -Mode Debug -MaxGiB $BuildCacheLimitGiB
-    if ($LASTEXITCODE -ne 0) { throw 'Checks passed; build cache maintenance did not complete. Inspect its status; no process was stopped.' }
+if ($CleanBuildArtifacts -and !$env:AUDIOLIB_DEFER_BUILD_CLEANUP) {
+    Invoke-AudioLibPostBuildCleanup $taskRoot $buildEnvironment.TargetDirectory $BuildCacheLimitGiB
 }

@@ -7,12 +7,14 @@ Default budget: 40 logical GiB, debug profiles only. MaxGiB=0 clears every
 eligible candidate of the chosen mode. Cargo home, SDKs, packages, installed
 applications and validation evidence are not candidates. No process is stopped.
 External target directories need Register; nonempty adoption is explicit.
+Intermediate removes rebuildable profile subdirectories and Cargo tmp while
+retaining final profile-root binaries for packaging and receipt verification.
 #>
 #Requires -Version 7.3
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [ValidateSet('Plan','Run','Register')][string]$Action='Plan',
-    [ValidateSet('Incremental','Debug','All')][string]$Mode='Debug',
+    [ValidateSet('Incremental','Intermediate','Debug','All')][string]$Mode='Debug',
     [ValidateRange(0,100000)][double]$MaxGiB=40,
     [ValidateRange(0,3650)][int]$OlderThanDays=0,
     [string]$TargetDirectory,
@@ -30,7 +32,7 @@ try {
     if(!(Test-Path -LiteralPath $manifest -PathType Leaf) -or !([IO.File]::ReadAllText($manifest).Contains('crates/audiolib-core'))){throw 'Root must identify the AudioLib Cargo workspace, not an arbitrary directory.'}
     $explicitTarget=$PSBoundParameters.ContainsKey('TargetDirectory')
     if($Action -eq 'Register' -and !$explicitTarget){throw 'Register requires an explicitly named -TargetDirectory.'}
-    if (!$TargetDirectory) { $TargetDirectory=if($env:CARGO_TARGET_DIR){$env:CARGO_TARGET_DIR}else{Join-Path $Root 'target'} }
+    if (!$TargetDirectory) { $TargetDirectory=Get-AudioLibTargetDirectory $Root }
     if (![IO.Path]::IsPathRooted($TargetDirectory)) { $TargetDirectory=Join-Path $Root $TargetDirectory }
     $TargetDirectory=Get-AudioLibCanonicalPath $TargetDirectory
     $comparison=if($IsWindows){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}
@@ -48,7 +50,7 @@ try {
     $identity=if($IsWindows){$common.ToLowerInvariant()}else{$common}
     $ownerId=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($identity)))
     $ownerPath=Join-Path $TargetDirectory '.audiolib-build-owner.json'
-    $report=[ordered]@{schema_version=1;action=$Action;status='planned';mode=$Mode;target=$TargetDirectory;max_gib=$MaxGiB;before_bytes=0L;removed_bytes=0L;remaining_bytes=0L;budget_met=$null;candidates=@();preserved='release outputs unless All; target root/markers; SDKs; Cargo/Rustup home; dist; installations; source/audio/data; validation evidence'}
+    $report=[ordered]@{schema_version=1;action=$Action;status='planned';mode=$Mode;target=$TargetDirectory;max_gib=$MaxGiB;before_bytes=0L;removed_bytes=0L;remaining_bytes=0L;budget_met=$null;candidates=@();preserved='profile-root outputs in Intermediate; release outputs unless All; target root/markers; SDKs; Cargo/Rustup home; dist; installations; source/audio/data; validation evidence'}
     if (!(Test-Path -LiteralPath $TargetDirectory)) {
         if($Action -ne 'Register'){$report.status='absent';$report|ConvertTo-Json -Compress -Depth 5;exit 0}
         $null=[IO.Directory]::CreateDirectory($TargetDirectory)
@@ -163,12 +165,35 @@ try {
     foreach($profile in $profiles){
         $size=0L;$incrementalSize=0L;$latest=$profile.LastWriteTimeUtc
         $incremental=Join-Path $profile.FullName 'incremental'
+        $intermediateCandidates=@()
+        if($Mode -eq 'Intermediate'){
+            $paths=if($profile.Name -eq 'tmp'){@($profile.FullName)}elseif($profile.Name -in @('debug','release')){@('build','deps','.fingerprint','incremental','examples')|ForEach-Object{Join-Path $profile.FullName $_}}else{@()}
+            foreach($path in $paths){
+                if(Test-Path -LiteralPath $path -PathType Container){
+                    $intermediateCandidates+=,[ordered]@{path=$path;bytes=0L;last_write=(Get-Item -LiteralPath $path -Force).LastWriteTimeUtc}
+                }
+            }
+        }
         foreach($entry in Get-ChildItem -LiteralPath $profile.FullName -Recurse -Force){
             if($entry.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Linked entry in Cargo profile; cleanup refused.'}
             if($entry.LastWriteTimeUtc -gt $latest){$latest=$entry.LastWriteTimeUtc}
             if(!$entry.PSIsContainer){$size+=$entry.Length;if(Is-Within $entry.FullName $incremental){$incrementalSize+=$entry.Length}}
+            foreach($candidate in $intermediateCandidates){
+                if(Is-Within $entry.FullName $candidate.path){
+                    if($entry.LastWriteTimeUtc -gt $candidate.last_write){$candidate.last_write=$entry.LastWriteTimeUtc}
+                    if(!$entry.PSIsContainer){$candidate.bytes+=$entry.Length}
+                }
+            }
         }
         $report.before_bytes+=$size
+        if($Mode -eq 'Intermediate'){
+            foreach($candidate in $intermediateCandidates){
+                if($candidate.last_write -le [DateTime]::UtcNow.AddDays(-$OlderThanDays)){
+                    $report.candidates+=,[ordered]@{path=$candidate.path;bytes=$candidate.bytes;last_write_utc=$candidate.last_write.ToString('o');status='eligible'}
+                }
+            }
+            continue
+        }
         $path=if($Mode -eq 'Incremental'){$incremental}else{$profile.FullName}
         $selected=($Mode -eq 'All' -or $Mode -eq 'Incremental' -or $profile.Name -eq 'debug') -and (Test-Path -LiteralPath $path -PathType Container) -and $latest -le [DateTime]::UtcNow.AddDays(-$OlderThanDays)
         if($selected){$report.candidates+=,[ordered]@{path=$path;bytes=$(if($Mode -eq 'Incremental'){$incrementalSize}else{$size});last_write_utc=$latest.ToString('o');status='eligible'}}

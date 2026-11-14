@@ -2,11 +2,13 @@
 # Build only the portable client's two executables and their dependencies.
 # Servers use build-server-release.ps1; benchmarks are built on demand.
 [CmdletBinding()]
-param([switch]$WithoutAsio)
+param([switch]$WithoutAsio, [switch]$CleanBuildArtifacts = $true)
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'build-cache.ps1')
 $buildLease = $null
+$buildEnvironment = $null
+if ($CleanBuildArtifacts -and !$env:AUDIOLIB_DEFER_BUILD_CLEANUP -and $PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Use pwsh 7.3+ for automatic build cleanup, or -CleanBuildArtifacts:$false.' }
 $savedEncodedFlags = $env:CARGO_ENCODED_RUSTFLAGS
 $nativeFlagKey = 'CXXFLAGS_x86_64_pc_windows_msvc'
 $savedNativeFlags = [Environment]::GetEnvironmentVariable($nativeFlagKey)
@@ -26,7 +28,7 @@ if ($savedEncodedFlags) {
 }
 $pathMappings = @{}
 $pathMappings[[IO.Path]::GetFullPath($taskRoot)] = '/audiolib/source'
-if ($env:CARGO_TARGET_DIR) { $pathMappings[[IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)] = '/audiolib/build' }
+$pathMappings[(Get-AudioLibTargetDirectory $taskRoot)] = '/audiolib/build'
 if ($env:USERPROFILE) { $pathMappings[$env:USERPROFILE] = '/audiolib/user' }
 $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
 $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
@@ -52,6 +54,7 @@ $nativeFlags = if ($savedHyphenNativeFlags) { $savedHyphenNativeFlags } elseif (
 Push-Location -LiteralPath $taskRoot
 try {
     $buildLease = Enter-AudioLibBuildLease $taskRoot
+    $buildEnvironment = Enter-AudioLibBuildEnvironment $taskRoot
     # The packager consumes this exact target even if the caller overrides
     # CARGO_BUILD_TARGET. Keep one build invocation for both feature choices.
     $buildArguments = @('build', '-p', 'audiolib-desktop', '-p', 'audiolib-cli', '--bins', '--release', '--locked', '--target', 'x86_64-pc-windows-msvc')
@@ -63,11 +66,15 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Rust release build failed.' }
 } finally {
     if ($buildLease) { $buildLease.Dispose() }
+    if ($buildEnvironment) { Exit-AudioLibBuildEnvironment $buildEnvironment }
     $env:CARGO_ENCODED_RUSTFLAGS = $savedEncodedFlags
     [Environment]::SetEnvironmentVariable($nativeFlagKey, $savedNativeFlags)
     [Environment]::SetEnvironmentVariable('CXXFLAGS_x86_64-pc-windows-msvc', $savedHyphenNativeFlags)
     $env:CPAL_ASIO_DIR = $savedAsioDirectory
     $env:LIBCLANG_PATH = $savedClangDirectory
     Pop-Location
+}
+if ($CleanBuildArtifacts -and !$env:AUDIOLIB_DEFER_BUILD_CLEANUP) {
+    Invoke-AudioLibPostBuildCleanup $taskRoot $buildEnvironment.TargetDirectory
 }
 

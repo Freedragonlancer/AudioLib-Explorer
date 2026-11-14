@@ -12,7 +12,7 @@ try {
     $env:CARGO_TARGET_DIR = Join-Path $testRoot 'target'
     New-Item -ItemType Directory -Path (Join-Path $testRoot 'tools') | Out-Null
     Set-Content -LiteralPath (Join-Path $testRoot 'Cargo.toml') -Value "[workspace.package]`nversion = `"0.4.4`"" -Encoding ASCII
-    foreach ($script in @('package-portable.ps1','dependency-licenses.ps1','license-notices.json','console-utf8.ps1','validate-portable.ps1','validate-portable-licenses.ps1','validate-portable-zip.ps1','validate-package-privacy.ps1','validate-update-compatibility.ps1','update-compatible-files.json','portable-files.json','Start-AudioLibExplorer.cmd','install-beta.ps1','AudioLibExplorer-beta.cmd')) {
+    foreach ($script in @('build-cache.ps1','package-portable.ps1','dependency-licenses.ps1','license-notices.json','console-utf8.ps1','validate-portable.ps1','validate-portable-licenses.ps1','validate-portable-zip.ps1','validate-package-privacy.ps1','validate-update-compatibility.ps1','update-compatible-files.json','portable-files.json','Start-AudioLibExplorer.cmd','install-beta.ps1','AudioLibExplorer-beta.cmd')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination (Join-Path $testRoot 'tools')
     }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'license-notices') -Destination (Join-Path $testRoot 'tools') -Recurse
