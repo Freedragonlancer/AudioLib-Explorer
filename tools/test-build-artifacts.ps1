@@ -232,6 +232,64 @@ foreach($name in @('debug/app.pdb','x86_64-pc-windows-msvc/release/app.exe','x86
     if(!(Test-Path -LiteralPath (Join-Path $untaggedIntermediate $name))){throw 'Repeated untagged intermediate cleanup removed retained EXE/PDB outputs.'}
 }
 Write-Host 'PASS: untagged Intermediate cleanup retains EXE/PDBs across repeat Plan/Run, removes new Cargo tmp, rejects changed compiler evidence and does not authorize All.'
+$partialTarget=Join-Path $taskRoot 'interrupted-intermediate-target'
+$null=Invoke-Clean @{Action='Register';TargetDirectory=$partialTarget}
+New-UntaggedCargoEvidence $partialTarget
+$partialCache=Join-Path $partialTarget 'debug/incremental/session/cache.bin'
+New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($partialCache)) -Force|Out-Null
+[IO.File]::WriteAllBytes($partialCache,[byte[]]::new(256))
+$partialExecutable=Join-Path $partialTarget 'debug/app.exe'
+[IO.File]::WriteAllBytes($partialExecutable,[byte[]]::new(512))
+$partialExecutableHash=(Get-FileHash -LiteralPath $partialExecutable).Hash
+$partialOwner=Join-Path $partialTarget '.audiolib-build-owner.json'
+$partialOwnerState=Get-Content -LiteralPath $partialOwner -Raw|ConvertFrom-Json
+$partialOwnerState|Add-Member -NotePropertyName retained_extension -NotePropertyValue 'keep unknown fields'
+$partialOwnerState|ConvertTo-Json|Set-Content -LiteralPath $partialOwner -Encoding utf8
+# Make the two live proof directories the first deletions; the next process
+# check deterministically interrupts cleanup before its remaining incremental data.
+$age=3
+foreach($name in @('.fingerprint','deps','incremental')){
+    $path=Join-Path $partialTarget ('debug/'+$name)
+    $stamp=[DateTime]::UtcNow.AddMinutes(-$age)
+    foreach($entry in @(Get-ChildItem -LiteralPath $path -Recurse -Force)){$entry.LastWriteTimeUtc=$stamp}
+    (Get-Item -LiteralPath $path).LastWriteTimeUtc=$stamp
+    $age--
+}
+$global:taskCacheTestProbeCount=0
+$global:taskCacheTestStartAt=4
+try{
+    $interrupted=Invoke-Clean @{TargetDirectory=$partialTarget;Mode='Intermediate'} 2
+}finally{$global:taskCacheTestStartAt=0}
+if($interrupted.status -ne 'blocked' -or $interrupted.removed_bytes -ne 256 -or
+    (Test-Path -LiteralPath (Join-Path $partialTarget 'debug/deps')) -or
+    (Test-Path -LiteralPath (Join-Path $partialTarget 'debug/.fingerprint')) -or !(Test-Path -LiteralPath $partialCache)){
+    throw 'Interrupted-cleanup fixture did not remove live Cargo evidence before the occupancy guard.'
+}
+$partialOwnerText=[IO.File]::ReadAllText($partialOwner)
+$partialPlan=Invoke-Clean @{Action='Plan';TargetDirectory=$partialTarget;Mode='Intermediate'}
+if($partialPlan.status -ne 'planned' -or [IO.File]::ReadAllText($partialOwner) -cne $partialOwnerText){throw 'Partial cleanup cannot be previewed without changing its proof.'}
+$null=Invoke-Clean @{TargetDirectory=$partialTarget;Mode='All'} 1
+$partialInfo=Join-Path $partialTarget '.rustc_info.json'
+$partialInfoText=[IO.File]::ReadAllText($partialInfo)
+try{
+    [IO.File]::WriteAllText($partialInfo,($partialInfoText+' '))
+    $null=Invoke-Clean @{TargetDirectory=$partialTarget;Mode='Intermediate'} 1
+}finally{[IO.File]::WriteAllText($partialInfo,$partialInfoText)}
+$invalidProof=Get-Content -LiteralPath $partialOwner -Raw|ConvertFrom-Json
+$invalidProof.intermediate_cleanup.paths=@('../outside')
+try{
+    $invalidProof|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $partialOwner -Encoding utf8
+    $null=Invoke-Clean @{TargetDirectory=$partialTarget;Mode='Intermediate'} 1
+}finally{[IO.File]::WriteAllText($partialOwner,$partialOwnerText)}
+if(!(Test-Path -LiteralPath $partialCache) -or (Get-FileHash -LiteralPath $partialExecutable).Hash -cne $partialExecutableHash){throw 'Invalid partial-cleanup proof changed artifacts.'}
+$resumed=Invoke-Clean @{TargetDirectory=$partialTarget;Mode='Intermediate'}
+$resumedOwner=Get-Content -LiteralPath $partialOwner -Raw|ConvertFrom-Json
+if($resumed.status -ne 'passed' -or $resumed.removed_bytes -ne 256 -or (Test-Path -LiteralPath $partialCache) -or
+    (Get-FileHash -LiteralPath $partialExecutable).Hash -cne $partialExecutableHash -or
+    $resumedOwner.retained_extension -cne 'keep unknown fields' -or $resumedOwner.PSObject.Properties['intermediate_cleanup']){
+    throw 'Resumed partial cleanup lost proof, retained intermediates or changed final/extension data.'
+}
+Write-Host 'PASS: interrupted untagged Intermediate cleanup resumes after live evidence is gone; changed compiler/unsafe proof/broader mode are refused and final outputs are preserved.'
 $realCompilers=@(Microsoft.PowerShell.Management\Get-Process | Where-Object ProcessName -match '^(cargo|rustc|rustdoc|clippy-driver|clang|clang\+\+|gcc|g\+\+|cc1|cc1plus|link|lld|lld-link|cl)$')
 if($realCompilers.Count){Write-Host 'Pipeline cleanup integration: not-run (another real compiler is active).'}else{
     $tools=Join-Path $taskRoot 'tools'

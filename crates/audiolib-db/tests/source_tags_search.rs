@@ -179,7 +179,11 @@ fn derived_tag_filters_use_the_partial_index_without_sorter_or_scan() {
     .unwrap();
     let any = "(COALESCE(trim(af.user_tags),'')<>'' OR af.source_tags_text<>'')";
     let contains = "(instr(audiolib_casefold(COALESCE(af.user_tags,'')),'x')>0 OR instr(af.source_tags_text,'x')>0)";
-    for filter in [any.to_string(), format!("{any} AND {contains}")] {
+    let tagged = "(af.source_tags_text<>'' OR audiolib_has_user_tags(af.user_tags))";
+    for filter in [
+        format!("{any} AND {tagged}"),
+        format!("{any} AND {contains}"),
+    ] {
         let plan = plan(&conn, &filter);
         assert!(plan.contains("idx_audio_visible_tagged_any"), "{plan}");
         assert!(!plan.contains("USE TEMP B-TREE"), "{plan}");
@@ -481,6 +485,11 @@ fn old_snapshots_without_the_column_repair_owned_tags_without_changing_source() 
     seed_library(&path, true);
     {
         let conn = support::connection(&path).unwrap();
+        conn.execute(
+            "UPDATE audio_files SET user_tags=?1 WHERE id IN (2,3)",
+            ["\u{3000}\u{a0}\t\r\n"],
+        )
+        .unwrap();
         conn.execute_batch(
             "DROP INDEX idx_audio_visible_tagged_any;
              DROP INDEX idx_audio_visible_tagged_folders;

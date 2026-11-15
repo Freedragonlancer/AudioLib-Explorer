@@ -61,6 +61,22 @@ try {
         $known=if($entry.PSIsContainer){$entry.Name -in @('debug','release','doc','tmp') -or $entry.Name -match '^[A-Za-z0-9_]+-[A-Za-z0-9_-]+$'}else{$entry.Name -in @('CACHEDIR.TAG','.rustc_info.json','.audiolib-build-owner.json','.cargo-lock','.DS_Store') -or $entry.Name -match '^\.audiolib-.*\.lock$'}
         if(!$known){throw "Unrecognized build target entry: $($entry.Name)"}
     }
+    function Get-IntermediateRelativePaths {
+        foreach($entry in $entries|Where-Object PSIsContainer){
+            $bases=if($entry.Name -in @('debug','release')){@($entry.FullName)}
+                elseif($entry.Name -match '^[A-Za-z0-9_]+-[A-Za-z0-9_-]+$'){@('debug','release')|ForEach-Object{Join-Path $entry.FullName $_}}
+                else{@()}
+            $paths=@($bases|ForEach-Object{$base=$_;@('build','deps','.fingerprint','incremental','examples')|ForEach-Object{Join-Path $base $_}})
+            if($entry.Name -eq 'tmp'){$paths+= $entry.FullName}
+            elseif($entry.Name -match '^[A-Za-z0-9_]+-[A-Za-z0-9_-]+$'){$paths+=Join-Path $entry.FullName 'tmp'}
+            foreach($path in $paths){
+                if(Test-Path -LiteralPath $path -PathType Container){
+                    Assert-AudioLibUnlinkedPath $path
+                    [IO.Path]::GetRelativePath($TargetDirectory,$path).Replace('\','/')
+                }
+            }
+        }
+    }
     if((Test-Path -LiteralPath $ownerPath) -and (Get-Item -LiteralPath $ownerPath -Force).Length -gt 16384){throw 'Invalid oversized cache ownership marker.'}
     $owner=if(Test-Path -LiteralPath $ownerPath){Get-Content -LiteralPath $ownerPath -Raw|ConvertFrom-Json}else{$null}
     if($owner -and ($owner.schema_version -ne 1 -or $owner.owner_id -cne $ownerId -or $owner.host -cne [Environment]::MachineName)){throw 'Build cache belongs to a different workspace or host.'}
@@ -127,6 +143,28 @@ try {
             if($package -and $artifact){
                 Assert-AudioLibUnlinkedPath $package.FullName
                 Assert-AudioLibUnlinkedPath $artifact.FullName
+                return $true
+            }
+        }
+        # A partial Intermediate pass can remove both live evidence directories
+        # before an occupancy check interrupts it. Its write-ahead proof permits
+        # only the previously inventoried intermediate paths, with the same
+        # compiler state. It never authorizes whole-profile deletion.
+        $pendingEvidence=$owner.PSObject.Properties['intermediate_cleanup']
+        if($Mode -eq 'Intermediate' -and $pendingEvidence){
+            $pending=$pendingEvidence.Value
+            if($pending.rustc_info_sha256 -cmatch '^[0-9A-F]{64}$' -and
+                (Get-FileHash -LiteralPath $infoPath -Algorithm SHA256).Hash -ceq $pending.rustc_info_sha256){
+                $comparer=if($IsWindows){[StringComparer]::OrdinalIgnoreCase}else{[StringComparer]::Ordinal}
+                $allowed=[Collections.Generic.HashSet[string]]::new($comparer)
+                foreach($relative in @($pending.paths)){
+                    if($relative -isnot [string] -or $relative -cnotmatch '^(?:[A-Za-z0-9_]+-[A-Za-z0-9_-]+/)?(?:(?:debug|release)/(?:build|deps|\.fingerprint|incremental|examples)|tmp)$'){return $false}
+                    if(!$allowed.Add($relative)){return $false}
+                }
+                if(!$allowed.Count){return $false}
+                foreach($relative in @(Get-IntermediateRelativePaths)){
+                    if(!$allowed.Contains($relative)){return $false}
+                }
                 return $true
             }
         }
@@ -214,6 +252,7 @@ try {
     }
     $report.remaining_bytes=$report.before_bytes
     $limit=[long]($MaxGiB*1GB)
+    $intermediateProofWritten=$false
     foreach($candidate in @($report.candidates|Sort-Object last_write_utc)){
         if($MaxGiB -gt 0 -and $report.remaining_bytes -le $limit){$candidate.status='retained-budget';continue}
         if($Action -eq 'Plan'){$candidate.status='would-remove';$report.remaining_bytes-=$candidate.bytes;continue}
@@ -223,6 +262,16 @@ try {
         $active=@(Get-BuildUsers)
         if($active.Count){$report.status='blocked';$report.reason='A compiler/target executable started during inventory; remaining candidates retained.';$report.active_count=$active.Count;$report|ConvertTo-Json -Compress -Depth 5;exit 2}
         if($PSCmdlet.ShouldProcess($absolute,'Remove owned Cargo profile/cache')){
+            if($Mode -eq 'Intermediate' -and $registeredCargoEvidence -and !$intermediateProofWritten){
+                # Persist provenance before deleting the directories that prove
+                # it. Preserve the proof on blocked/failed/partial cleanup so an
+                # unchanged invocation can resume without rebuilding first.
+                Assert-AudioLibUnlinkedPath $ownerPath
+                $proof=@{rustc_info_sha256=(Get-FileHash -LiteralPath (Join-Path $TargetDirectory '.rustc_info.json') -Algorithm SHA256).Hash;paths=@(Get-IntermediateRelativePaths)}
+                $owner|Add-Member -NotePropertyName intermediate_cleanup -NotePropertyValue $proof -Force
+                [IO.File]::WriteAllText($ownerPath,($owner|ConvertTo-Json -Compress -Depth 5),[Text.UTF8Encoding]::new($false))
+                $intermediateProofWritten=$true
+            }
             Remove-Item -LiteralPath $absolute -Recurse -Force
             $candidate.status='removed';$report.removed_bytes+=$candidate.bytes;$report.remaining_bytes-=$candidate.bytes
         }else{$candidate.status='retained-whatif'}
@@ -235,6 +284,7 @@ try {
         Assert-AudioLibUnlinkedPath $ownerPath
         $compilerHash=(Get-FileHash -LiteralPath (Join-Path $TargetDirectory '.rustc_info.json') -Algorithm SHA256).Hash
         $owner|Add-Member -NotePropertyName intermediate_rustc_info_sha256 -NotePropertyValue $compilerHash -Force
+        if(!@(Get-IntermediateRelativePaths).Count){$owner.PSObject.Properties.Remove('intermediate_cleanup')}
         [IO.File]::WriteAllText($ownerPath,($owner|ConvertTo-Json -Compress -Depth 5),[Text.UTF8Encoding]::new($false))
     }
     $report|ConvertTo-Json -Compress -Depth 5

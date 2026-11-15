@@ -307,6 +307,9 @@ fn head(source: &StreamSource, abort: &crate::abort::Abort) -> Result<DownloadPr
         if let Some(value) = source.auth.header() {
             request = request.header("Authorization", &value);
         }
+        if let Some(identity) = &source.library_id {
+            request = request.header(crate::client::LIBRARY_ID_HEADER, identity);
+        }
         request
     })
     .map_err(|error| first_byte_error(error, source))?;
@@ -315,7 +318,7 @@ fn head(source: &StreamSource, abort: &crate::abort::Abort) -> Result<DownloadPr
     if status >= 400 {
         // A HEAD reply has no body; for a 503 (e.g. an offline root) the reason is only in
         // the GET body, which the server answers at once without touching the disk.
-        let body = if status == 503 {
+        let body = if matches!(status, 409 | 503) {
             error_body(source)
         } else {
             String::new()
@@ -355,8 +358,11 @@ fn error_body(source: &StreamSource) -> String {
     if let Some(value) = source.auth.header() {
         request = request.header("Authorization", &value);
     }
+    if let Some(identity) = &source.library_id {
+        request = request.header(crate::client::LIBRARY_ID_HEADER, identity);
+    }
     match request.call() {
-        Ok(mut response) if response.status().as_u16() == 503 => response
+        Ok(mut response) if response.status().as_u16() >= 400 => response
             .body_mut()
             .with_config()
             .limit(64 * 1024)
@@ -605,6 +611,16 @@ impl DownloadCache {
         report: &mut dyn FnMut(Event),
         cancel: &AtomicBool,
     ) -> Result<EnsuredOriginal> {
+        if item
+            .source
+            .library_id
+            .as_deref()
+            .is_some_and(|identity| identity != library_id)
+        {
+            return Err(RemoteError::LibraryChanged(
+                "The download source belongs to a different cached library".into(),
+            ));
+        }
         let library = self.library_dir(library_id);
         let file = &item.file;
         // With a complete earlier download at hand, revalidate briefly and fall back to it
@@ -1239,7 +1255,13 @@ fn copy_from_memory(
 ) -> Result<bool> {
     let url = source.url.split('?').next().unwrap_or(&source.url);
     let mut buffer = Vec::new();
-    if !playback.copy_complete(url, etag, length, &mut buffer)? {
+    if !playback.copy_complete_for_library(
+        url,
+        source.library_id.as_deref(),
+        etag,
+        length,
+        &mut buffer,
+    )? {
         return Ok(false);
     }
     let mut file = std::fs::File::create(partial)?;
@@ -1286,6 +1308,9 @@ fn download(
                 let mut request = agent.get(&owned.url);
                 if let Some(value) = owned.auth.header() {
                     request = request.header("Authorization", &value);
+                }
+                if let Some(identity) = &owned.library_id {
+                    request = request.header(crate::client::LIBRARY_ID_HEADER, identity);
                 }
                 if let Some((range, etag)) = &range {
                     request = request.header("Range", range).header("If-Range", etag);
@@ -1475,6 +1500,7 @@ mod tests {
     }
 
     struct Fixture {
+        library_id: Option<String>,
         etag: String,
         body: Vec<u8>,
         gets: Vec<Option<String>>,
@@ -1489,6 +1515,20 @@ mod tests {
     fn server(fixture: Arc<Mutex<Fixture>>) -> TestServer {
         TestServer::start(move |request| {
             let mut fixture = fixture.lock().unwrap();
+            if fixture
+                .library_id
+                .as_deref()
+                .is_some_and(|expected| request.header("x-audiolib-library-id") != Some(expected))
+            {
+                return TestResponse::json(
+                    409,
+                    if request.method == "HEAD" {
+                        ""
+                    } else {
+                        r#"{"error_code":"LIBRARY_CHANGED","message":"sync first"}"#
+                    },
+                );
+            }
             if request.path != "/api/v1/audio/7/stream?download=1"
                 && request.path != "/api/v1/audio/7/stream"
             {
@@ -1584,6 +1624,7 @@ mod tests {
 
     fn fixture(etag: &str, fill: u8) -> Arc<Mutex<Fixture>> {
         Arc::new(Mutex::new(Fixture {
+            library_id: None,
             etag: etag.into(),
             body: vec![fill; 300_000],
             gets: Vec::new(),
@@ -2062,11 +2103,14 @@ mod tests {
         let state = fixture("\"v1\"", 0);
         state.lock().unwrap().body = (0..300_000u32).map(|i| (i % 251) as u8).collect();
         state.lock().unwrap().cut_first_get = Some(100_000);
+        state.lock().unwrap().library_id = Some("lib-1".into());
         let server = server(state.clone());
+        let mut bound_item = item(&server);
+        bound_item.source.library_id = Some("lib-1".into());
         let cache = DownloadCache::new(directory.path().join("cache"), u64::MAX);
         let cancel = AtomicBool::new(false);
         let error = cache
-            .ensure("lib-1", &item(&server), None, &mut |_, _| {}, &cancel)
+            .ensure("lib-1", &bound_item, None, &mut |_, _| {}, &cancel)
             .unwrap_err();
         assert!(
             matches!(
@@ -2076,7 +2120,7 @@ mod tests {
             "{error:?}"
         );
         let path = cache
-            .ensure("lib-1", &item(&server), None, &mut |_, _| {}, &cancel)
+            .ensure("lib-1", &bound_item, None, &mut |_, _| {}, &cancel)
             .unwrap();
         let expected = state.lock().unwrap().body.clone();
         assert_eq!(std::fs::read(&path).unwrap(), expected);
@@ -2097,6 +2141,13 @@ mod tests {
                 .flatten()
                 .all(|entry| !entry.file_name().to_string_lossy().ends_with(".part"))
         );
+        // A cached complete file cannot turn an explicit identity rejection into
+        // offline success; HEAD's empty 409 is classified through a bound GET.
+        state.lock().unwrap().library_id = Some("lib-2".into());
+        assert!(matches!(
+            cache.ensure("lib-1", &bound_item, None, &mut |_, _| {}, &cancel),
+            Err(RemoteError::LibraryChanged(_))
+        ));
     }
 
     #[test]

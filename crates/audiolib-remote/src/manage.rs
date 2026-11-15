@@ -461,6 +461,11 @@ impl RemoteClient {
                     .transpose()?;
                 crate::abort::call_fresh(|| {
                     let mut request = self.agent.get(&url);
+                    if let Some(identity) = &self.expected_library_id
+                        && (path.starts_with("/scans/") || path.starts_with("/waveforms"))
+                    {
+                        request = request.header(crate::client::LIBRARY_ID_HEADER, identity);
+                    }
                     if let Some(peer) = &peer_catalog {
                         request = request
                             .header(

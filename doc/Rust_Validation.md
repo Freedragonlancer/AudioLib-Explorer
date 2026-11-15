@@ -1,5 +1,37 @@
 # Rust 验证报告
 
+## 全面审查修复的开发验证（2026-11-16，1.0.1）
+
+基于 `a5a587d` 的开发工作区修复，问题与实现见 [审查修复记录](Rust_Review_Fixes.md#全面审查修复2026-11-16101-开发工作区)。本轮为源码修复验证，不是发布、打包或固定安装验收。Windows Rust 1.97.1 MSVC；客户端/audio 使用已校验 ASIO SDK 2.3.4，server/remote 使用 no-default-features；所有写入使用自有临时库、音频、缓存或配置。
+
+最终格式检查、core/db/audio/desktop/CLI ASIO 组合与 server/remote no-default-features 的 all-targets strict Clippy 均通过。以下是定向命令的组合证据，未执行全工作区功能套件；嵌套子进程摘要不重复计数。
+
+| 实际测试范围 | passed | ignored |
+| --- | ---: | ---: |
+| core lib，包含大小写敏感 URL 前缀 | 204 | 0 |
+| db `vendor_import`、`tag_term_tests`、`source_tags_search` | 45 | 0 |
+| audio lib / ASIO，包含大回调、Seek、EOF 与网络预缓冲 | 192 | 4 |
+| remote lib，包含流、下载、续传、身份与缓存复用 | 322 | 0 |
+| server `auth::tests`、`security`、`api`、`ai_relay` | 101 | 1 |
+| desktop / ASIO 的 IPC Load、source-transition、remote-output、source-consistency 模块（含提交前 CR 补测） | 33 | 33 |
+| 合计 | 897 | 38 |
+
+ignored 未计为通过，包含隔离子进程入口、fixture 导出和真实 BOOM/SMED 素材入口。首次 auth 回归发现新增严格校验与派生 Default 的版本 0 冲突，导致缺少 `tokens.json` 时首次创建失败；改为版本 1 的显式 Default，并补首次创建/验证/重载回归后，重跑格式、server/remote strict Clippy 及整个 auth 模块通过。未变化的 core/db/audio/remote 通过项保持原结果，没有重启这些套件。全部日志和逐项命令保留于 `.rust-validation/review-fixes-20261115/`，原失败记录没有覆盖为成功。
+
+提交前独立 CR 发现：旧 Slint 选择回调通过入口检查后仍可能在 Metadata 捕获处等待，IPC Load 已确认 B 后，旧回调继续发布 A 的 reload。补修在捕获结束后持 admission 重验代际并原子发布 selected/reload/job；新增真实 Slint 队列与 Metadata mutex 的确定性回归，同时验证当前备注落盘。`check-local.ps1 -Package audiolib-desktop -Bin AudioLibExplorer -TestFilter controller::ipc_load_tests -Asio -CleanBuildArtifacts:$false` 的格式、strict Clippy 和 3 项测试通过；source-transition/remote-output/source-consistency 再跑 30 项通过。上述 33 passed / 33 ignored 替代原桌面 32 / 32，没有将重跑或嵌套子进程重复计数；其余 864 passed / 5 ignored 的源码、feature、工具链与调用契约未变，复用原证据。CR 日志为 `.rust-validation/local-checks/47d6198c893a47b09068db8256965eb7/`，首次新测试格式失败保留在 `ad37f30af2624117b86c8a0ccc49f217/`，统一格式后通过；原和补修两轮的检查身份分别保留。
+
+`test-build-environment.ps1` 与 `test-build-artifacts.ps1` 合成回归通过；后者确定性地在 `deps`/`.fingerprint` 已被删除后模拟编译器出现，并验证重新续跑、编译器摘要变化/越界证明/All 模式拒绝，以及最终 EXE/PDB 和未知 owner 字段保留。证据分别位于 `%TEMP%/AudioLibBuildEnvironmentTest-240ab4da21894962babfe4ef08e6303b/` 和 `%TEMP%/AudioLibCacheTest-5f68f4ed899848d2a09e0ded79704124/`。
+
+首次修复源码的 desktop/CLI ASIO 开发版构建通过，实际 EXE 位于受管 target 的 `x86_64-pc-windows-msvc/debug`。对这两个新 EXE 执行 `validate-library-management.ps1`（10 项）、`validate-review-fixes.ps1 -CleanCheckout`（10 项）和 `validate-playback-ipc.ps1 -CleanCheckout`（20 项），均通过。验证保留用户标注、库身份、源 WAV 字节与客户端播放历史，覆盖跨实例写入/扫描排他、真实静音 WASAPI 播放和受控关闭；不把设备报告的缓冲当作声学延迟测量。首轮三个脚本各只运行一次，没有打包、安装或更新 `local_release/`。
+
+提交前 CR 补修后，单独重建 desktop ASIO 开发版，再对更新后的 EXE 执行 `validate-playback-ipc.ps1 -CleanCheckout`，20 项通过。CLI 和两项库管理/跨进程数据库验证的实现、配置及数据边界未变化，复用其原通过结果；未重跑无关套件。补修构建证据在 `.rust-validation/cr-beta-20261116/`，播放脚本的独立新运行记录在上述逐项证据目录中；独立复核未发现剩余 P1/P2。此处仅记录开发验证，不代表 beta 环境部署。
+
+首次修复验证结束的 `Intermediate -MaxGiB 0` 维护成功：删除逻辑字节 `43,019,516,385`（约 40.06 GiB），保留 `2,919,512,593`（约 2.72 GiB）的最终 EXE/库/PDB 等非候选内容。所有选定中间文件均已清理，没有强制终止进程或扩大删除范围；逻辑大小不是精确物理空闲增量。实际清理记录及原始验证日志仍在上述私有证据目录，未对已完成清理再做一次扫描。
+
+CR 补修产生的新中间产物在定向检查、桌面构建和 IPC 验收结束后统一再清理一次：`Intermediate -MaxGiB 0` 通过，删除 `26,995,430,332` 逻辑字节，保留 `2,919,562,257` 字节的最终产物等非候选内容。没有重扫原已清理结果；这是补修重新编译后的独立清理周期，未终止进程或触及 SDK、安装和应用数据。
+
+稳定基线采用 [v1.0.1 发布记录](Rust_Release_1.0.1.md) 的 `21a0e1c` 原身份；`a5a587d` 至本工作区的 AI、Windows、IPC、update 源码及 Cargo.toml/Cargo.lock 均无变化。保留其已通过的 update 40 项、Windows 33 项及相关平台发布证据；受修改公共调用链影响的客户端、CLI、server 与 remote 已重新纳入上述检查。不重新执行无关发布、迁移、权限、全量扫描或百万记录性能验收。当前 Windows 结果不代替 macOS/Linux 原生锁、真实 ASIO 设备或按钮到声学输出延迟测量。
+
 ## 本机构建目录与成功后自动清理（2026-11-14）
 
 基于 `6e4ea1d` 的工作流脚本变更。Windows 开发检查和 release 构建默认解析到本机固定磁盘 `%LOCALAPPDATA%/AudioLibExplorerBuild/<checkout-hash>/target`，构建期间的 `TEMP`/`TMP` 同步到该 target，退出后恢复；独立打包和验证脚本使用同一解析规则。工作区已有的其他 Rust 改动保留，本节不为这些改动提供验收结论。

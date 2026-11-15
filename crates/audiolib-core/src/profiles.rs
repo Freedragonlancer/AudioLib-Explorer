@@ -177,9 +177,11 @@ pub enum ProfileMigration {
 
 /// Normalised comparison key of a server URL (`None` when it does not parse).
 fn url_key(url: &str) -> Option<String> {
-    ServerAddress::parse(url.trim())
-        .ok()
-        .map(|address| address.api_url().to_ascii_lowercase())
+    ServerAddress::parse(url.trim()).ok().map(|mut address| {
+        // Host names are case-insensitive; reverse-proxy path prefixes are not.
+        address.host.make_ascii_lowercase();
+        address.api_url()
+    })
 }
 
 /// True when both URLs address the same API (scheme, host, port and prefix).
@@ -937,6 +939,35 @@ mod tests {
         ] {
             assert_eq!(default_transcode(url), transcode, "{url}");
         }
+    }
+
+    #[test]
+    fn profile_identity_preserves_case_sensitive_path_prefixes() {
+        assert!(same_server_url(
+            "HTTPS://EXAMPLE.test:8443/LibraryA/api/v1/",
+            "https://example.test:8443/LibraryA",
+        ));
+        assert!(!same_server_url(
+            "https://example.test/LibraryA",
+            "https://example.test/librarya",
+        ));
+
+        let mut settings = DataSourceSettings::default();
+        let original = settings
+            .add_profile("Uppercase path", "https://example.test/LibraryA")
+            .unwrap();
+        let sibling = settings
+            .upsert_external_profile(&original, "https://example.test/librarya", None)
+            .unwrap();
+        assert_ne!(original, sibling);
+        assert_eq!(
+            settings.profile(&original).unwrap().server_url,
+            "https://example.test/LibraryA"
+        );
+        assert_eq!(
+            settings.profile(&sibling).unwrap().server_url,
+            "https://example.test/librarya"
+        );
     }
 
     #[test]

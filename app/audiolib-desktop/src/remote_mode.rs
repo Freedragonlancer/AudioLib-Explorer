@@ -743,7 +743,9 @@ impl Controller {
             (remote.state.clone()?, capabilities)
         };
         let secrets = self.secrets();
-        let client = RemoteClient::new(&settings.server_url, &secrets.token).ok()?;
+        let client = RemoteClient::new(&settings.server_url, &secrets.token)
+            .and_then(|client| client.with_library_id(&state.library_id))
+            .ok()?;
         Some((client, state, capabilities))
     }
 
@@ -777,6 +779,7 @@ impl Controller {
         let settings = self.config.lock().unwrap().data_source.clone();
         let secrets = self.secrets();
         let client = RemoteClient::new(&settings.server_url, &secrets.token)
+            .and_then(|client| client.with_library_id(&state.library_id))
             .map_err(|error| error.localized(chinese))?;
         let writer = RemoteWriter::new(
             client,
@@ -833,7 +836,9 @@ impl Controller {
         }
         let chinese = self.chinese.load(Ordering::Acquire);
         let secrets = self.secrets();
-        let client = RemoteClient::new(&settings.server_url, &secrets.token).ok()?;
+        let client = RemoteClient::new(&settings.server_url, &secrets.token)
+            .and_then(|client| client.with_library_id(&state.library_id))
+            .ok()?;
         let mut service = RemoteListWaveforms::new(
             client.clone(),
             state.library_id.clone(),
@@ -2604,6 +2609,7 @@ impl Controller {
         let settings = self.config.lock().unwrap().data_source.clone();
         let secrets = self.secrets();
         let client = RemoteClient::new(&settings.server_url, &secrets.token)
+            .and_then(|client| client.with_library_id(&state.library_id))
             .map_err(|error| error.localized(chinese))?;
         let library_dir = RemoteCache::new(&self.data_root()).library_dir(&state.library_id);
         let (pcm_refused, flac_refused) = {
@@ -2785,6 +2791,9 @@ impl Controller {
                     Err(fallback) => match open_primary(&mut route) {
                         Ok(stream) => stream,
                         Err(RemoteError::Cancelled) => return Err(cancelled()),
+                        Err(error @ RemoteError::LibraryChanged(_)) => {
+                            return Err(stream_error_text(&error, root, chinese));
+                        }
                         Err(error) => {
                             if matches!(error, RemoteError::RootOffline { .. }) {
                                 self.wake_revision_poller();
@@ -2797,6 +2806,9 @@ impl Controller {
             webdav => match (open_primary(&mut route), webdav) {
                 (Ok(stream), _) => stream,
                 (Err(RemoteError::Cancelled), _) => return Err(cancelled()),
+                (Err(error @ RemoteError::LibraryChanged(_)), _) => {
+                    return Err(stream_error_text(&error, root, chinese));
+                }
                 // The whole root is offline and there is no WebDAV URL: the server's
                 // message at once (no retry loop); refresh the root status shown in the
                 // header and notice.
@@ -3086,6 +3098,7 @@ impl Controller {
         let settings = self.config.lock().unwrap().data_source.clone();
         let secrets = self.secrets();
         let client = RemoteClient::new(&settings.server_url, &secrets.token)
+            .and_then(|client| client.with_library_id(&state.library_id))
             .map_err(|error| error.localized(chinese))?;
         Ok(RemoteDragSource {
             state,
@@ -3303,6 +3316,7 @@ impl Controller {
         let settings = self.config.lock().unwrap().data_source.clone();
         let secrets = self.secrets();
         let fetched = RemoteClient::new(&settings.server_url, &secrets.token)
+            .and_then(|client| client.with_library_id(&state.library_id))
             .and_then(|client| client.waveform(file_id, &query, known_etag.as_deref(), cancel));
         let data = match fetched {
             Ok(WaveformReply::NotModified) => stored,

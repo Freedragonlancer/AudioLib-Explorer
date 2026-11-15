@@ -160,6 +160,92 @@ async fn health_is_public_and_reports_crate_version() {
 }
 
 #[tokio::test]
+async fn cached_id_reads_reject_another_library_before_ranges_or_conditional_cache_hits() {
+    let previous = fixture();
+    let current = fixture();
+    assert_ne!(previous.state.library_id(), current.state.library_id());
+    for (method, path, body) in [
+        (Method::GET, "/api/v1/audio/1", ""),
+        (Method::GET, "/api/v1/audio/1/stream", ""),
+        (Method::HEAD, "/api/v1/audio/1/stream?download=1", ""),
+        (Method::GET, "/api/v1/audio/1/preview?codec=pcm", ""),
+        (Method::GET, "/api/v1/audio/1/waveform", ""),
+        (Method::POST, "/api/v1/waveforms", r#"{"ids":[1]}"#),
+        (Method::GET, "/api/v1/scans/1", ""),
+    ] {
+        let response = router(current.state.clone())
+            .oneshot(
+                support::modern(Request::builder().method(method.clone()).uri(path))
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .header("x-audiolib-library-id", previous.state.library_id())
+                    .header(header::RANGE, "bytes=0-7")
+                    .header(header::IF_NONE_MATCH, "*")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{method} {path}");
+        if method != Method::HEAD {
+            let error: ErrorBody = json(response).await;
+            assert_eq!(error.error_code, "LIBRARY_CHANGED", "{method} {path}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn matching_and_legacy_audio_reads_keep_stream_range_conditional_and_download_behavior() {
+    let f = fixture();
+    let expected = fs::read(f.state.audio(1).unwrap().file_path.as_str()).unwrap();
+    let mut etag = None;
+    for identity in [None, Some(f.state.library_id())] {
+        for suffix in ["", "?download=1"] {
+            let mut request =
+                support::modern(Request::get(format!("/api/v1/audio/1/stream{suffix}")))
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"));
+            if let Some(identity) = identity {
+                request = request.header("x-audiolib-library-id", identity);
+            }
+            let response = router(f.state.clone())
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            etag = response.headers().get(header::ETAG).cloned();
+            assert_eq!(bytes(response).await, expected);
+        }
+    }
+    for conditional in [false, true] {
+        let mut request = support::modern(Request::get("/api/v1/audio/1/stream"))
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header("x-audiolib-library-id", f.state.library_id());
+        request = if conditional {
+            request.header(header::IF_NONE_MATCH, etag.clone().unwrap())
+        } else {
+            request
+                .header(header::RANGE, "bytes=4-11")
+                .header(header::IF_RANGE, etag.clone().unwrap())
+        };
+        let response = router(f.state.clone())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if conditional {
+                StatusCode::NOT_MODIFIED
+            } else {
+                StatusCode::PARTIAL_CONTENT
+            }
+        );
+        if !conditional {
+            assert_eq!(bytes(response).await, expected[4..12]);
+        }
+    }
+}
+
+#[tokio::test]
 async fn protected_endpoints_reject_missing_or_wrong_tokens() {
     let f = fixture();
     for path in [

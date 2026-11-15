@@ -3498,12 +3498,19 @@ fn search_sql(
     // (v3/v4 snapshots, unfinished backfill) falls back to parsing metadata_json per row.
     const ANY_TAG: &str = "(COALESCE(trim(af.user_tags),'')<>'' OR af.source_tags_text<>'')";
     if filters.tagged_only {
-        conditions.push(if derived_tags {
-            ANY_TAG.into()
+        if derived_tags {
+            // Retain the exact legacy partial-index predicate as a candidate
+            // superset. SQLite trim only removes ASCII spaces; the query-only
+            // check agrees with the inspector's Unicode blank-tag semantics.
+            conditions.push(ANY_TAG.into());
+            conditions
+                .push("(af.source_tags_text<>'' OR audiolib_has_user_tags(af.user_tags))".into());
         } else {
-            "(COALESCE(trim(af.user_tags),'')<>'' OR audiolib_has_source_tags(af.metadata_json))"
-                .into()
-        });
+            conditions.push(
+                "(audiolib_has_user_tags(af.user_tags) OR audiolib_has_source_tags(af.metadata_json))"
+                    .into(),
+            );
+        }
     }
     let has_include = filters.tag_contains.is_some() || !filters.include_tags.is_empty();
     if derived_tags && has_include {
@@ -4286,6 +4293,52 @@ mod tag_term_tests {
                         "{filters:?} query={query:?} derived={ready}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn tagged_only_ignores_unicode_blank_annotations_with_derived_and_legacy_tags() {
+        for derived in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("library.db");
+            let provider = tag_library(&path);
+            let conn = Connection::open(&path).unwrap();
+            register_library_functions(&conn).unwrap();
+            let annotations = [
+                (8, "\t"),
+                (9, "\r\n"),
+                (10, "\u{3000}"),
+                (11, "\u{2003}"),
+                (12, "\u{a0}"),
+                (13, " \u{3000}\u{a0}\t\r\n"),
+                (14, "\u{2028}"),
+                (15, "\u{3000} metal \u{a0}"),
+            ];
+            for (id, tags) in annotations {
+                conn.execute(
+                    "INSERT INTO audio_files(id,file_path,filename,folder_id,user_tags,missing)
+                     VALUES(?1,?2,'sound.wav',1,?3,0)",
+                    params![id, format!("root/{id}.wav"), tags],
+                )
+                .unwrap();
+            }
+            // Exercise the legacy JSON fallback independently of owned-snapshot
+            // conversion, which normally publishes the derived column first.
+            provider.derived_tags.store(derived, Ordering::Release);
+            let filters = SearchFilters {
+                tagged_only: true,
+                ..Default::default()
+            };
+            for query in ["", "sound"] {
+                assert_eq!(
+                    matching(&provider, query, &filters),
+                    [1, 2, 3, 4, 6, 15],
+                    "query={query:?} derived={derived}"
+                );
+            }
+            for (id, tags) in annotations {
+                assert_eq!(provider.get_audio(id).unwrap().tags, tags);
             }
         }
     }
