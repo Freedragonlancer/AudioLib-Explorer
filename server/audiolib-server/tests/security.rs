@@ -16,6 +16,155 @@ use tower::ServiceExt;
 
 const TOKEN: &str = "security-fixture-0123456789abcdef0123456789abcdef";
 
+#[test]
+fn generated_tokens_initialize_a_missing_store_before_the_first_create() {
+    let directory = tempfile::tempdir().unwrap();
+    let token_file = directory.path().join("tokens.json");
+    let config = ServerConfig::from_toml_str("library_db='unused.db'\n", directory.path()).unwrap();
+    let security = Security::from_config(&config, None);
+    assert!(!token_file.exists());
+    assert!(security.current_tokens().unwrap().is_empty());
+    assert!(
+        !token_file.exists(),
+        "reading an empty store must not create token data"
+    );
+    let (token, secret) = security.create_token("first generated token").unwrap();
+    assert!(security.verify(&secret));
+    let persisted = std::fs::read_to_string(&token_file).unwrap();
+    assert!(
+        !persisted.contains(&secret),
+        "plaintext token must not be persisted"
+    );
+    let persisted: serde_json::Value = serde_json::from_str(&persisted).unwrap();
+    assert_eq!(persisted["version"], 1);
+    assert_eq!(persisted["tokens"][0]["id"], token.id);
+    let fresh = Security::from_config(&config, None);
+    assert!(fresh.verify(&secret));
+    assert_eq!(fresh.current_tokens().unwrap().len(), 1);
+    assert!(!directory.path().join("unused.db").exists());
+}
+
+#[test]
+fn generated_token_revocation_is_current_across_instances_and_never_resurrected() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = ServerConfig::from_toml_str("library_db='unused.db'\n", directory.path()).unwrap();
+    let first = Security::from_config(&config, None);
+    let (old, secret) = first.create_token("revoke across instances").unwrap();
+    let second = Security::from_config(&config, None);
+    assert!(first.revoke_token(&old.id).unwrap());
+    assert!(!first.verify(&secret));
+    assert!(
+        !second.verify(&secret),
+        "a stale instance must observe revocation before touch"
+    );
+    let (_, other) = second.create_token("preserve this newer token").unwrap();
+    assert!(
+        first.verify(&other),
+        "an already running instance must load a newly created token"
+    );
+    assert!(!first.verify(&secret));
+    let fresh = Security::from_config(&config, None);
+    assert!(
+        !fresh.verify(&secret),
+        "bookkeeping must not resurrect a revoked token on disk"
+    );
+    assert!(fresh.verify(&other));
+    assert_eq!(fresh.current_tokens().unwrap().len(), 1);
+    assert!(!directory.path().join("unused.db").exists());
+}
+
+#[test]
+#[ignore = "owned subprocess entry for concurrent_token_creators_keep_both_tokens"]
+fn token_creation_child() {
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{Duration, Instant},
+    };
+    let Some(directory) = std::env::var_os("AUDIOLIB_TOKEN_TEST_DIRECTORY") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    let label = std::env::var("AUDIOLIB_TOKEN_TEST_LABEL").unwrap();
+    assert!(["first", "second"].contains(&label.as_str()));
+    assert_eq!(
+        fs::read(directory.join("owned-fixture")).unwrap(),
+        b"audiolib-token-test-v1"
+    );
+    let config = ServerConfig::from_toml_str("library_db='unused.db'\n", &directory).unwrap();
+    let security = Security::from_config(&config, None);
+    fs::write(directory.join(format!("ready-{label}")), b"ready").unwrap();
+    let start = Instant::now();
+    while !directory.join("start").exists() {
+        assert!(start.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (_, secret) = security.create_token(&label).unwrap();
+    assert!(security.verify(&secret));
+}
+
+#[test]
+fn concurrent_token_creators_keep_both_tokens() {
+    use std::{
+        fs,
+        process::Command,
+        time::{Duration, Instant},
+    };
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("owned-fixture"),
+        b"audiolib-token-test-v1",
+    )
+    .unwrap();
+    let mut children = ["first", "second"].map(|label| {
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "token_creation_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("AUDIOLIB_TOKEN_TEST_DIRECTORY", directory.path())
+            .env("AUDIOLIB_TOKEN_TEST_LABEL", label)
+            .spawn()
+            .unwrap()
+    });
+    let started = Instant::now();
+    while !["first", "second"]
+        .iter()
+        .all(|label| directory.path().join(format!("ready-{label}")).exists())
+    {
+        if started.elapsed() > Duration::from_secs(20) {
+            // The children have their own bounded wait and are reaped before the
+            // owned fixture disappears, including this failure path.
+            for child in &mut children {
+                let _ = child.wait();
+            }
+            panic!("token creator subprocesses did not reach the ready barrier");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fs::write(directory.path().join("start"), b"start").unwrap();
+    let results: Vec<_> = children
+        .iter_mut()
+        .map(|child| child.wait().unwrap())
+        .collect();
+    assert!(
+        results.iter().all(std::process::ExitStatus::success),
+        "{results:?}"
+    );
+    let config = ServerConfig::from_toml_str("library_db='unused.db'\n", directory.path()).unwrap();
+    let security = Security::from_config(&config, None);
+    let mut names: Vec<_> = security
+        .current_tokens()
+        .unwrap()
+        .into_iter()
+        .map(|token| token.name)
+        .collect();
+    names.sort();
+    assert_eq!(names, ["first", "second"]);
+}
+
 fn fixture(extra: &str) -> (tempfile::TempDir, Arc<Security>, Service) {
     let directory = tempfile::tempdir().unwrap();
     let config = ServerConfig::from_toml_str(

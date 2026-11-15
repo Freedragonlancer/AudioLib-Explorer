@@ -246,6 +246,7 @@ impl RemoteClient {
             .map_err(|error| RemoteError::Validation(format!("POST /waveforms: {error}")))?;
         let url = format!("{}/waveforms", self.api);
         let token = (!self.token.is_empty()).then(|| format!("Bearer {}", self.token));
+        let library_id = self.expected_library_id.clone();
         let context = "POST /waveforms";
         let (status, encoding, reply, retry) = call_cancellable(
             move |abort| {
@@ -257,6 +258,9 @@ impl RemoteClient {
                         .header("Content-Type", "application/json");
                     if let Some(token) = &token {
                         request = request.header("Authorization", token);
+                    }
+                    if let Some(identity) = &library_id {
+                        request = request.header(crate::client::LIBRARY_ID_HEADER, identity);
                     }
                     request.send(body.as_slice())
                 };
@@ -348,6 +352,9 @@ impl RemoteClient {
             let mut request = self.bulk.get(&url);
             if !self.token.is_empty() {
                 request = request.header("Authorization", &format!("Bearer {}", self.token));
+            }
+            if let Some(identity) = &self.expected_library_id {
+                request = request.header(crate::client::LIBRARY_ID_HEADER, identity);
             }
             if let Some(etag) = if_none_match {
                 request = request.header("If-None-Match", etag);

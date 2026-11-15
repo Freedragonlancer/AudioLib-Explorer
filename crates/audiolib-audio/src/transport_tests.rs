@@ -157,6 +157,7 @@ fn playing_worker(path: &Path) -> Worker {
         )
         .unwrap(),
         sample_rate: RATE,
+        prefill_frames: 4096,
         volume: 0.8,
         buffering: Buffering::Off,
         pending: Vec::new(),

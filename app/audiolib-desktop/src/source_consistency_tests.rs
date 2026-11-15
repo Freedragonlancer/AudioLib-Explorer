@@ -116,6 +116,11 @@ fn child_snapshot_audio() {
                 let mut socket = accept(&listener);
                 let head = request(&mut socket);
                 assert!(head.starts_with("GET /api/v1/audio/42/stream "), "{head}");
+                assert!(
+                    head.lines()
+                        .any(|line| line.eq_ignore_ascii_case("X-AudioLib-Library-Id: library-a")),
+                    "{head}"
+                );
                 seen.fetch_add(1, Ordering::AcqRel);
                 binary(&mut socket, &body, etag, false);
             }
@@ -153,6 +158,74 @@ fn child_snapshot_audio() {
         .unwrap();
     assert_eq!(stream_bytes(&controller), new);
     assert_eq!(requests.load(Ordering::Acquire), 2);
+    server.join().unwrap();
+    controller.shutdown();
+    ui.hide().unwrap();
+}
+
+#[test]
+fn a_server_library_replacement_cannot_fall_back_to_webdav() {
+    isolated_module("source_consistency_tests", "child_library_changed_audio");
+}
+
+#[test]
+#[ignore = "isolated library-bound audition and fallback regression"]
+fn child_library_changed_audio() {
+    i_slint_backend_testing::init_integration_test_with_system_time();
+    let primary = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let webdav = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let primary_url = format!("http://{}", primary.local_addr().unwrap());
+    let webdav_url = format!("http://{}/dav", webdav.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut socket = accept(&primary);
+        let head = request(&mut socket);
+        assert!(head.starts_with("GET /api/v1/audio/42/stream "), "{head}");
+        assert!(
+            head.lines()
+                .any(|line| line.eq_ignore_ascii_case("X-AudioLib-Library-Id: library-a")),
+            "{head}"
+        );
+        respond(
+            &mut socket,
+            "409 Conflict",
+            r#"{"error_code":"LIBRARY_CHANGED","error":"The library was replaced"}"#,
+        );
+    });
+    let (controller, ui, _engine) = fixture(&primary_url);
+    controller
+        .config
+        .lock()
+        .unwrap()
+        .data_source
+        .webdav
+        .root_urls
+        .insert("sounds".into(), webdav_url);
+    controller
+        .remote
+        .lock()
+        .unwrap()
+        .state
+        .as_mut()
+        .unwrap()
+        .roots = vec![RemoteRoot {
+        name: "sounds".into(),
+        server_path: "/sounds".into(),
+        online: Some(true),
+        status: Some("online".into()),
+        ..Default::default()
+    }];
+    let error = controller
+        .playable_path(&file(&wav(35)), &Arc::new(AtomicBool::new(false)), 0)
+        .unwrap_err();
+    assert!(
+        error.contains("library") || error.contains("Library"),
+        "{error}"
+    );
+    assert!(controller.remote_stream.lock().unwrap().is_none());
+    webdav.set_nonblocking(true).unwrap();
+    assert!(
+        matches!(webdav.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
     server.join().unwrap();
     controller.shutdown();
     ui.hide().unwrap();
@@ -278,6 +351,11 @@ fn child_drag_source() {
                 let head = request(&mut socket);
                 assert!(
                     head.starts_with(&format!("{method} /api/v1/audio/42/stream?download=1 ")),
+                    "{head}"
+                );
+                assert!(
+                    head.lines()
+                        .any(|line| line.eq_ignore_ascii_case("X-AudioLib-Library-Id: library-a")),
                     "{head}"
                 );
                 binary(&mut socket, &bytes, "a", method == "HEAD");
