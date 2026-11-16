@@ -303,6 +303,51 @@ mod tests {
     }
 
     #[test]
+    fn live_scale_changes_preserve_restored_and_resized_logical_panes() {
+        i_slint_backend_testing::init_no_event_loop();
+        for theme in audiolib_core::config::THEME_IDS {
+            for restored in [false, true] {
+                let ui = AppWindow::new().unwrap();
+                crate::theme::apply_theme(&ui, theme);
+                let saved = WindowLayoutPreferences {
+                    sidebar_width: Some(275.0),
+                    inspector_width: Some(360.0),
+                    ..Default::default()
+                };
+                if restored {
+                    restore_panes(&ui, &saved);
+                } else {
+                    // The same assignments are made by the pane dividers.
+                    ui.set_sidebar_preferred_width(275.0);
+                    ui.set_inspector_preferred_width(360.0);
+                }
+                // Hidden panes must retain their preferences too; a temporary
+                // viewport constraint must never become the preferred width.
+                ui.set_sidebar_visible(false);
+                ui.set_inspector_visible(false);
+                for percent in [125, 150, 200, 100, 0, 175, 100] {
+                    crate::controller::apply_ui_scale(&ui, percent);
+                    let scale = interface_scale(&ui);
+                    assert!((ui.get_sidebar_preferred_width() / scale - 275.0).abs() < 0.001);
+                    assert!((ui.get_inspector_preferred_width() / scale - 360.0).abs() < 0.001);
+                    let captured = capture(&ui, &saved);
+                    assert!((captured.sidebar_width.unwrap() - 275.0).abs() < 0.001);
+                    assert!((captured.inspector_width.unwrap() - 360.0).abs() < 0.001);
+                    let restarted = AppWindow::new().unwrap();
+                    crate::controller::apply_ui_scale(&restarted, percent);
+                    restore_panes(&restarted, &captured);
+                    assert!(
+                        (restarted.get_sidebar_preferred_width() / scale - 275.0).abs() < 0.001
+                    );
+                    assert!(
+                        (restarted.get_inspector_preferred_width() / scale - 360.0).abs() < 0.001
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn restored_window_size_is_captured_back() {
         i_slint_backend_testing::init_no_event_loop();
         let ui = AppWindow::new().unwrap();

@@ -4,10 +4,15 @@ use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEve
 
 /// Install once, before the first show, on the event-loop-owned desktop window.
 pub(crate) fn install(window: &slint::Window) {
-    window.on_winit_window_event(|window, event| {
+    let mut keyboard = crate::window_keyboard::NativeKeyRepeatAdapter::default();
+    window.on_winit_window_event(move |window, event| {
         crate::gui_search_benchmark::window_event(window, event);
         handle_event(window, event);
-        EventResult::Propagate
+        if keyboard.handle_event(window, event) {
+            EventResult::PreventDefault
+        } else {
+            EventResult::Propagate
+        }
     });
 }
 

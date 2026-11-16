@@ -6,6 +6,176 @@ use slint::{ComponentHandle, ModelRc, VecModel, platform::WindowEvent};
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 #[test]
+fn live_scale_changes_refresh_compact_details_and_pane_budgets_without_resize() {
+    i_slint_backend_testing::init_no_event_loop();
+    for theme in audiolib_core::config::THEME_IDS {
+        let ui = window(false, 1440.0, 900.0);
+        crate::theme::apply_theme(&ui, theme);
+        ui.set_has_selection(true);
+        ui.set_selected_description("A source description".into());
+        ui.set_sidebar_preferred_width(480.0);
+        ui.set_inspector_preferred_width(600.0);
+        let modern = ui.global::<crate::Theme>().get_modern_style();
+        let description = if modern {
+            "AppWindow::studio-source-description"
+        } else {
+            "AppWindow::source-description"
+        };
+        near(
+            element(&ui, description).size().height,
+            if modern { 72.0 } else { 96.0 },
+        );
+
+        // Change only Appearance; the OS window does not emit a resize event.
+        ui.global::<crate::Theme>().set_ui_scale(1.25);
+        settle();
+        near(element(&ui, description).size().height, 56.0 * 1.25);
+        let content_width: f32 = 1440.0 - if modern { 8.0 } else { 32.0 } * 1.25;
+        let pane_budget = content_width - (520.0 + 24.0) * 1.25;
+        near(
+            ui.get_sidebar_width(),
+            (pane_budget - 240.0 * 1.25).min(480.0),
+        );
+        near(
+            ui.get_inspector_width(),
+            pane_budget - ui.get_sidebar_width(),
+        );
+
+        // Scaling down returns the same view to its full-height presentation.
+        ui.global::<crate::Theme>().set_ui_scale(1.0);
+        settle();
+        near(
+            element(&ui, description).size().height,
+            if modern { 72.0 } else { 96.0 },
+        );
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
+fn hidden_library_sidebar_releases_its_width_and_divider_for_details() {
+    i_slint_backend_testing::init_no_event_loop();
+    for theme in audiolib_core::config::THEME_IDS {
+        let ui = window(false, 1250.0, 900.0);
+        crate::theme::apply_theme(&ui, theme);
+        ui.set_inspector_preferred_width(600.0);
+        ui.set_folders(ModelRc::new(VecModel::from(
+            (0..80)
+                .map(|index| FolderRow {
+                    name: format!("Retained folder {index}").into(),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>(),
+        )));
+        settle();
+        let modern = ui.global::<crate::Theme>().get_modern_style();
+        // Switching workbenches restores its native viewport over layout turns.
+        // Establish this fixture's scroll only after that prior restore drains.
+        for _ in 0..16 {
+            element(
+                &ui,
+                if modern {
+                    "AppWindow::studio-folder-list"
+                } else {
+                    "AppWindow::folder-list"
+                },
+            )
+            .size();
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            if !ui.get_task_restoring() {
+                break;
+            }
+        }
+        assert!(
+            !ui.get_task_restoring(),
+            "{theme}: fixture restore must finish"
+        );
+        scroll_to_bottom(
+            &ui,
+            if modern {
+                "AppWindow::studio-folder-list"
+            } else {
+                "AppWindow::folder-list"
+            },
+        );
+        let folder_offset = ui.get_task_folder_scroll_y();
+        assert!(folder_offset < 0.0, "{theme}: folder fixture must scroll");
+        let constrained_width = ui.get_inspector_width();
+        assert!(constrained_width < 600.0);
+        ui.set_sidebar_visible(false);
+        settle();
+        near(ui.get_inspector_width(), 600.0);
+        let details = element(
+            &ui,
+            if ui.global::<crate::Theme>().get_modern_style() {
+                "AppWindow::studio-details-sidebar"
+            } else {
+                "AppWindow::details-sidebar"
+            },
+        );
+        near(details.size().width, 600.0);
+        assert!(details.absolute_position().x + details.size().width <= 1250.0);
+        let center = element(
+            &ui,
+            if modern {
+                "AppWindow::studio-results-column"
+            } else {
+                "AppWindow::results-column"
+            },
+        );
+        // Hiding must collapse the layout allocation, not just its paint.
+        near(
+            center.absolute_position().x,
+            if modern { 4.0 } else { 16.0 },
+        );
+        assert!(center.size().width >= 520.0);
+        assert!(
+            center.absolute_position().x + center.size().width <= details.absolute_position().x
+        );
+        assert!(ui.get_main_viewport_width() <= 1250.0);
+        ui.set_sidebar_visible(true);
+        settle();
+        near(ui.get_inspector_width(), constrained_width);
+        near(ui.get_inspector_preferred_width(), 600.0);
+        near(ui.get_task_folder_scroll_y(), folder_offset);
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
+fn wide_selection_actions_follow_visible_panes_in_each_workbench() {
+    i_slint_backend_testing::init_no_event_loop();
+    for theme in audiolib_core::config::THEME_IDS {
+        let ui = window(false, 1080.0, 700.0);
+        crate::theme::apply_theme(&ui, theme);
+        ui.set_inspector_visible(false);
+        ui.set_sidebar_preferred_width(480.0);
+        ui.set_checked_count(2);
+        settle();
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "Batch edit")
+                .next()
+                .is_none()
+        );
+        ui.set_sidebar_visible(false);
+        settle();
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "Batch edit")
+                .next()
+                .is_some()
+        );
+        ui.set_sidebar_visible(true);
+        settle();
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "Batch edit")
+                .next()
+                .is_none()
+        );
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
 fn folder_and_album_indexes_stay_visible_and_clickable_in_small_windows() {
     i_slint_backend_testing::init_no_event_loop();
     for chinese in [false, true] {

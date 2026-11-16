@@ -9,7 +9,7 @@ export global Theme {
     in-out property <bool> modern-player: false;
     // Studio keeps its warm surface artwork; Default v2 blends it into graphite.
     out property <float> workbench-backdrop-opacity: Theme.modern-player ? 1.0 : 0.22;
-    // GUI scale factor (PR1: stays 1.0; nothing reads or writes it from Rust yet).
+    // GUI scale factor selected by the interface Appearance setting.
     // Literal lengths are written as `Npx * Theme.ui-scale`. 0px and 1px hairlines
     // (borders, separators, `/ 1px` unit conversions) stay unscaled.
     in-out property <float> ui-scale: 1.0;
@@ -132,6 +132,10 @@ export component ThemedSlider inherits Rectangle {
     min-height: 20px * Theme.ui-scale; min-width: 20px * Theme.ui-scale;
     horizontal-stretch: 1; vertical-stretch: 0;
     in property <color> surface: Theme.player;
+    // Fluent's standard Slider owns input with a fixed 20px thumb. Keep the
+    // painted thumb and its travel identical: a larger painted thumb would make
+    // its edges act as track clicks and jump the value before a drag begins.
+    private property <length> thumb-size: 20px;
     // Slint's native accessibility actions call SliderBase setters directly,
     // bypassing its pointer/key enabled checks. Guard before mutating bound state.
     function accessible-set-value(value: float) {
@@ -151,19 +155,19 @@ export component ThemedSlider inherits Rectangle {
     Rectangle { background: root.surface; }
     property <float> fraction: clamp((root.value - root.minimum) / max(0.001, root.maximum - root.minimum), 0, 1);
     Rectangle {
-        x: 10px * Theme.ui-scale; y: (parent.height - self.height) / 2;
-        width: parent.width - 20px * Theme.ui-scale; height: 4px * Theme.ui-scale; border-radius: 2px * Theme.ui-scale;
+        x: root.thumb-size / 2; y: (parent.height - self.height) / 2;
+        width: parent.width - root.thumb-size; height: 4px * Theme.ui-scale; border-radius: 2px * Theme.ui-scale;
         background: Theme.strong-border;
         opacity: root.enabled ? 0.65 : 0.3;
         Rectangle { x: 0px; y: 0px; height: parent.height; width: parent.width * root.fraction; background: Theme.accent; border-radius: 2px * Theme.ui-scale; }
     }
-    Rectangle {
-        x: (parent.width - 20px * Theme.ui-scale) * root.fraction; y: (parent.height - self.height) / 2;
-        width: 20px * Theme.ui-scale; height: 20px * Theme.ui-scale; border-radius: 10px * Theme.ui-scale;
+    thumb := Rectangle {
+        x: (parent.width - root.thumb-size) * root.fraction; y: (parent.height - self.height) / 2;
+        width: root.thumb-size; height: root.thumb-size; border-radius: root.thumb-size / 2;
         background: Theme.raised; border-width: 1px;
         border-color: root.has-focus ? Theme.accent : Theme.strong-border;
         opacity: root.enabled ? 1 : 0.45;
-        Rectangle { x: 4px * Theme.ui-scale; y: 4px * Theme.ui-scale; width: 12px * Theme.ui-scale; height: 12px * Theme.ui-scale; border-radius: 6px * Theme.ui-scale; background: Theme.accent; }
+        Rectangle { x: 4px; y: 4px; width: 12px; height: 12px; border-radius: 6px; background: Theme.accent; }
     }
     // Paint-only rectangles do not intercept the standard pointer/key/accessibility owner.
 }
@@ -176,25 +180,30 @@ export component ThemedCheckBox inherits Rectangle {
     callback toggled <=> native.toggled;
     forward-focus: native;
     in property <color> surface: Theme.panel;
-    HorizontalLayout { padding: 0px; native := CheckBox { } }
+    // The painted layout owns the scaled geometry. Fluent's native checkbox uses
+    // an unscaled 18px indicator and 12px gap, so using its implicit layout here
+    // would under-allocate both dimensions when the interface is enlarged.
+    native := CheckBox { width: parent.width; height: parent.height; }
     Rectangle { background: root.surface; }
-    if root.text != "": Text {
-        x: 30px * Theme.ui-scale; width: parent.width - self.x; height: parent.height;
-        text: root.text; color: Theme.ink; vertical-alignment: center;
-        opacity: root.enabled ? 1 : 0.45;
-    }
-    Rectangle {
-        x: 0px; width: 18px * Theme.ui-scale; height: 18px * Theme.ui-scale; y: (parent.height - self.height) / 2;
-        border-radius: 3px * Theme.ui-scale; border-width: 1px;
-        background: root.checked ? Theme.accent : Theme.panel;
-        border-color: root.has-focus ? Theme.ink : (root.checked ? Theme.accent : Theme.strong-border);
-        opacity: root.enabled ? 1 : 0.45;
-        // Use explicit vector geometry: a font-dependent glyph may be absent
-        // from the selected UI font and leave checked items as blank squares.
-        if root.checked: Image {
-            source: @image-url("icons/check.svg"); colorize: Theme.on-accent;
-            x: 3px * Theme.ui-scale; y: 3px * Theme.ui-scale; width: 12px * Theme.ui-scale; height: 12px * Theme.ui-scale;
-            image-fit: contain; accessible-role: none;
+    HorizontalLayout {
+        padding: 0px; spacing: 12px * Theme.ui-scale;
+        Rectangle {
+            width: 18px * Theme.ui-scale; height: 18px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+            border-radius: 3px * Theme.ui-scale; border-width: 1px;
+            background: root.checked ? Theme.accent : Theme.panel;
+            border-color: root.has-focus ? Theme.ink : (root.checked ? Theme.accent : Theme.strong-border);
+            opacity: root.enabled ? 1 : 0.45;
+            // Use explicit vector geometry: a font-dependent glyph may be absent
+            // from the selected UI font and leave checked items as blank squares.
+            if root.checked: Image {
+                source: @image-url("icons/check.svg"); colorize: Theme.on-accent;
+                x: 3px * Theme.ui-scale; y: 3px * Theme.ui-scale; width: 12px * Theme.ui-scale; height: 12px * Theme.ui-scale;
+                image-fit: contain; accessible-role: none;
+            }
+        }
+        if root.text != "": Text {
+            text: root.text; color: Theme.ink; vertical-alignment: center;
+            opacity: root.enabled ? 1 : 0.45;
         }
     }
 }

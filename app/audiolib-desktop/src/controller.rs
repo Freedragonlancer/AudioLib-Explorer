@@ -169,7 +169,17 @@ pub(crate) fn apply_ui_scale(ui: &AppWindow, percent: u32) {
     } else {
         percent as f32 / 100.0
     };
+    // Divider drags and restored panes assign lengths, replacing Slint's initial
+    // scale bindings. Preserve their scale-100% widths before changing the
+    // global, otherwise a later capture persists a different logical layout.
+    let previous_scale = ui.global::<crate::Theme>().get_ui_scale();
+    let sidebar_width = ui.get_sidebar_preferred_width();
+    let inspector_width = ui.get_inspector_preferred_width();
     ui.global::<crate::Theme>().set_ui_scale(scale);
+    if previous_scale.is_finite() && previous_scale > 0.0 && previous_scale != scale {
+        ui.set_sidebar_preferred_width(sidebar_width / previous_scale * scale);
+        ui.set_inspector_preferred_width(inspector_width / previous_scale * scale);
+    }
 }
 
 fn table_preferences(ui: &AppWindow) -> AudioTablePreferences {

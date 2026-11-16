@@ -41,6 +41,8 @@ mod studio_theme_tests;
 mod tag_chips;
 mod theme;
 #[cfg(test)]
+mod ui_aux_review_tests;
+#[cfg(test)]
 mod ui_review_tests;
 #[cfg(test)]
 mod ui_scale_tests;
@@ -51,6 +53,7 @@ mod waveform_cursor;
 #[cfg(test)]
 mod waveform_selection_ui_tests;
 mod waveform_view;
+mod window_keyboard;
 mod window_layout;
 mod window_repaint;
 use anyhow::{Context, Result};

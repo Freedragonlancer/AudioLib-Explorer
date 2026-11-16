@@ -318,6 +318,151 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scaled_checkboxes_reserve_their_painted_bounds_and_keep_native_input() {
+        use i_slint_backend_testing::{AccessibleRole, ElementHandle};
+        use slint::platform::{PointerEventButton, WindowEvent};
+
+        i_slint_backend_testing::init_no_event_loop();
+        for id in THEME_IDS {
+            for chinese in [false, true] {
+                for scale in [1.0, 1.5, 2.0] {
+                    let ui = AppWindow::new().unwrap();
+                    ui.window()
+                        .set_size(slint::LogicalSize::new(2400.0, 1600.0));
+                    apply_theme(&ui, id);
+                    apply_font_sizes(&ui, 10, 13);
+                    ui.global::<crate::Theme>().set_ui_scale(scale);
+                    ui.set_chinese(chinese);
+                    ui.invoke_open_global_settings(3);
+                    ui.show().unwrap();
+                    let label = if chinese {
+                        "有新版本时自动同步"
+                    } else {
+                        "Sync automatically when updated"
+                    };
+                    let checkbox = ElementHandle::find_by_accessible_label(&ui, label)
+                        .find(|element| element.accessible_role() == Some(AccessibleRole::Checkbox))
+                        .expect("native checkbox remains the input and accessibility owner");
+                    let origin = checkbox.absolute_position();
+                    let size = checkbox.size();
+                    assert!(
+                        size.height >= 18.0 * scale,
+                        "{id}, {chinese}, x{scale}: the hit area must contain the painted indicator"
+                    );
+                    // A click just inside the painted indicator's lower edge must
+                    // remain inside the native hit target at every supported scale.
+                    let position = slint::LogicalPosition::new(
+                        origin.x + 9.0 * scale,
+                        origin.y + size.height / 2.0 + 9.0 * scale - 1.0,
+                    );
+                    let before = ui.get_ds_auto_sync();
+                    ui.window()
+                        .dispatch_event(WindowEvent::PointerMoved { position });
+                    ui.window().dispatch_event(WindowEvent::PointerPressed {
+                        position,
+                        button: PointerEventButton::Left,
+                    });
+                    ui.window().dispatch_event(WindowEvent::PointerReleased {
+                        position,
+                        button: PointerEventButton::Left,
+                    });
+                    assert_eq!(ui.get_ds_auto_sync(), !before);
+                    assert!(ui.get_shared_sync_dirty());
+                    ui.invoke_focus_settings_first();
+                    crate::ui_tests::send_keys(&ui, &[slint::platform::Key::Tab.into()]);
+                    crate::ui_tests::send_keys(&ui, &[" ".into()]);
+                    assert_eq!(ui.get_ds_auto_sync(), before);
+                    checkbox.invoke_accessible_default_action();
+                    assert_eq!(ui.get_ds_auto_sync(), !before);
+                    ui.set_shared_sync_busy(true);
+                    checkbox.invoke_accessible_default_action();
+                    assert_eq!(ui.get_ds_auto_sync(), !before, "disabled input is inert");
+                    ui.hide().unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scaled_slider_thumb_edges_do_not_jump_volume_before_dragging() {
+        use i_slint_backend_testing::{AccessibleRole, ElementHandle};
+        use slint::platform::{PointerEventButton, WindowEvent};
+
+        i_slint_backend_testing::init_no_event_loop();
+        // Studio uses its own volume control; these themes share ThemedSlider.
+        for id in [DEFAULT_THEME, DEFAULT_V2_THEME] {
+            for chinese in [false, true] {
+                for scale in [1.0, 1.5, 2.0] {
+                    let ui = AppWindow::new().unwrap();
+                    ui.window()
+                        .set_size(slint::LogicalSize::new(2400.0, 1600.0));
+                    apply_theme(&ui, id);
+                    ui.global::<crate::Theme>().set_ui_scale(scale);
+                    ui.set_chinese(chinese);
+                    ui.show().unwrap();
+                    let label = if chinese { "音量" } else { "Volume" };
+                    let volume = ElementHandle::find_by_element_type_name(&ui, "ThemedSlider")
+                        .find(|widget| {
+                            widget
+                                .query_descendants()
+                                .match_accessible_role(AccessibleRole::Slider)
+                                .match_predicate(move |element| {
+                                    element.accessible_label().as_deref() == Some(label)
+                                })
+                                .find_first()
+                                .is_some()
+                        })
+                        .expect("the themed volume slider");
+                    let thumb = volume
+                        .query_descendants()
+                        .match_id("ThemedSlider::thumb")
+                        .find_first()
+                        .expect("painted volume thumb");
+                    for initial in [-60.0, -30.0, 0.0] {
+                        for (x_fraction, y_fraction) in
+                            [(0.1, 0.5), (0.9, 0.5), (0.5, 0.1), (0.5, 0.9)]
+                        {
+                            ui.set_volume_db(initial);
+                            let origin = thumb.absolute_position();
+                            let size = thumb.size();
+                            let position = slint::LogicalPosition::new(
+                                origin.x + size.width * x_fraction,
+                                origin.y + size.height * y_fraction,
+                            );
+                            ui.window()
+                                .dispatch_event(WindowEvent::PointerMoved { position });
+                            ui.window().dispatch_event(WindowEvent::PointerPressed {
+                                position,
+                                button: PointerEventButton::Left,
+                            });
+                            assert!(
+                                (ui.get_volume_db() - initial).abs() < 0.001,
+                                "{id}, {chinese}, x{scale}, {initial}dB: pressing the painted thumb must not jump the value"
+                            );
+                            let direction = if initial == 0.0 { -1.0 } else { 1.0 };
+                            let dragged = slint::LogicalPosition::new(
+                                position.x + direction * 5.0,
+                                position.y,
+                            );
+                            ui.window()
+                                .dispatch_event(WindowEvent::PointerMoved { position: dragged });
+                            assert!(
+                                (ui.get_volume_db() - initial) * direction > 0.0,
+                                "the native slider must still drag from every painted thumb edge"
+                            );
+                            ui.window().dispatch_event(WindowEvent::PointerReleased {
+                                position: dragged,
+                                button: PointerEventButton::Left,
+                            });
+                        }
+                    }
+                    ui.hide().unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
     fn studio_surfaces_rasterize_at_twice_their_design_size() {
         assert_eq!(
             double_svg_size(
