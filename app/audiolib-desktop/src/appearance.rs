@@ -63,6 +63,7 @@ pub(crate) fn apply(ui: &AppWindow, prefs: &AppearancePreferences) {
         .set_font_family(prefs.font_family.clone().into());
     ui.set_font_family(prefs.font_family.clone().into());
     ui.set_appearance_preset_names(strings(prefs.presets.iter().map(|p| p.name.clone())));
+    ui.set_appearance_customized(!prefs.text_colors.is_empty());
     publish_color(ui, prefs);
     crate::detail_presentation::relayout(ui);
 }
@@ -88,7 +89,8 @@ pub(crate) fn installed_fonts() -> Vec<String> {
     families
 }
 
-/// Restrained, high-contrast text palettes designed for the shipped charcoal surfaces.
+/// Legacy text palette fixtures cover persisted overrides independently of full themes.
+#[cfg(test)]
 pub(crate) fn builtin_colors(index: i32) -> Option<std::collections::BTreeMap<String, String>> {
     let colors = match index {
         0 => return Some(Default::default()),

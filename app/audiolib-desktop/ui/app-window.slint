@@ -4,13 +4,14 @@ import { TextEdit, ComboBox, ListView, ScrollView, Palette, SpinBox } from "std-
 import { Theme, ThemedLineEdit as LineEdit, ThemedCheckBox as CheckBox } from "theme.slint";
 
 import { AuditionPanel, PeakSettings, RulerTick } from "audition-panel.slint";
-import { AppearanceEditor } from "appearance-editor.slint";
+import { AppearanceEditor, ThemePreview } from "appearance-editor.slint";
 import { SearchTaskTab } from "search-task-tabs.slint";
 import { AiSearchPanel, AiSearchAction, AiQuickSearch, AiSuggestion } from "ai-search-panel.slint";
 import { AiSidebarToggle } from "ai-sidebar-toggle.slint";
 export { AiSuggestion }
 // Exported so tests can exercise non-default scales; the desktop does not touch it yet.
 export { Theme }
+export { ThemePreview }
 export { RulerTick }
 
 export struct AudioRow {
@@ -1463,7 +1464,10 @@ export component AppWindow inherits Window {
     callback text-color-selected;
     callback text-color-requested(string);
     callback text-colors-reset;
-    callback text-palette-requested(int);
+    in property <[ThemePreview]> recommended-themes;
+    in property <bool> appearance-customized;
+    in-out property <bool> appearance-advanced-open: false;
+    callback recommended-theme-requested(int);
     callback appearance-preset-requested(int);
     in-out property <int> ui-font-px: 13;
     callback ui-font-requested(int);
@@ -1496,8 +1500,8 @@ export component AppWindow inherits Window {
     out property <length> settings-panel-top: settings-panel.absolute-position.y;
     out property <length> settings-panel-bottom: settings-panel.absolute-position.y + settings-panel.height;
     out property <length> settings-last-bottom: settings-footer.absolute-position.y + settings-footer.height;
-    out property <bool> settings-hidden-page-focused: (root.settings-page != 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page != 1 && (appearance-first.has-focus || appearance-ui-font.has-focus || appearance-list-font.has-focus)) || (root.settings-page != 2 && (search-settings-first.has-focus || pagination-check.has-focus || pagination-size.has-focus)) || (root.settings-page != 3 && sync-settings-first.has-focus) || (root.settings-page != 4 && cache-settings-first.has-focus);
-    out property <bool> settings-visible-page-focused: (root.settings-page == 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page == 1 && (appearance-first.has-focus || appearance-ui-font.has-focus || appearance-list-font.has-focus)) || (root.settings-page == 2 && (search-settings-first.has-focus || pagination-check.has-focus || pagination-size.has-focus)) || (root.settings-page == 3 && sync-settings-first.has-focus) || (root.settings-page == 4 && cache-settings-first.has-focus) || settings-nav-general.has-focus || settings-nav-search.has-focus || settings-nav-audio.has-focus || settings-nav-sync.has-focus || settings-nav-cache.has-focus || appearance-close.has-focus || settings-close-return.has-focus;
+    out property <bool> settings-hidden-page-focused: (root.settings-page != 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page != 1 && (appearance-first.has-focus || appearance-scale.has-focus || appearance-language.has-focus)) || (root.settings-page != 2 && (search-settings-first.has-focus || pagination-check.has-focus || pagination-size.has-focus)) || (root.settings-page != 3 && sync-settings-first.has-focus) || (root.settings-page != 4 && cache-settings-first.has-focus);
+    out property <bool> settings-visible-page-focused: (root.settings-page == 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page == 1 && (appearance-first.has-focus || appearance-scale.has-focus || appearance-language.has-focus)) || (root.settings-page == 2 && (search-settings-first.has-focus || pagination-check.has-focus || pagination-size.has-focus)) || (root.settings-page == 3 && sync-settings-first.has-focus) || (root.settings-page == 4 && cache-settings-first.has-focus) || settings-nav-general.has-focus || settings-nav-search.has-focus || settings-nav-audio.has-focus || settings-nav-sync.has-focus || settings-nav-cache.has-focus || appearance-close.has-focus || settings-close-return.has-focus;
     // Test-only: scroll the main view and the settings dialog to their bottom-right corner.
     public function scroll-main-to-end() {
         if Theme.modern-style { studio-main-scroll.viewport-y = min(0px, (Theme.modern-style ? studio-main-scroll.visible-height : main-scroll.visible-height) - (Theme.modern-style ? studio-main-scroll.viewport-height : main-scroll.viewport-height)); } else { main-scroll.viewport-y = min(0px, (Theme.modern-style ? studio-main-scroll.visible-height : main-scroll.visible-height) - (Theme.modern-style ? studio-main-scroll.viewport-height : main-scroll.viewport-height)); }
@@ -4905,43 +4909,37 @@ main-scroll := ScrollView {
             }
             Rectangle { horizontal-stretch: 1; vertical-stretch: 1;
                 min-height: root.settings-page == 0 ? audio-page.min-height : root.settings-page == 1 ? appearance-page.min-height : root.settings-page == 2 ? search-settings-page.min-height : root.settings-page == 3 ? sync-settings-page.min-height : cache-settings-page.min-height;
-                min-width: max(390px * Theme.ui-scale, root.settings-page == 0 ? audio-page.min-width : root.settings-page == 1 ? appearance-page.min-width : root.settings-page == 2 ? search-settings-page.min-width : root.settings-page == 3 ? sync-settings-page.min-width : cache-settings-page.min-width);
-            appearance-page := VerticalLayout { width: parent.width; visible: root.settings-page == 1; spacing: 13px * Theme.ui-scale; alignment: start;
-                Text { text: root.chinese ? "通用与界面" : "General and interface"; color: Theme.text(5, 0, Theme.ink); font-size: Theme.font(19); font-weight: 600; }
-                Label { text-module: 5; text: root.chinese ? "更改立即生效并自动保存；主题在主界面右上角切换。" : "Changes apply immediately and are saved. Choose a theme in the main toolbar."; wrap: word-wrap; }
-                HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
-                    Label { text-module: 5; width: 108px * Theme.ui-scale; text: root.chinese ? "界面缩放" : "Interface scale"; }
-                    appearance-first := ComboBox { horizontal-stretch: 1; enabled: root.settings-page == 1 && !root.settings-busy && !root.settings-close-confirm; model: root.chinese ? ["自动（跟随系统）", "100%", "125%", "150%", "175%", "200%"] : ["Automatic (follow system)", "100%", "125%", "150%", "175%", "200%"]; current-index <=> root.ui-scale-index; selected => { root.ui-scale-requested(self.current-index); } }
-                }
-                Label { text-module: 5; wrap: word-wrap; font-size: Theme.font(11); text: root.chinese ? "“自动”沿用系统显示缩放；百分比在此基础上再放大界面。窗口最小尺寸不变，放不下的列表可滚动。" : "Automatic uses the system display scale; a percentage enlarges the interface on top of it. The minimum window size stays the same and lists that do not fit scroll."; }
-                HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
-                    Label { text-module: 5; width: 108px * Theme.ui-scale; text: root.chinese ? "语言" : "Language"; }
-                    ComboBox { horizontal-stretch: 1; enabled: root.settings-page == 1 && !root.settings-busy && !root.settings-close-confirm; model: root.chinese ? ["跟随系统", "English", "简体中文"] : ["Follow system", "English", "简体中文"]; current-index: root.language-index; selected => { root.language-mode-requested(self.current-index); } }
-                }
-                HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
-                    Label { text-module: 5; width: 108px * Theme.ui-scale; text: root.chinese ? "界面字号" : "Interface font"; }
-                    appearance-ui-font := SpinBox { horizontal-stretch: 1; enabled: root.settings-page == 1 && !root.settings-busy && !root.settings-close-confirm; minimum: 10; maximum: 24; step-size: 1; value <=> root.ui-font-px; edited(value) => { root.ui-font-requested(value); } }
-                    Label { text-module: 5; width: 24px * Theme.ui-scale; text: "px"; }
-                }
-                HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
-                    Label { text-module: 5; width: 108px * Theme.ui-scale; text: root.chinese ? "列表字号" : "List font"; }
-                    appearance-list-font := SpinBox { horizontal-stretch: 1; enabled: root.settings-page == 1 && !root.settings-busy && !root.settings-close-confirm; minimum: 10; maximum: 24; step-size: 1; value <=> root.list-font-px; edited(value) => { root.list-font-requested(value); } }
-                    Label { text-module: 5; width: 24px * Theme.ui-scale; text: "px"; }
-                }
-                Label { text-module: 5; wrap: word-wrap; font-size: Theme.font(11); text: root.chinese ? "字号 13 px 为默认大小，并与界面缩放叠加；列表字号只影响结果列表，行高随之调整。" : "13 px is the default size and combines with the interface scale. The list font only affects the result list; its rows grow to fit."; }
-                AppearanceEditor {
+                width: max(settings-panel.width - 220px * Theme.ui-scale, 390px * Theme.ui-scale, root.settings-page == 0 ? audio-page.min-width : root.settings-page == 1 ? appearance-page.min-width : root.settings-page == 2 ? search-settings-page.min-width : root.settings-page == 3 ? sync-settings-page.min-width : cache-settings-page.min-width);
+            appearance-page := VerticalLayout { width: parent.width; visible: root.settings-page == 1; spacing: 14px * Theme.ui-scale;
+                Text { text: root.chinese ? "外观与个性化" : "Appearance and personalization"; color: Theme.text(5, 0, Theme.ink); font-size: Theme.font(19); font-weight: 600; }
+                appearance-first := AppearanceEditor {
                     chinese: root.chinese; enabled: root.settings-page == 1 && !root.settings-busy && !root.settings-close-confirm && !root.closing;
+                    recommendations: root.recommended-themes; theme-index: root.theme-index; customized: root.appearance-customized;
+                    current-theme-name: root.chinese ? root.theme-names-cn[root.theme-index] : root.theme-names[root.theme-index];
+                    advanced-open <=> root.appearance-advanced-open;
                     fonts: root.system-fonts; font-index <=> root.system-font-index; fonts-loading: root.system-fonts-loading; font-family <=> root.font-family; font-filter <=> root.font-filter;
+                    ui-font-px <=> root.ui-font-px; list-font-px <=> root.list-font-px;
                     presets: root.appearance-preset-names; preset-index <=> root.appearance-preset-index; preset-name <=> root.appearance-preset-name;
                     module-index <=> root.text-module; state-index <=> root.text-state;
                     color-value <=> root.text-color-value; color-error: root.text-color-error; message: root.appearance-message;
+                    theme-selected(index) => { root.recommended-theme-requested(index); }
                     font-selected(value) => { root.font-family-requested(value); }
                     filter-edited(value) => { root.font-filter-requested(value); }
+                    ui-font-selected(value) => { root.ui-font-requested(value); }
+                    list-font-selected(value) => { root.list-font-requested(value); }
                     color-selected => { root.text-color-selected(); }
                     color-applied(value) => { root.text-color-requested(value); }
                     colors-reset => { root.text-colors-reset(); }
-                    builtin-selected(index) => { root.text-palette-requested(index); }
                     preset-action(action) => { root.appearance-preset-requested(action); }
+                }
+                Rectangle { height: 1px; background: Theme.border; }
+                HorizontalLayout { spacing: 12px * Theme.ui-scale;
+                    Label { text-module: 5; width: 108px * Theme.ui-scale; text: root.chinese ? "语言" : "Language"; }
+                    appearance-language := ComboBox { horizontal-stretch: 1; enabled: root.settings-page == 1 && !root.settings-busy && !root.settings-close-confirm; model: root.chinese ? ["跟随系统", "English", "简体中文"] : ["Follow system", "English", "简体中文"]; current-index: root.language-index; selected => { root.language-mode-requested(self.current-index); } }
+                }
+                HorizontalLayout { spacing: 12px * Theme.ui-scale;
+                    Label { text-module: 5; width: 108px * Theme.ui-scale; text: root.chinese ? "界面缩放" : "Interface scale"; }
+                    appearance-scale := ComboBox { horizontal-stretch: 1; enabled: root.settings-page == 1 && !root.settings-busy && !root.settings-close-confirm; model: root.chinese ? ["自动（跟随系统）", "100%", "125%", "150%", "175%", "200%"] : ["Automatic (follow system)", "100%", "125%", "150%", "175%", "200%"]; current-index <=> root.ui-scale-index; selected => { root.ui-scale-requested(self.current-index); } }
                 }
                 CheckBox { text-module: 5; text: root.chinese ? "显示封面（本地与服务器）" : "Show covers (local and server)"; checked <=> root.artwork-enabled; enabled: root.settings-page == 1 && !root.settings-busy && !root.settings-close-confirm && !root.artwork-busy && !root.library-busy && !root.ds-applying && !root.closing; toggled => { root.artwork-enabled-requested(self.checked); } }
             }

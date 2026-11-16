@@ -135,6 +135,157 @@ pub(crate) const DEFAULT_V2_PALETTE: Palette = Palette {
     overlay: 0xa800_0000,
 };
 
+/// Complete coordinated palettes; previews and the workbench share these tokens.
+const FOREST_PALETTE: Palette = Palette {
+    bg: 0xff16_211e,
+    panel: 0xff20_302a,
+    raised: 0xff2c_4037,
+    hover: 0xff38_5044,
+    border: 0xff3b_5147,
+    strong_border: 0xff73_9182,
+    ink: 0xffe0_ebe5,
+    dim: 0xffb3_c8bd,
+    muted: 0xff97_b0a2,
+    accent: 0xffa2_c9aa,
+    accent_hover: 0xffc0_dfbd,
+    on_accent: 0xff1c_3023,
+    selected: 0xff34_5242,
+    checked: 0xff40_6550,
+    alternate: 0xff24_352e,
+    mint: 0xffa2_c9aa,
+    apricot: 0xffdf_c496,
+    warning: 0xffdf_c496,
+    coral: 0xffe3_a6a1,
+    danger: 0xffe3_a6a1,
+    danger_surface: 0xff43_3030,
+    trough: 0xff12_1c18,
+    segment: 0xff3a_5045,
+    player: 0xff1c_2b25,
+    player_border: 0xff48_6354,
+    tooltip: 0xff10_1b16,
+    ..DEFAULT_V2_PALETTE
+};
+const OCEAN_PALETTE: Palette = Palette {
+    bg: 0xff15_2030,
+    panel: 0xff1d_2d41,
+    raised: 0xff2a_3e56,
+    hover: 0xff36_506c,
+    border: 0xff37_4e68,
+    strong_border: 0xff78_97b9,
+    ink: 0xffe2_ecf7,
+    dim: 0xffb1_c5df,
+    muted: 0xff96_aeca,
+    accent: 0xff91_bfec,
+    accent_hover: 0xffb7_d9fa,
+    on_accent: 0xff17_2b43,
+    selected: 0xff30_5276,
+    checked: 0xff3a_628a,
+    alternate: 0xff22_3349,
+    mint: 0xff9b_d1be,
+    apricot: 0xffe2_c390,
+    warning: 0xffe2_c390,
+    coral: 0xffed_a5b0,
+    danger: 0xffed_a5b0,
+    danger_surface: 0xff42_3044,
+    trough: 0xff11_1b29,
+    segment: 0xff36_4f6b,
+    player: 0xff1a_293d,
+    player_border: 0xff46_6385,
+    tooltip: 0xff0f_1927,
+    ..DEFAULT_V2_PALETTE
+};
+const AMBER_PALETTE: Palette = Palette {
+    bg: 0xff27_211c,
+    panel: 0xff34_2c25,
+    raised: 0xff46_392e,
+    hover: 0xff58_4737,
+    border: 0xff58_4839,
+    strong_border: 0xffa1_8971,
+    ink: 0xfff0_e7db,
+    dim: 0xffce_bda9,
+    muted: 0xffb6_a28b,
+    accent: 0xffdf_b780,
+    accent_hover: 0xfff0_d0a4,
+    on_accent: 0xff32_2618,
+    selected: 0xff5b_4430,
+    checked: 0xff71_5236,
+    alternate: 0xff39_2f27,
+    mint: 0xffb2_c99b,
+    apricot: 0xffe8_c18a,
+    warning: 0xffe8_c18a,
+    coral: 0xffec_a49b,
+    danger: 0xffec_a49b,
+    danger_surface: 0xff4b_2e2b,
+    trough: 0xff20_1a16,
+    segment: 0xff56_4536,
+    player: 0xff2e_261f,
+    player_border: 0xff6c_5440,
+    tooltip: 0xff1b_1612,
+    ..DEFAULT_V2_PALETTE
+};
+
+fn palette_for(id: &str) -> &'static Palette {
+    match id {
+        DEFAULT_V2_THEME => &DEFAULT_V2_PALETTE,
+        "studio" => &STUDIO_PALETTE,
+        "forest" => &FOREST_PALETTE,
+        "ocean" => &OCEAN_PALETTE,
+        "amber" => &AMBER_PALETTE,
+        _ => &DEFAULT_PALETTE,
+    }
+}
+
+fn recommended_themes() -> ModelRc<crate::ThemePreview> {
+    let cards = [
+        (
+            DEFAULT_V2_THEME,
+            "Graphite",
+            "石墨",
+            "Balanced and familiar",
+            "柔和中性 · 日常推荐",
+        ),
+        (
+            "forest",
+            "Forest",
+            "静谧森林",
+            "Soft greens, calm focus",
+            "低饱和绿 · 舒适专注",
+        ),
+        (
+            "ocean",
+            "Ocean",
+            "深海蓝",
+            "Cool blues, clear contrast",
+            "冷调蓝灰 · 清晰沉稳",
+        ),
+        (
+            "amber",
+            "Warm amber",
+            "暖砂琥珀",
+            "Warm tones for late sessions",
+            "暖调棕金 · 温润柔和",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, name, name_cn, description, description_cn)| {
+        let p = palette_for(id);
+        crate::ThemePreview {
+            index: theme_index(id),
+            name: name.into(),
+            name_cn: name_cn.into(),
+            description: description.into(),
+            description_cn: description_cn.into(),
+            bg: Color::from_argb_encoded(p.bg),
+            panel: Color::from_argb_encoded(p.panel),
+            ink: Color::from_argb_encoded(p.ink),
+            accent: Color::from_argb_encoded(p.accent),
+            selected: Color::from_argb_encoded(p.selected),
+        }
+    })
+    .collect::<Vec<_>>();
+    ModelRc::new(VecModel::from(cards))
+}
+
 /// Appearance combo index for a theme identifier; unknown themes select the default.
 pub(crate) fn theme_index(id: &str) -> i32 {
     let id = normalize_theme(id);
@@ -163,20 +314,18 @@ pub(crate) fn apply_theme(ui: &AppWindow, id: &str) {
     };
     ui.set_theme_names(names(false));
     ui.set_theme_names_cn(names(true));
+    ui.set_recommended_themes(recommended_themes());
     let id = normalize_theme(id);
     let index = theme_index(&id);
     ui.set_theme_index(index);
     let entry = &BUILTIN_THEMES[index as usize];
     // A new design gets its own palette and presentation. Preserve the original
     // default, while spectral frequency colors remain independent audio data.
-    let palette = match entry.id {
-        DEFAULT_V2_THEME => &DEFAULT_V2_PALETTE,
-        _ if entry.player_style == PlayerStyle::Studio => &STUDIO_PALETTE,
-        _ => &DEFAULT_PALETTE,
-    };
+    let palette = palette_for(entry.id);
     let theme = ui.global::<crate::Theme>();
     let modern_style = entry.workbench_style == WorkbenchStyle::Studio;
     let modern_player = entry.player_style == PlayerStyle::Studio;
+    let tinted_surfaces = matches!(entry.id, "forest" | "ocean" | "amber");
     let presentation_changed =
         theme.get_modern_style() != modern_style || theme.get_modern_player() != modern_player;
     if presentation_changed {
@@ -185,11 +334,14 @@ pub(crate) fn apply_theme(ui: &AppWindow, id: &str) {
         // its change trackers. Clearing on a deferred style-changed handler is late.
         ui.invoke_clear_audition_input_feedback();
     }
-    if modern_style {
+    // Solid-color themes never display the legacy SVG backdrops. Avoid a large
+    // synchronous rasterization on their first selection, especially during saves.
+    if modern_style && !tinted_surfaces {
         install_studio_surfaces(&theme);
     }
     theme.set_modern_style(modern_style);
     theme.set_modern_player(modern_player);
+    theme.set_tinted_surfaces(tinted_surfaces);
     let color = Color::from_argb_encoded;
     theme.set_bg(color(palette.bg));
     theme.set_panel(color(palette.panel));
