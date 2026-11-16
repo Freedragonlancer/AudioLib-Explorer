@@ -28,7 +28,8 @@ export global Theme {
     in-out property <bool> modern-style: false;
     in-out property <bool> modern-player: false;
     // Studio keeps its warm surface artwork; Default v2 blends it into graphite.
-    out property <float> workbench-backdrop-opacity: Theme.modern-player ? 1.0 : 0.22;
+    in-out property <bool> tinted-surfaces: false;
+    out property <float> workbench-backdrop-opacity: Theme.tinted-surfaces ? 0 : Theme.modern-player ? 1.0 : 0.22;
     // GUI scale factor selected by the interface Appearance setting.
     // Literal lengths are written as `Npx * Theme.ui-scale`. 0px and 1px hairlines
     // (borders, separators, `/ 1px` unit conversions) stay unscaled.

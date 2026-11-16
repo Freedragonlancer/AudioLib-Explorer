@@ -114,9 +114,18 @@ impl Controller {
             c.queue_appearance_save(&ui);
         });
         let c = self.clone();
-        ui.on_text_colors_reset(move || c.select_text_palette(0));
+        ui.on_text_colors_reset(move || c.reset_text_colors());
         let c = self.clone();
-        ui.on_text_palette_requested(move |index| c.select_text_palette(index));
+        ui.on_recommended_theme_requested(move |index| {
+            if !c.available() || ![2, 3, 4, 5].contains(&index) {
+                return;
+            }
+            if let Some(ui) = c.ui.upgrade() {
+                c.appearance.lock().unwrap().text_colors.clear();
+                ui.invoke_theme_requested(index);
+                c.queue_appearance_save(&ui);
+            }
+        });
         let c = self.clone();
         ui.on_appearance_preset_requested(move |action| c.edit_appearance_preset(action));
         let c = self.clone();
@@ -125,14 +134,12 @@ impl Controller {
         ui.on_language_mode_requested(move |index| c.select_language(index));
     }
 
-    fn select_text_palette(&self, index: i32) {
+    fn reset_text_colors(&self) {
         if !self.available() {
             return;
         }
-        if let Some(ui) = self.ui.upgrade()
-            && let Some(colors) = crate::appearance::builtin_colors(index)
-        {
-            self.appearance.lock().unwrap().text_colors = colors;
+        if let Some(ui) = self.ui.upgrade() {
+            self.appearance.lock().unwrap().text_colors.clear();
             self.queue_appearance_save(&ui);
         }
     }

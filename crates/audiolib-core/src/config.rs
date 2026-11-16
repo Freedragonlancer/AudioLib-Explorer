@@ -636,7 +636,7 @@ pub struct BuiltinTheme {
 }
 
 /// Single registry of shipped themes, with the original default first.
-pub const BUILTIN_THEMES: [BuiltinTheme; 3] = [
+pub const BUILTIN_THEMES: [BuiltinTheme; 6] = [
     BuiltinTheme {
         id: DEFAULT_THEME,
         name: "Default",
@@ -653,8 +653,29 @@ pub const BUILTIN_THEMES: [BuiltinTheme; 3] = [
     },
     BuiltinTheme {
         id: DEFAULT_V2_THEME,
-        name: "Default v2",
-        name_cn: "默认 v2",
+        name: "Graphite",
+        name_cn: "石墨",
+        workbench_style: WorkbenchStyle::Studio,
+        player_style: PlayerStyle::Classic,
+    },
+    BuiltinTheme {
+        id: "forest",
+        name: "Forest",
+        name_cn: "静谧森林",
+        workbench_style: WorkbenchStyle::Studio,
+        player_style: PlayerStyle::Classic,
+    },
+    BuiltinTheme {
+        id: "ocean",
+        name: "Ocean",
+        name_cn: "深海蓝",
+        workbench_style: WorkbenchStyle::Studio,
+        player_style: PlayerStyle::Classic,
+    },
+    BuiltinTheme {
+        id: "amber",
+        name: "Warm amber",
+        name_cn: "暖砂琥珀",
         workbench_style: WorkbenchStyle::Studio,
         player_style: PlayerStyle::Classic,
     },

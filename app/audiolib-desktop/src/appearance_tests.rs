@@ -74,8 +74,81 @@ fn appearance_editor_renders_both_languages_and_reaches_preset_controls() {
             ui.set_settings_page(1);
             ui.set_settings_visible(true);
             ui.show().unwrap();
+            ui.window().take_snapshot().unwrap();
+            if scale > 1.0 {
+                ui.invoke_scroll_main_to_end();
+                ui.window().take_snapshot().unwrap();
+            }
+            assert!(!ui.get_appearance_advanced_open());
+            let weak = ui.as_weak();
+            ui.on_recommended_theme_requested(move |index| {
+                let ui = weak.upgrade().unwrap();
+                crate::theme::apply_theme(&ui, &crate::theme::theme_id(index));
+                appearance::apply(&ui, &AppearancePreferences::default());
+            });
+            let ocean = ElementHandle::find_by_accessible_label(
+                &ui,
+                if chinese { "深海蓝" } else { "Ocean" },
+            )
+            .next()
+            .expect("theme card is keyboard and screen-reader reachable");
+            if scale == 1.0 {
+                use slint::platform::{PointerEventButton, WindowEvent};
+                let category = ElementHandle::find_by_accessible_label(
+                    &ui,
+                    if chinese {
+                        "通用与界面"
+                    } else {
+                        "General / interface"
+                    },
+                )
+                .next()
+                .unwrap();
+                assert!(
+                    ocean.absolute_position().x
+                        >= category.absolute_position().x + category.size().width,
+                    "Theme cards must not overlap the settings navigation"
+                );
+                let origin = ocean.absolute_position();
+                let size = ocean.size();
+                let position = slint::LogicalPosition::new(
+                    origin.x + size.width / 2.0,
+                    origin.y + size.height / 2.0,
+                );
+                ui.window()
+                    .dispatch_event(WindowEvent::PointerMoved { position });
+                ui.window().dispatch_event(WindowEvent::PointerPressed {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+                ui.window().dispatch_event(WindowEvent::PointerReleased {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+            } else {
+                ocean.invoke_accessible_default_action();
+            }
+            assert_eq!(crate::theme::theme_id(ui.get_theme_index()), "ocean");
+            assert_eq!(
+                ui.global::<Theme>().get_bg(),
+                Color::from_rgb_u8(0x15, 0x20, 0x30)
+            );
             for bottom in [false, true] {
                 if bottom {
+                    let toggle = ElementHandle::find_by_accessible_label(
+                        &ui,
+                        if chinese {
+                            "高级选项 · 字体、文字颜色与预设"
+                        } else {
+                            "Advanced · Fonts, text colors and presets"
+                        },
+                    )
+                    .next()
+                    .unwrap();
+                    toggle.invoke_accessible_default_action();
+                    assert!(ui.get_appearance_advanced_open());
+                    // Conditional advanced groups participate in layout on the next frame.
+                    ui.window().take_snapshot().unwrap();
                     ui.invoke_scroll_main_to_end();
                 }
                 let pixels = ui.window().take_snapshot().unwrap();
@@ -92,7 +165,11 @@ fn appearance_editor_renders_both_languages_and_reaches_preset_controls() {
                     .unwrap();
                 }
             }
-            let label = if chinese { "另存为" } else { "Save new" };
+            let label = if chinese {
+                "保存为新预设"
+            } else {
+                "Save new preset"
+            };
             let save = ElementHandle::find_by_accessible_label(&ui, label)
                 .next()
                 .expect("preset action reachable");
@@ -106,6 +183,80 @@ fn appearance_editor_renders_both_languages_and_reaches_preset_controls() {
             ui.hide().unwrap();
         }
     }
+}
+
+#[test]
+fn recommended_theme_previews_match_distinct_readable_workbench_palettes() {
+    use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};
+    use slint::Model;
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1280.0, 800.0));
+    ui.set_chinese(true);
+    ui.show().unwrap();
+    crate::theme::apply_theme(&ui, "default-v2");
+    let previews = ui.get_recommended_themes();
+    let mut surfaces = std::collections::BTreeSet::new();
+    for card in previews.iter() {
+        crate::theme::apply_theme(&ui, &crate::theme::theme_id(card.index));
+        let theme = ui.global::<Theme>();
+        assert_eq!(theme.get_bg(), card.bg);
+        assert_eq!(theme.get_panel(), card.panel);
+        assert_eq!(theme.get_ink(), card.ink);
+        assert_eq!(theme.get_accent(), card.accent);
+        assert_eq!(theme.get_selected(), card.selected);
+        assert!(surfaces.insert(theme.get_bg().as_argb_encoded()));
+        assert!(contrast(theme.get_ink(), theme.get_panel()) >= 4.5);
+        assert!(contrast(theme.get_dim(), theme.get_panel()) >= 4.5);
+        assert!(contrast(theme.get_on_accent(), theme.get_accent()) >= 4.5);
+        assert!(contrast(theme.get_ink(), theme.get_selected()) >= 4.5);
+        let pixels = ui.window().take_snapshot().unwrap();
+        let panel = card.panel.to_argb_u8();
+        assert!(
+            pixels
+                .as_bytes()
+                .chunks_exact(4)
+                .any(|p| p[..3] == [panel.red, panel.green, panel.blue]),
+            "theme surface must be painted"
+        );
+        if let Some(directory) = std::env::var_os("AUDIOLIB_UI_SCALE_SNAPSHOT_DIR") {
+            let directory = std::path::Path::new(&directory);
+            std::fs::create_dir_all(directory).unwrap();
+            image::save_buffer(
+                directory.join(format!("theme-{}.png", card.index)),
+                pixels.as_bytes(),
+                pixels.width(),
+                pixels.height(),
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        }
+    }
+    assert_eq!(surfaces.len(), 4);
+    ui.hide().unwrap();
+}
+
+fn contrast(a: Color, b: Color) -> f64 {
+    let luminance = |color: Color| {
+        let c = color.to_argb_u8();
+        let linear = |v: u8| {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(c.red) + 0.7152 * linear(c.green) + 0.0722 * linear(c.blue)
+    };
+    let a = luminance(a);
+    let b = luminance(b);
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
 #[test]
