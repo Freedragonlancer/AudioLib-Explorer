@@ -1,7 +1,7 @@
 // crates/audiolib-ai/src/storage.rs
 //! Atomic AI profiles, encrypted Windows credentials and informational usage history.
 use crate::{
-    AiError, Result,
+    AiError, ConfigField, Result,
     config::{ApiKey, Profile, PromptSettings, Protocol, validate_instruction},
 };
 use serde::{Deserialize, Serialize};
@@ -158,7 +158,7 @@ impl ProfileStore {
             return Ok(ApiKey::default());
         };
         if saved.base_url != draft.base_url || saved.protocol != draft.protocol {
-            return Err(AiError::Invalid);
+            return Err(AiError::InvalidConfig(ConfigField::EndpointChanged));
         }
         self.key(saved)
     }
@@ -189,13 +189,13 @@ impl ProfileStore {
         let mut next = self.copy_document();
         let old = next.profiles.iter().find(|p| p.id == profile.id).cloned();
         if old.is_none() && next.profiles.len() >= 16 {
-            return Err(AiError::Invalid);
+            return Err(AiError::InvalidConfig(ConfigField::ProfileLimit));
         }
         if let Some(old) = &old {
             if key.is_none()
                 && (old.base_url != profile.base_url || old.protocol != profile.protocol)
             {
-                return Err(AiError::Invalid);
+                return Err(AiError::InvalidConfig(ConfigField::EndpointChanged));
             }
             profile.credential_ref = old.credential_ref.clone();
         }
@@ -282,6 +282,35 @@ impl ProfileStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clipboard_key_whitespace_is_not_retained_in_session_or_protected_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ProfileStore::open(dir.path()).unwrap();
+        store
+            .save(
+                Profile {
+                    model: "gpt-4.1".into(),
+                    ..Default::default()
+                },
+                Some(ApiKey::new(" \towned-clipboard-key\r\n".into()).unwrap()),
+            )
+            .unwrap();
+        let saved = store.selected().unwrap().clone();
+        assert_eq!(store.key(&saved).unwrap().expose(), "owned-clipboard-key");
+        assert!(
+            !std::fs::read_to_string(&store.path)
+                .unwrap()
+                .contains("owned-clipboard-key")
+        );
+        if audiolib_windows::user_secret_protection_available() {
+            let reopened = ProfileStore::open(dir.path()).unwrap();
+            assert_eq!(
+                reopened.key(&saved).unwrap().expose(),
+                "owned-clipboard-key"
+            );
+        }
+    }
+
     #[test]
     fn magpie_lan_profiles_persist_without_loosening_credential_binding() {
         let dir = tempfile::tempdir().unwrap();

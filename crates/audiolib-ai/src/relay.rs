@@ -240,7 +240,7 @@ impl From<RelayFailureWire> for RelayFailure {
 impl From<AiError> for RelayFailure {
     fn from(error: AiError) -> Self {
         match error {
-            AiError::Invalid => Self::ProviderInvalid,
+            AiError::Invalid | AiError::InvalidConfig(_) => Self::ProviderInvalid,
             AiError::Cancelled => Self::Cancelled,
             AiError::Transport => Self::Transport,
             AiError::Timeout(seconds) => Self::Timeout { seconds },
@@ -486,6 +486,11 @@ mod tests {
         assert!(matches!(
             RelayResponse::from_models(Err(AiError::Http(401))).into_models(),
             Err(AiError::Http(401))
+        ));
+        assert!(matches!(
+            RelayResponse::from_models(Err(AiError::InvalidConfig(crate::ConfigField::Key)))
+                .into_models(),
+            Err(AiError::Invalid)
         ));
         assert!(matches!(
             RelayResponse::from_output(Err(AiError::Timeout(600))).into_models(),

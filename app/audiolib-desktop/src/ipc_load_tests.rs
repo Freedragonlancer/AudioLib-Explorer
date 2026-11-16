@@ -318,3 +318,106 @@ fn child_ipc_load_during_metadata_capture() {
     controller.shutdown();
     ui.hide().unwrap();
 }
+
+#[test]
+fn ipc_load_replaces_cancelled_waveforms_for_selected_and_different_sources() {
+    let isolation = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "controller::ipc_load_tests::child_ipc_waveform_publication",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env("AUDIOLIB_DATA_DIR", isolation.path().join("preferences"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+#[ignore = "isolated IPC Load and queued Waveform publication regression"]
+fn child_ipc_waveform_publication() {
+    i_slint_backend_testing::init_integration_test_with_system_time();
+    let (root, ui, _engine, controller) = make_fixture();
+    let startup = ui.as_weak();
+    run_until(&ui, move || {
+        startup.upgrade().is_some_and(|ui| {
+            !ui.get_search_workspace_loading() && !ui.get_task_restoring() && !ui.get_searching()
+        })
+    });
+    let a = local_file(&root.path().join("a.wav"), 1);
+    let b = local_file(&root.path().join("b.wav"), 2);
+    *controller.selected.lock().unwrap() = Some(a.clone());
+    present_file(&ui, &a);
+    controller.wave_view.lock().unwrap().0 = a.file_path.clone();
+    *controller.waveform_size.lock().unwrap() = (64, 32);
+    let data =
+        audiolib_audio::waveform(Path::new(&a.file_path), WaveformRequest::default()).unwrap();
+    let job = WaveJob {
+        source: waveform_selection::WaveSource::capture(&controller, &a),
+        path: PathBuf::from(&a.file_path),
+        remote_id: None,
+        sample_rate: a.sample_rate,
+        frames: data.frames,
+        start_frame: 0,
+        end_frame: data.frames,
+        duration: a.duration,
+        view: WaveView::default(),
+        generation: controller.waveform_generation.load(Ordering::Acquire),
+        cancel: controller.waveform_cancel.lock().unwrap().clone(),
+        width: 32,
+        height: 16,
+    };
+    // Leave a real render publication queued in Slint. IPC invalidates it, then
+    // external discovery must replace it even though A is already selected.
+    controller.publish_waveform(&job, &data, 1.0);
+    let loaded = controller.ipc(serde_json::json!({"command":"load", "path":a.file_path}));
+    assert_eq!(loaded["success"], true, "{loaded}");
+    let window = ui.as_weak();
+    run_until(&ui, move || {
+        window
+            .upgrade()
+            .is_some_and(|ui| ui.get_waveform_ready() && ui.get_waveform_image().size().width == 64)
+    });
+    assert!(ui.get_waveform_ready());
+    assert_eq!(ui.get_waveform_image().size().width, 64);
+    let a_identity = ui.get_wave_selection_identity();
+    assert!(!a_identity.is_empty());
+
+    // A queued render from A must still be rejected when the explicit path is B.
+    // B is selected too, so its replacement also needs cancelled-work discovery.
+    ui.set_waveform_ready(false);
+    ui.set_waveform_image(Image::default());
+    *controller.selected.lock().unwrap() = Some(b.clone());
+    present_file(&ui, &b);
+    let old_job = WaveJob {
+        generation: controller.waveform_generation.load(Ordering::Acquire),
+        cancel: controller.waveform_cancel.lock().unwrap().clone(),
+        ..job
+    };
+    controller.publish_waveform(&old_job, &data, 1.0);
+    let loaded = controller.ipc(serde_json::json!({"command":"load", "path":b.file_path}));
+    assert_eq!(loaded["success"], true, "{loaded}");
+    let window = ui.as_weak();
+    run_until(&ui, move || {
+        window.upgrade().is_some_and(|ui| {
+            ui.get_waveform_ready()
+                && ui.get_waveform_image().size().width == 64
+                && ui.get_wave_selection_identity() != a_identity
+        })
+    });
+    assert!(old_job.cancel.load(Ordering::Acquire));
+    assert_eq!(ui.get_waveform_image().size().width, 64);
+    assert_eq!(
+        controller.audio.status().file_path,
+        Some(PathBuf::from(&b.file_path))
+    );
+    controller.shutdown();
+    ui.hide().unwrap();
+}

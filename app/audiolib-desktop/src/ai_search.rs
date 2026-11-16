@@ -2,7 +2,7 @@
 //! AI search presentation. All network, key protection and durable writes run off the UI.
 use super::*;
 use audiolib_ai::{
-    AiError,
+    AiError, ConfigField,
     config::{ApiKey, DEFAULT_PROMPT, Profile, Protocol, RequestMode, validate_instruction},
     provider,
     reference::ReferenceIndex,
@@ -1301,6 +1301,16 @@ impl Controller {
             return;
         }
         let message=match error {
+            AiError::InvalidConfig(field) => match field {
+                ConfigField::Url => self.localized("API 地址无效：请填写完整 HTTPS Base URL；本机服务可用 HTTP，私网 HTTP 网关请选择 Magpie", "Invalid API URL: use a full HTTPS Base URL; HTTP is allowed for localhost, or private gateways with Magpie"),
+                ConfigField::Model => self.localized("模型 ID 无效：请先获取并选择模型，或填写最多 120 字节的模型 ID", "Invalid model ID: fetch and select a model, or enter a model ID up to 120 bytes"),
+                ConfigField::Name => self.localized("供应商名称需为 1–80 字符", "Provider name must contain 1–80 characters"),
+                ConfigField::Timeout => self.localized("请求超时需为 2–600 秒", "Request timeout must be 2–600 seconds"),
+                ConfigField::Key => self.localized("API Key 含无效字符或过长：请只粘贴密钥，不含 Bearer 前缀或内部换行", "Invalid API key characters or length: paste only the key, without a Bearer prefix or embedded line breaks"),
+                ConfigField::Identity => self.localized("供应商配置标识无效；请新建供应商配置", "Invalid provider profile identity; create a new provider profile"),
+                ConfigField::EndpointChanged => self.localized("API 地址或协议已更改；请重新输入此地址对应的 API Key 后再获取模型、测试或保存", "API endpoint or protocol changed; re-enter the key for this endpoint before fetching models, testing or saving"),
+                ConfigField::ProfileLimit => self.localized("最多保存 16 个供应商配置；请先移除不再使用的配置", "At most 16 provider profiles can be saved; remove an unused profile first"),
+            },
             AiError::Invalid=>self.localized("配置或输入无效；检查模型 ID、URL、长度，更换地址须重新输入密钥", "Invalid input/config: check model, URL, limits; re-enter key after changing endpoint"),
             AiError::Uncertain=>self.localized("Jev 判断不够确定；请细化描述或切换本地词表", "Jev decision uncertain; refine the description or use local reference"),
             AiError::Response=>self.localized("未找到合适词条，或供应商结果未通过校验；请细化描述", "No matching reference or invalid provider result; refine the description"),
