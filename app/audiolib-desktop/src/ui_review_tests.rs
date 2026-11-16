@@ -1,8 +1,11 @@
 // app/audiolib-desktop/src/ui_review_tests.rs
 //! Interaction regressions for the client review; all data belongs to the test backend.
 use crate::ui_tests::{click_label, send_keys};
-use crate::{AppWindow, FolderRow, SourceRow};
-use slint::{ComponentHandle, ModelRc, VecModel, platform::Key};
+use crate::{AppWindow, AudioRow, FolderRow, SourceRow};
+use slint::{
+    ComponentHandle, ModelRc, VecModel,
+    platform::{Key, WindowEvent},
+};
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 fn window() -> AppWindow {
@@ -12,6 +15,138 @@ fn window() -> AppWindow {
     ui.set_query("background query".into());
     ui.show().unwrap();
     ui
+}
+
+#[test]
+fn result_playback_shortcuts_fire_on_first_press_without_key_repeat() {
+    i_slint_backend_testing::init_no_event_loop();
+    for theme in audiolib_core::config::THEME_IDS {
+        for chinese in [false, true] {
+            let ui = window();
+            crate::theme::apply_theme(&ui, theme);
+            ui.set_chinese(chinese);
+            ui.set_rows(ModelRc::new(VecModel::from(vec![AudioRow {
+                id: "1".into(),
+                name: "Keyboard audition fixture.wav".into(),
+                ..Default::default()
+            }])));
+            ui.set_selected_row(0);
+            ui.set_audio_ready(true);
+            ui.set_audition_play_on_single_click(true);
+            let activations = Rc::new(RefCell::new(Vec::new()));
+            let observed = activations.clone();
+            ui.on_play_requested(move || observed.borrow_mut().push("play"));
+            let observed = activations.clone();
+            ui.on_audition_requested(move |_| observed.borrow_mut().push("audition"));
+            click_label(&ui, "Keyboard audition fixture.wav");
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1));
+            for (key, action) in [
+                (slint::SharedString::from(" "), "play"),
+                (Key::Return.into(), "audition"),
+            ] {
+                let before = activations.borrow().len();
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyPressed { text: key.clone() });
+                assert_eq!(
+                    activations.borrow().len(),
+                    before + 1,
+                    "{theme}: immediate {action}"
+                );
+                assert_eq!(activations.borrow().last(), Some(&action));
+                for _ in 0..4 {
+                    ui.window()
+                        .dispatch_event(WindowEvent::KeyPressRepeated { text: key.clone() });
+                    // A duplicate non-repeat key-down must also remain one gesture.
+                    ui.window()
+                        .dispatch_event(WindowEvent::KeyPressed { text: key.clone() });
+                }
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyReleased { text: "q".into() });
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyPressed { text: key.clone() });
+                assert_eq!(
+                    activations.borrow().len(),
+                    before + 1,
+                    "{theme}: held {action}"
+                );
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyReleased { text: key.clone() });
+                assert_eq!(
+                    activations.borrow().len(),
+                    before + 1,
+                    "release adds no second action"
+                );
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyPressed { text: key.clone() });
+                assert_eq!(activations.borrow().len(), before + 2);
+
+                // A lost release while focus belongs elsewhere cannot leave the
+                // next fresh shortcut stuck or turn an OS repeat into a press.
+                click_label(
+                    &ui,
+                    if chinese {
+                        "搜索关键词"
+                    } else {
+                        "Search keywords"
+                    },
+                );
+                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1));
+                click_label(&ui, "Keyboard audition fixture.wav");
+                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1));
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyPressRepeated { text: key.clone() });
+                assert_eq!(activations.borrow().len(), before + 2);
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyReleased { text: key.clone() });
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyPressed { text: key.clone() });
+                assert_eq!(
+                    activations.borrow().len(),
+                    before + 3,
+                    "{theme}: focus recovery"
+                );
+
+                ui.set_library_busy(true);
+                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1));
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyReleased { text: key.clone() });
+                ui.set_library_busy(false);
+                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1));
+                click_label(&ui, "Keyboard audition fixture.wav");
+                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1));
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyPressRepeated { text: key.clone() });
+                assert_eq!(activations.borrow().len(), before + 3);
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyReleased { text: key.clone() });
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyPressed { text: key.clone() });
+                assert_eq!(
+                    activations.borrow().len(),
+                    before + 4,
+                    "{theme}: disabled recovery"
+                );
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyReleased { text: key });
+            }
+            let steps = Rc::new(RefCell::new(0));
+            let observed = steps.clone();
+            ui.on_selection_step_requested(move |_| *observed.borrow_mut() += 1);
+            ui.window().dispatch_event(WindowEvent::KeyPressed {
+                text: Key::DownArrow.into(),
+            });
+            for _ in 0..3 {
+                ui.window().dispatch_event(WindowEvent::KeyPressRepeated {
+                    text: Key::DownArrow.into(),
+                });
+            }
+            ui.window().dispatch_event(WindowEvent::KeyReleased {
+                text: Key::DownArrow.into(),
+            });
+            assert_eq!(*steps.borrow(), 4, "navigation keeps native key repeat");
+            ui.hide().unwrap();
+        }
+    }
 }
 
 #[test]
