@@ -86,6 +86,13 @@ fn appearance_editor_renders_both_languages_and_reaches_preset_controls() {
                 crate::theme::apply_theme(&ui, &crate::theme::theme_id(index));
                 appearance::apply(&ui, &AppearancePreferences::default());
             });
+            use slint::Model;
+            let expected_background = ui
+                .get_recommended_themes()
+                .iter()
+                .find(|card| crate::theme::theme_id(card.index) == "ocean")
+                .unwrap()
+                .bg;
             let ocean = ElementHandle::find_by_accessible_label(
                 &ui,
                 if chinese { "深海蓝" } else { "Ocean" },
@@ -129,10 +136,7 @@ fn appearance_editor_renders_both_languages_and_reaches_preset_controls() {
                 ocean.invoke_accessible_default_action();
             }
             assert_eq!(crate::theme::theme_id(ui.get_theme_index()), "ocean");
-            assert_eq!(
-                ui.global::<Theme>().get_bg(),
-                Color::from_rgb_u8(0x15, 0x20, 0x30)
-            );
+            assert_eq!(ui.global::<Theme>().get_bg(), expected_background);
             for bottom in [false, true] {
                 if bottom {
                     let toggle = ElementHandle::find_by_accessible_label(
@@ -216,6 +220,16 @@ fn recommended_theme_previews_match_distinct_readable_workbench_palettes() {
         assert!(contrast(theme.get_dim(), theme.get_panel()) >= 4.5);
         assert!(contrast(theme.get_on_accent(), theme.get_accent()) >= 4.5);
         assert!(contrast(theme.get_ink(), theme.get_selected()) >= 4.5);
+        assert!(contrast(theme.get_muted(), theme.get_raised()) >= 4.5);
+        assert!(contrast(theme.get_dim(), theme.get_hover()) >= 4.5);
+        assert!(contrast(theme.get_ink(), theme.get_checked()) >= 4.5);
+        assert!(contrast(theme.get_strong_border(), theme.get_panel()) >= 3.0);
+        for status in [theme.get_mint(), theme.get_warning(), theme.get_danger()] {
+            assert!(contrast(status, theme.get_hover()) >= 4.5);
+        }
+        assert_eq!(theme.get_workbench_backdrop_opacity(), 0.0);
+        assert_eq!(theme.get_normal_canvas(), theme.get_trough());
+        assert!(contrast(theme.get_dim(), theme.get_normal_canvas()) >= 4.5);
         if crate::theme::theme_id(card.index) == "obsidian" {
             // Neutral chrome must not inherit the retired green surfaces or accents.
             for color in [
@@ -235,22 +249,13 @@ fn recommended_theme_previews_match_distinct_readable_workbench_palettes() {
                 assert_eq!(rgb.red, rgb.green);
                 assert_eq!(rgb.green, rgb.blue);
             }
-            assert!(contrast(theme.get_muted(), theme.get_raised()) >= 4.5);
-            assert!(contrast(theme.get_ink(), theme.get_checked()) >= 4.5);
-            assert!(contrast(theme.get_strong_border(), theme.get_panel()) >= 3.0);
-            for status in [theme.get_mint(), theme.get_warning(), theme.get_danger()] {
-                assert!(contrast(status, theme.get_hover()) >= 4.5);
-            }
-            assert_eq!(theme.get_workbench_backdrop_opacity(), 0.0);
-            assert_eq!(theme.get_normal_canvas(), theme.get_trough());
-            assert!(contrast(theme.get_dim(), theme.get_normal_canvas()) >= 4.5);
             // Old stored identifiers also render the replacement, not the fallback theme.
             crate::theme::apply_theme(&ui, "forest");
             assert_eq!(ui.get_theme_index(), card.index);
             assert_eq!(theme.get_bg(), card.bg);
         }
         let pixels = ui.window().take_snapshot().unwrap();
-        if crate::theme::theme_id(card.index) == "obsidian" {
+        {
             let canvas = theme.get_normal_canvas().to_argb_u8();
             assert!(
                 pixels

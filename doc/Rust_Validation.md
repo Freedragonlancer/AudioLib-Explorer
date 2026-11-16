@@ -1,5 +1,15 @@
 # Rust 验证报告
 
+## 其余三套推荐主题优化（2026-11-16，beta）
+
+在护眼黑曜 PR #323 合并后的 `9741cca` 上，按用户追加要求优化石墨、深海蓝和暖砂琥珀，分支 `codex/recommended-palette-refinement`。沿用 frontend-design 与 Carbon 的设计方法：石墨为冷灰/雾银，深海蓝为低饱和蓝灰，琥珀为暖灰/淡砂金；完整 token 表及参考链接见 [架构说明](Rust_Architecture.md)。主题标识、字体、预设及设置结构不变。石墨也停用旧 Studio 背景贴图，四张推荐卡片与主界面、播放器和空波形共用配色。
+
+Windows Rust 1.97.1 MSVC，Slint 1.17.1，已核验 ASIO SDK 2.3.4。最终 desktop all-targets strict Clippy、格式检查通过。外观 4 passed、主题注册/切换 3 passed、受争用偏好保存/关闭 1 passed，共 8 个不同测试、0 ignored；源码未变化的 core/CLI 检查与前节 46 个配置测试、3 个经典播放器回归沿用 `9741cca` 基线。无新依赖、持久化或播放算法变化，不扩大到 workspace、数据安全脚本或硬件验收。
+
+四套实际主界面和中英文 100%/200% 设置截图已检查，保存在 `.rust-validation/refined-themes/screenshots/`。三套新主文字/面板对比度分别为 11.19、11.41、11.31:1，弱化文字/浮层至少 5.25:1；全部推荐主题的选中、勾选、强调背景和语义状态文字通过 4.5:1 检查，强边框/面板至少 3:1。每套均检查空波形采用深色画布且不显示固定频谱底色。首轮设置交互测试因写死旧 Ocean RGB 失败，改为验证鼠标/辅助功能选中后实际背景匹配卡片预览，保留主题身份及可达性断言；最终回归通过。
+
+日志在 `.rust-validation/local-checks/`：首轮 `0cd1481e9fa04c97b21760df203c5afe`，最终外观/静态检查 `441d486954d84940ac435ef4ebfea7d0`，主题切换 `d18db3b431ad446297a5b09838b96427`，偏好保存 `65320911f8ed44e78f63c54da5bb5110`。黑曜单独交付的 `windows-local-obsidian-9741cca` 构建因用户追加三套配色而主动取消，未打包或安装；保留完成的依赖产物供最终四主题交付复用。最终交付在新的合并身份下使用 `windows-local` 原生计划，仍安装到固定 `local_release/` 并统一清理缓存，结果以最终管线收据为准。
+
 ## 护眼黑曜替换静谧森林（2026-11-16，beta）
 
 基于 beta `056621e`，分支 `codex/obsidian-theme`。推荐列表和视图菜单以护眼黑曜 / Obsidian 替换森林；背景、面板、文字、强调与选中态使用中性灰阶，保留低饱和语义状态色。旧 `forest` 配置和命名预设自动规范化为 `obsidian`，保留字体、自定义颜色和其他偏好。设计依据及颜色值见 [架构说明](Rust_Architecture.md)。
