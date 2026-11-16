@@ -2,7 +2,7 @@
 
 程序 1.0.2 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9
 
-以已发布 `v1.0.1` 为基线准备 PATCH 发布。API、资料库写目标、快照范围和完整格式沿用 1.0.1，不新增资料库迁移；正式产物、平台验收与发布状态以实际发布记录为准。
+已于 2026-11-16 02:47:34 UTC（北京时间 2026-11-16 10:47:34）正式发布 [v1.0.2](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.2)，以已发布 `v1.0.1` 为基线使用 PATCH。经 #314／#315 审查和 #316 IPC／OpenAI 补修、#318 文档链接修正，再由 #317 晋升 main。七份正式产物来自 `702366c391d714ea197787e87cd7e25eaf7808b3`，tag object 为 `d72502fc4d5cf763892183cee7e3291c92089876`；实际平台包／启动验收、十四项线上资产与下载校验正文核验通过。发布后同一固定 `local_release/` 已同步核验：908 个包文件与两个 EXE 哈希、CLI 1.0.2 及隔离启动通过，copied=0，正常工作数据保留。API、资料库写目标、快照范围及完整格式沿用 1.0.1，不新增资料库迁移，详见 [1.0.2 发布记录](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_1.0.2.md)。
 
 - **播放与 IPC**：大音频回调分块处理，保留 Seek、EOF 与网络预缓冲行为；显式 IPC Load 取代过期 GUI 选择和远程准备，Metadata 写入继续有序排空。
 - **OpenAI 兼容与设置诊断**：官方 OpenAI Chat 请求使用 `max_completion_tokens`；其他兼容供应商保留原有参数。粘贴密钥时清理首尾空白，内部控制字符继续拒绝；模型、地址、密钥及配置边界错误显示明确原因，更换地址或协议仍须重新输入密钥。
@@ -11,7 +11,7 @@
 - **主题与输入**：修正三个主题的缩放、字号、隐藏侧栏、Studio 操作可达性、控件点击与取消；保留原生按键重复状态和交互焦点边界。
 - **构建维护**：中间产物清理保留可验证的部分执行证明，使被占用中断后的同范围清理能够恢复。
 
-性能目标仍为 **P95 latency <500ms for 1M+ records**。开发定向验证的原始身份、失败后修复和复用边界见 [Rust 验证报告](Rust_Validation.md)，本次发布进度见 [1.0.2 发布记录](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_1.0.2.md)；不把既有 Windows 结果当作 macOS/Linux 原生验收或真实 ASIO 硬件测量。
+Windows 新增定向回归 114 passed；Mac 本轮原生组合 171 passed（原身份 66 与补修 105 分别保留），Linux arm64 199 passed，x64 仿真 126 passed 并通过当前消费者 strict Clippy。beta 完整同步 909,342 条、20/20 流样本通过；828,780 条既有根外记录保留。百万合成记录／100 查询在 Apple M4／OrbStack ARM64 VM、2 CPU、未清空 OS 缓存条件下，缓存感知 P95 102.350 ms、首轮 P95 377.903 ms。性能目标仍为 **P95 latency <500ms for 1M+ records**。OpenAI 真实账户和用户当时唯一失败原因未确认；Mac ad-hoc 不是 Apple 公证，真实 ASIO、声学起音和物理键盘未新增验收。源码复用、失败身份、完整 SHA256 与安装状态见 [1.0.2 发布记录](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_1.0.2.md)。
 
 # 1.0.1：AI 网关转发、收藏与 Windows 修复
 
