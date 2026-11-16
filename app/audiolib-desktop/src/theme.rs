@@ -135,35 +135,36 @@ pub(crate) const DEFAULT_V2_PALETTE: Palette = Palette {
     overlay: 0xa800_0000,
 };
 
-/// Complete coordinated palettes; previews and the workbench share these tokens.
-const FOREST_PALETTE: Palette = Palette {
-    bg: 0xff16_211e,
-    panel: 0xff20_302a,
-    raised: 0xff2c_4037,
-    hover: 0xff38_5044,
-    border: 0xff3b_5147,
-    strong_border: 0xff73_9182,
-    ink: 0xffe0_ebe5,
-    dim: 0xffb3_c8bd,
-    muted: 0xff97_b0a2,
-    accent: 0xffa2_c9aa,
-    accent_hover: 0xffc0_dfbd,
-    on_accent: 0xff1c_3023,
-    selected: 0xff34_5242,
-    checked: 0xff40_6550,
-    alternate: 0xff24_352e,
-    mint: 0xffa2_c9aa,
-    apricot: 0xffdf_c496,
-    warning: 0xffdf_c496,
-    coral: 0xffe3_a6a1,
-    danger: 0xffe3_a6a1,
-    danger_surface: 0xff43_3030,
-    trough: 0xff12_1c18,
-    segment: 0xff3a_5045,
-    player: 0xff1c_2b25,
-    player_border: 0xff48_6354,
-    tooltip: 0xff10_1b16,
-    ..DEFAULT_V2_PALETTE
+/// Neutral charcoal layers and silver actions. Only semantic status colors use hue;
+/// previews and the workbench share these tokens without a tinted SVG backdrop.
+const OBSIDIAN_PALETTE: Palette = Palette {
+    bg: 0xff16_1616,
+    panel: 0xff20_2020,
+    raised: 0xff2b_2b2b,
+    hover: 0xff38_3838,
+    border: 0xff40_4040,
+    strong_border: 0xff7d_7d7d,
+    ink: 0xffde_dede,
+    dim: 0xffb0_b0b0,
+    muted: 0xff9a_9a9a,
+    accent: 0xffc6_c6c6,
+    accent_hover: 0xffe0_e0e0,
+    on_accent: 0xff1a_1a1a,
+    selected: 0xff3d_3d3d,
+    checked: 0xff4b_4b4b,
+    alternate: 0xff24_2424,
+    mint: 0xffa9_b7ad,
+    apricot: 0xffc6_b48f,
+    warning: 0xffc6_b48f,
+    coral: 0xffd4_9a9a,
+    danger: 0xffd4_9a9a,
+    danger_surface: 0xff32_2626,
+    trough: 0xff12_1212,
+    segment: 0xff44_4444,
+    player: 0xff1b_1b1b,
+    player_border: 0xff4a_4a4a,
+    tooltip: 0xff10_1010,
+    overlay: 0xa800_0000,
 };
 const OCEAN_PALETTE: Palette = Palette {
     bg: 0xff15_2030,
@@ -228,7 +229,7 @@ fn palette_for(id: &str) -> &'static Palette {
     match id {
         DEFAULT_V2_THEME => &DEFAULT_V2_PALETTE,
         "studio" => &STUDIO_PALETTE,
-        "forest" => &FOREST_PALETTE,
+        "obsidian" => &OBSIDIAN_PALETTE,
         "ocean" => &OCEAN_PALETTE,
         "amber" => &AMBER_PALETTE,
         _ => &DEFAULT_PALETTE,
@@ -245,11 +246,11 @@ fn recommended_themes() -> ModelRc<crate::ThemePreview> {
             "柔和中性 · 日常推荐",
         ),
         (
-            "forest",
-            "Forest",
-            "静谧森林",
-            "Soft greens, calm focus",
-            "低饱和绿 · 舒适专注",
+            "obsidian",
+            "Obsidian",
+            "护眼黑曜",
+            "Charcoal layers, soft silver",
+            "深灰底色，柔白文字",
         ),
         (
             "ocean",
@@ -325,7 +326,7 @@ pub(crate) fn apply_theme(ui: &AppWindow, id: &str) {
     let theme = ui.global::<crate::Theme>();
     let modern_style = entry.workbench_style == WorkbenchStyle::Studio;
     let modern_player = entry.player_style == PlayerStyle::Studio;
-    let tinted_surfaces = matches!(entry.id, "forest" | "ocean" | "amber");
+    let tinted_surfaces = matches!(entry.id, "obsidian" | "ocean" | "amber");
     let presentation_changed =
         theme.get_modern_style() != modern_style || theme.get_modern_player() != modern_player;
     if presentation_changed {

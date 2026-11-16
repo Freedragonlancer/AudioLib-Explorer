@@ -1285,7 +1285,7 @@ component ClassicAuditionPanel inherits Rectangle {
             ClassicTool { icon: @image-url("icons/settings.svg"); label: root.chinese ? "音频输出" : "Audio output"; tip-align: 1; clicked => { root.output-settings(); } }
         }
         wave-frame := Rectangle { horizontal-stretch: 1; vertical-stretch: 1; min-height: (root.compact ? 45px : 70px) * Theme.ui-scale + scrub.feedback-height;
-            wave := Rectangle { x: 0px; y: 0px; width: parent.width; height: max(1px, parent.height - scrub.feedback-height); background: root.spectral ? Theme.spectral-canvas : Theme.normal-canvas; border-color: Theme.player-border; border-width: 1px; clip: true;
+            wave := Rectangle { x: 0px; y: 0px; width: parent.width; height: max(1px, parent.height - scrub.feedback-height); background: root.spectral && root.waveform-ready ? Theme.spectral-canvas : Theme.normal-canvas; border-color: Theme.player-border; border-width: 1px; clip: true;
                 accessible-role: groupbox; accessible-label: root.chinese ? "波形时间轴" : "Waveform timeline";
                 property <float> played-fraction: root.duration > 0 ? clamp((root.visual-position - root.shown-start) / max(0.001, root.shown-end - root.shown-start), 0, 1) : 0;
                 changed width => { root.resize(self.width / 1px, self.height / 1px); }
@@ -1295,7 +1295,7 @@ component ClassicAuditionPanel inherits Rectangle {
                     x: (root.view-start - root.shown-start) / root.shown-span * parent.width;
                     width: max(0px, (root.view-end - root.view-start) / root.shown-span * parent.width);
                 }
-                if !root.waveform-ready: Text { text: root.busy || root.missing || root.state == 1 || root.state == 7 ? root.unavailable : root.ready ? (root.spectral ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.chinese ? "正在分析波形…" : "Analyzing waveform…")) : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition")); color: root.spectral ? #263238 : Theme.text(4, 1, Theme.dim); horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(11); }
+                if !root.waveform-ready: Text { text: root.busy || root.missing || root.state == 1 || root.state == 7 ? root.unavailable : root.ready ? (root.spectral ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.chinese ? "正在分析波形…" : "Analyzing waveform…")) : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition")); color: Theme.text(4, 1, Theme.dim); horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(11); }
                 // These overlays are paint-only, leaving click/scroll ownership to scrub.
                 if root.ready && root.duration > 0: PlayedRegion {
                     x: 0px; y: 0px; width: parent.width; height: parent.height;

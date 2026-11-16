@@ -122,7 +122,7 @@ fn child_contended_preference_shutdown() {
     assert!(ui.get_text_color_error());
     ui.invoke_text_colors_reset();
     assert!(controller.appearance.lock().unwrap().text_colors.is_empty());
-    ui.invoke_recommended_theme_requested(crate::theme::theme_index("forest"));
+    ui.invoke_recommended_theme_requested(crate::theme::theme_index("obsidian"));
     ui.invoke_appearance_preset_requested(0);
     assert_eq!(ui.get_theme_index(), crate::theme::theme_index("ocean"));
     assert_eq!(ui.get_text_color_value(), "#BADA55");
