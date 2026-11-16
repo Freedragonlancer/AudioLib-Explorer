@@ -46,6 +46,57 @@ component Tip inherits Rectangle {
     tip-text := Text { text: root.text; color: Theme.ink; font-size: Theme.font(10); horizontal-alignment: center; vertical-alignment: center; accessible-role: none; }
 }
 
+// Track hover even while unavailable, but only activate a gesture that began
+// enabled and remained enabled. Loading/EOF can otherwise arm a held pointer.
+component GuardedActionArea inherits TouchArea {
+    in property <bool> available: true;
+    property <bool> armed: false;
+    callback activated();
+    mouse-cursor: root.available ? pointer : default;
+    changed available => { if !root.available { root.armed = false; } }
+    clicked => {
+        let activate = root.armed && root.available;
+        root.armed = false;
+        if activate { root.activated(); }
+    }
+    pointer-event(event) => {
+        if event.kind == PointerEventKind.cancel { root.armed = false; return; }
+        if event.button != PointerEventButton.left { return; }
+        if event.kind == PointerEventKind.down { root.armed = root.available; }
+        else if event.kind == PointerEventKind.up { root.armed = false; }
+    }
+}
+
+// Transport and monitoring actions fire once on release, as in Classic. Native
+// key repeat must not alternate playback or a monitoring toggle while held.
+component ActionKeyScope inherits FocusScope {
+    in property <bool> keyboard-active: true;
+    property <string> held-key;
+    out property <bool> held: root.held-key != "";
+    callback activated();
+    changed enabled => { if !root.enabled { root.held-key = ""; } }
+    changed keyboard-active => { if !root.keyboard-active { root.held-key = ""; } }
+    changed has-focus => { if !root.has-focus { root.held-key = ""; } }
+    key-pressed(event) => {
+        if event.text == Key.Escape && root.held { root.held-key = ""; return accept; }
+        if root.enabled && root.keyboard-active && (event.text == " " || event.text == Key.Return) {
+            if !root.held && !event.repeat { root.held-key = event.text; }
+            return accept;
+        }
+        reject
+    }
+    key-released(event) => {
+        if root.enabled && root.keyboard-active && (event.text == " " || event.text == Key.Return) {
+            if root.held-key == event.text {
+                root.held-key = "";
+                root.activated();
+            }
+            return accept;
+        }
+        reject
+    }
+}
+
 component Tool inherits Rectangle {
     in property <string> symbol;
     in property <image> icon;
@@ -59,6 +110,7 @@ component Tool inherits Rectangle {
     in property <int> tip-align: 0;
     in property <bool> enabled: true;
     in property <bool> active: false;
+    in property <bool> checkable: false;
     in property <bool> primary: false;
     in property <bool> subtle: false;
     in property <length> icon-size: 20px * Theme.ui-scale;
@@ -71,7 +123,7 @@ component Tool inherits Rectangle {
     callback clicked();
     width: 32px * Theme.ui-scale; height: 32px * Theme.ui-scale; border-radius: 5px * Theme.ui-scale;
     property <bool> hovered: hit.has-hover && root.enabled;
-    property <bool> pressed: hit.pressed && root.enabled;
+    property <bool> pressed: (hit.pressed || focus.held) && root.enabled;
     property <bool> tip-ready: false;
     property <bool> show-alt: root.alt && root.alt-icon.width > 0;
     property <color> ink: root.primary ? Theme.on-accent : (root.active ? Theme.accent-hover : Theme.ink);
@@ -85,7 +137,8 @@ component Tool inherits Rectangle {
     opacity: root.enabled ? 1 : 0.4;
     animate background, border-color { duration: Theme.motion-fast; easing: ease-out; }
     animate opacity { duration: Theme.motion-base; easing: ease-out; }
-    accessible-role: button; accessible-label: root.label; accessible-enabled: root.enabled;
+    accessible-role: button; accessible-label: root.label; accessible-description: root.hint;
+    accessible-enabled: root.enabled; accessible-checkable: root.checkable; accessible-checked: root.active;
     accessible-action-default => { if root.enabled { root.clicked(); } }
     forward-focus: focus;
     if root.primary: Rectangle {
@@ -116,18 +169,18 @@ component Tool inherits Rectangle {
         }
         if root.icon.width == 0: Text { text: root.symbol; color: root.ink; font-size: root.symbol-size; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.motion-fast; } }
     }
-    focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if root.keyboard-active && (event.text == " " || event.text == Key.Return) { root.clicked(); return accept; } reject } }
+    focus := ActionKeyScope { enabled: root.enabled; keyboard-active: root.keyboard-active; activated => { root.clicked(); } }
     // Hover is tracked while disabled too, so the tooltip can say why.
-    hit := TouchArea {
-        mouse-cursor: root.enabled ? pointer : default;
-        clicked => { if root.enabled { root.clicked(); } }
+    hit := GuardedActionArea {
+        available: root.enabled;
+        activated => { root.clicked(); }
         changed has-hover => { if !self.has-hover { root.tip-ready = false; } }
     }
     Timer { interval: Theme.tooltip-delay; running: root.show-tip && hit.has-hover && !root.tip-ready; triggered => { root.tip-ready = true; } }
     Tip {
         z: 10; anchor-width: root.width; anchor-height: root.height; align: root.tip-align;
         text: root.label + (root.hint != "" ? "  ·  " + root.hint : "");
-        show: root.tip-ready && !hit.pressed;
+        show: root.tip-ready && !hit.pressed && !focus.held;
     }
 }
 // Play / Pause. The triangle splits into two bars (and joins back) by moving its
@@ -148,7 +201,7 @@ component PlayToggle inherits Rectangle {
     callback clicked();
     width: 32px * Theme.ui-scale; height: 30px * Theme.ui-scale;
     property <bool> hovered: hit.has-hover && root.enabled;
-    property <bool> pressed: hit.pressed && root.enabled;
+    property <bool> pressed: (hit.pressed || focus.held) && root.enabled;
     property <bool> tip-ready: false;
     // 0 draws Play, 1 draws Pause; values between are the morph.
     property <float> morph: root.playing ? 1 : 0;
@@ -166,7 +219,7 @@ component PlayToggle inherits Rectangle {
     }
     opacity: root.enabled ? 1 : 0.4;
     animate opacity { duration: Theme.motion-base; easing: ease-out; }
-    accessible-role: button; accessible-label: root.label; accessible-enabled: root.enabled;
+    accessible-role: button; accessible-label: root.label; accessible-description: root.hint; accessible-enabled: root.enabled;
     accessible-action-default => { root.activate(); }
     forward-focus: focus;
     // While playing, a quiet halo marks the live transport.
@@ -218,17 +271,17 @@ component PlayToggle inherits Rectangle {
         }
     }
     // A mouse click does not claim focus, so Space keeps serving the result list.
-    focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if event.text == " " || event.text == Key.Return { root.activate(); return accept; } reject } }
-    hit := TouchArea {
-        mouse-cursor: root.enabled ? pointer : default;
-        clicked => { root.activate(); }
+    focus := ActionKeyScope { enabled: root.enabled; activated => { root.activate(); } }
+    hit := GuardedActionArea {
+        available: root.enabled;
+        activated => { root.activate(); }
         changed has-hover => { if !self.has-hover { root.tip-ready = false; } }
     }
     Timer { interval: Theme.tooltip-delay; running: hit.has-hover && !root.tip-ready; triggered => { root.tip-ready = true; } }
     Tip {
         z: 10; anchor-width: root.width; anchor-height: root.height; align: root.tip-align;
         text: root.label + (root.hint != "" ? "  ·  " + root.hint : "");
-        show: root.tip-ready && !hit.pressed;
+        show: root.tip-ready && !hit.pressed && !focus.held;
     }
 }
 component Caption inherits Text { color: Theme.dim; font-size: Theme.font(11); vertical-alignment: center; }
@@ -666,7 +719,7 @@ component ClassicTool inherits Rectangle {
                 return accept;
             }
             if root.keyboard-active && (event.text == " " || event.text == Key.Return) {
-                if !root.keyboard-held { root.held-key = event.text; }
+                if !root.keyboard-held && !event.repeat { root.held-key = event.text; }
                 return accept;
             }
             reject
@@ -1334,6 +1387,12 @@ component ClassicAuditionPanel inherits Rectangle {
 // shared control values survive a theme switch and the renderer stays external.
 // Studio compact dock, imported from PR185 without its default-theme overwrite.
 component WorkbenchAuditionPanel inherits Rectangle {
+    // The outer workbench scrolls the dock as one surface. Publish the actual
+    // layout minimum so its right-hand actions stay inside that scroll extent.
+    out property <length> content-min-width: dock-layout.min-width;
+    callback content-min-width-changed(length);
+    min-width: root.content-min-width;
+    changed content-min-width => { root.content-min-width-changed(root.content-min-width); }
     in property <bool> compact: false;
     in property <bool> narrow: false;
     in property <bool> spectral: true;
@@ -1445,7 +1504,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
         root.anchor-tick = animation-tick();
         root.correction = continuous ? previous - root.position : 0;
     }
-    init => { root.sync-progress(false); root.selection-feedback-resized(root.selection-feedback-height); }
+    init => { root.sync-progress(false); root.selection-feedback-resized(root.selection-feedback-height); root.content-min-width-changed(root.content-min-width); }
     changed position => { root.sync-progress(true); }
     changed playing => { root.sync-progress(false); }
     changed smooth-progress => { root.sync-progress(false); }
@@ -1527,7 +1586,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
     Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: Theme.player-backdrop; image-fit: fill; accessible-role: none; }
     Rectangle { x: 0px; y: 0px; height: 1px; background: Theme.player-border; }
     private property <float> font-factor: max(1, Theme.ui-font-px / 13.0);
-    GridLayout { padding-left: 12px * Theme.ui-scale; padding-right: 10px * Theme.ui-scale; padding-top: 6px * Theme.ui-scale; padding-bottom: 6px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
+    dock-layout := GridLayout { padding-left: 12px * Theme.ui-scale; padding-right: 10px * Theme.ui-scale; padding-top: 6px * Theme.ui-scale; padding-bottom: 6px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
         VerticalLayout { row: 0; col: 0; width: 180px * Theme.ui-scale; alignment: center;
             HorizontalLayout { spacing: 8px * Theme.ui-scale; alignment: start;
                 PlayToggle {
@@ -1539,7 +1598,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                 }
                 Tool { width: 32px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; subtle: true; icon: @image-url("icons/start.svg"); label: root.chinese ? "回到开头" : "Go to start"; hint: root.transport-hint; enabled: root.ready; clicked => { root.seek(0); } }
                 Tool { width: 32px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; subtle: true; icon: @image-url("icons/stop.svg"); label: root.chinese ? "停止" : "Stop"; hint: root.transport-hint; enabled: root.ready; clicked => { root.stop(); } }
-                Tool { width: 32px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; subtle: true; icon: @image-url("icons/repeat.svg"); label: root.chinese ? "循环整个声音" : "Repeat sound"; hint: root.repeat ? (root.chinese ? "已开启" : "On") : ""; active: root.repeat; clicked => { root.repeat = !root.repeat; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+                Tool { width: 32px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; subtle: true; icon: @image-url("icons/repeat.svg"); label: root.chinese ? "循环整个声音" : "Repeat sound"; hint: root.repeat ? (root.chinese ? "已开启" : "On") : ""; active: root.repeat; checkable: true; clicked => { root.repeat = !root.repeat; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
             }
         }
         VerticalLayout { row: 0; col: 1; width: (root.narrow ? 192px : 240px) * Theme.ui-scale * root.font-factor; alignment: center; spacing: 2px * Theme.ui-scale;
@@ -1612,7 +1671,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                 }
                 Tool {
                     width: 28px * Theme.ui-scale; height: 32px * Theme.ui-scale; subtle: true; icon-size: 18px * Theme.ui-scale;
-                    icon: @image-url("icons/volume.svg"); alt-icon: @image-url("icons/volume-mute.svg"); alt: root.muted; active: root.muted;
+                    icon: @image-url("icons/volume.svg"); alt-icon: @image-url("icons/volume-mute.svg"); alt: root.muted; active: root.muted; checkable: true;
                     label: root.muted ? (root.chinese ? "取消静音" : "Unmute") : (root.chinese ? "静音" : "Mute");
                     hint: root.volume-label;
                     clicked => { root.toggle-mute(); }
@@ -1633,7 +1692,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                 Caption { text: root.volume-label; font-size: Theme.font(9); }
                 Rectangle { horizontal-stretch: 1; }
                 Tool { width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; icon-size: 16px * Theme.ui-scale; icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; enabled: pitch-field.modified || rate-field.modified; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
-                Tool { width: 44px * Theme.ui-scale * root.font-factor; height: 24px * Theme.ui-scale; subtle: true; symbol: root.chinese ? "单声道" : "Mono"; symbol-size: Theme.font(10); label: root.chinese ? "单声道监听" : "Mono monitoring"; hint: root.mono ? (root.chinese ? "已开启" : "On") : ""; active: root.mono; clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+                Tool { width: 44px * Theme.ui-scale * root.font-factor; height: 24px * Theme.ui-scale; subtle: true; symbol: root.chinese ? "单声道" : "Mono"; symbol-size: Theme.font(10); label: root.chinese ? "单声道监听" : "Mono monitoring"; hint: root.mono ? (root.chinese ? "已开启" : "On") : ""; active: root.mono; checkable: true; clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
                 Rectangle { width: 1px; height: 14px * Theme.ui-scale; y: (parent.height - self.height) / 2; background: Theme.border; }
                 Tool { width: 22px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; symbol: "−"; symbol-size: Theme.font(14); label: root.chinese ? "缩小波形" : "Zoom out"; enabled: root.ready && root.zoom > 1; clicked => { root.zoom-change(0.5); } }
                 Tool { width: 22px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; symbol: "+"; symbol-size: Theme.font(14); label: root.chinese ? "放大波形" : "Zoom in"; enabled: root.ready && root.zoom < 128; clicked => { root.zoom-change(2); } }
@@ -1879,6 +1938,9 @@ component WorkbenchAuditionPanel inherits Rectangle {
 export component AuditionPanel inherits Rectangle {
     // Inactive facades keep their shared bindings without creating input owners.
     in property <bool> active: true;
+    private property <length> presenter-min-width: 0px;
+    // An inactive facade must not reserve space in the other presentation.
+    min-width: root.active && Theme.modern-player ? root.presenter-min-width : 0px;
     in property <bool> compact: false;
     in property <bool> narrow: false;
     in property <image> waveform-mask;
@@ -2079,6 +2141,7 @@ export component AuditionPanel inherits Rectangle {
     }
     if root.active && Theme.modern-player: WorkbenchAuditionPanel {
         width: parent.width; height: parent.height;
+        content-min-width-changed(value) => { root.presenter-min-width = value; }
         narrow: root.narrow; waveform-mask: root.waveform-mask;
         expanded <=> root.expanded;
         expanded-requested(value) => { root.expanded-requested(value); }

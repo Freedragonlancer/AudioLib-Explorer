@@ -970,6 +970,10 @@ impl SqliteProvider {
                 "A nonempty Idempotency-Key of at most 200 bytes is required",
             ));
         }
+        // Short writer leases protect individual batches only. Keep replacement
+        // excluded while the in-memory checkpoint and the owned preview remain
+        // active, including progress callbacks between committed batches.
+        let _administration = crate::management::AdministrationLease::shared(&self.path)?;
         let _lock = self.vendor_job_lock(id)?;
         // This is admission refusal, not a failed write. Preserve the original
         // rollback error/phase/checkpoint so repeated commit retries cannot erase
@@ -1276,6 +1280,9 @@ impl SqliteProvider {
     /// Roll back only this batch's immutable events and reproject remaining sources.
     /// Later imports and rescanned embedded Metadata survive, including overlapping fields.
     pub fn vendor_import_rollback_impl(&self, id: &str) -> Result<VendorImportResult> {
+        // Rollback also spans several transactions; a restored job/baseline must
+        // not replace the state this operation is draining between those batches.
+        let _administration = crate::management::AdministrationLease::shared(&self.path)?;
         let _lock = self.vendor_job_lock(id)?;
         let result = self.vendor_import_rollback_locked(id);
         if let Err(error) = &result {

@@ -890,12 +890,58 @@ fn missing_result_rows_never_preview_in_either_click_mode() {
     }
 }
 
+#[test]
+fn result_favorite_cell_never_selects_or_auditions_the_row() {
+    i_slint_backend_testing::init_no_event_loop();
+    for theme in audiolib_core::config::THEME_IDS {
+        for chinese in [false, true] {
+            let ui = AppWindow::new().unwrap();
+            crate::theme::apply_theme(&ui, theme);
+            ui.set_chinese(chinese);
+            ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+            ui.set_audition_play_on_single_click(true);
+            ui.set_rows(ModelRc::new(VecModel::from(vec![AudioRow {
+                id: "42".into(),
+                name: "Favorite target.wav".into(),
+                ..Default::default()
+            }])));
+            ui.on_row_clicked(|_, _, _, _| panic!("Favorite must not select or preview a row"));
+            ui.on_audition_requested(|_| panic!("Favorite must not audition a row"));
+            let favorites = Rc::new(RefCell::new(Vec::new()));
+            let observed = favorites.clone();
+            ui.on_favorite_set_requested(move |id, value| {
+                observed.borrow_mut().push((id.to_string(), value));
+            });
+            ui.show().unwrap();
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1));
+            let label = if chinese {
+                "收藏：Favorite target.wav"
+            } else {
+                "Favorite: Favorite target.wav"
+            };
+            click_label(&ui, label);
+            assert_eq!(&*favorites.borrow(), &[("42".to_owned(), true)]);
+            ui.set_metadata_writes_blocked(true);
+            click_label(&ui, label);
+            assert_eq!(favorites.borrow().len(), 1, "Blocked writes stay inert");
+            ui.hide().unwrap();
+        }
+    }
+}
+
 fn result_row_position(ui: &AppWindow, label: &str) -> slint::LogicalPosition {
     let row = ElementHandle::find_by_accessible_label(ui, label)
         .find(|element| element.accessible_role() == Some(AccessibleRole::ListItem))
         .unwrap_or_else(|| panic!("Missing result row: {label}"));
-    let origin = row.absolute_position();
-    slint::LogicalPosition::new(origin.x + 8.0, origin.y + row.size().height / 2.0)
+    // The leading cell owns favorites. Selection/preview/drag checks must hit
+    // the row's content area rather than accidentally testing that button.
+    let hit = row
+        .query_descendants()
+        .match_id("AppWindow::result-hit")
+        .find_first()
+        .expect("the classic result content hit area");
+    let origin = hit.absolute_position();
+    slint::LogicalPosition::new(origin.x + 8.0, origin.y + hit.size().height / 2.0)
 }
 
 pub(crate) fn click_label(ui: &AppWindow, label: &str) {
@@ -3909,11 +3955,7 @@ fn full_width_rows_forward_ctrl_shift_selection_without_accidental_audition() {
     ui.show().unwrap();
     // Settle the native window's responsive layout before caching pointer coordinates.
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1));
-    let row = ElementHandle::find_by_accessible_label(&ui, "Selection.wav")
-        .find(|item| item.accessible_role() == Some(AccessibleRole::ListItem))
-        .unwrap();
-    let origin = row.absolute_position();
-    let position = slint::LogicalPosition::new(origin.x + 8.0, origin.y + row.size().height / 2.0);
+    let position = result_row_position(&ui, "Selection.wav");
     for (keys, toggle, range) in [
         (vec![], false, false),
         (vec![Key::Control], true, false),
@@ -4503,11 +4545,7 @@ fn dragging_a_result_row_requests_drag_out_once_and_progress_can_be_cancelled() 
     let requests = Rc::new(RefCell::new(Vec::new()));
     let observed = requests.clone();
     ui.on_drag_out_requested(move |id| observed.borrow_mut().push(id.to_string()));
-    let name = ElementHandle::find_by_accessible_label(&ui, "Drag me.wav")
-        .next()
-        .expect("row name");
-    let origin = name.absolute_position();
-    let start = slint::LogicalPosition::new(origin.x + 4.0, origin.y + 4.0);
+    let start = result_row_position(&ui, "Drag me.wav");
     ui.window()
         .dispatch_event(WindowEvent::PointerMoved { position: start });
     ui.window().dispatch_event(WindowEvent::PointerPressed {
@@ -4548,10 +4586,13 @@ fn dragging_a_result_row_requests_drag_out_once_and_progress_can_be_cancelled() 
     );
     ui.set_drag_progress("Preparing drag 1/2: Drag me.wav 40%".into());
     ui.set_drag_preparing(true);
-    assert!(
-        ElementHandle::find_by_accessible_label(&ui, "Preparing drag 1/2: Drag me.wav 40%")
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "Application status")
             .next()
-            .is_some()
+            .expect("the native status footer")
+            .accessible_description()
+            .as_deref(),
+        Some("Preparing drag 1/2: Drag me.wav 40%")
     );
     ElementHandle::find_by_accessible_label(&ui, "Cancel drag")
         .next()

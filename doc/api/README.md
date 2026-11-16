@@ -92,7 +92,7 @@ CR、修复及历次隔离证据见 [方案 B CR](Search_Storage_B_CR.md)；p1�
 | 路由存在但方法不对（如 `POST /library`） | 405 | `METHOD_NOT_ALLOWED`（JSON 错误体，保留 `Allow` 头） |
 | 受通用请求超时控制的端点超过 30 秒未完成（根目录 PATCH/DELETE 例外，§6.10；目录浏览另有 15 秒上限） | 408 | `TIMEOUT` |
 | `Busy`（扫描/维护/快照并发占用；已有扫描时再 `POST /scans`，§6.6；扫描进行中或暂停中、或其他进程扫描/维护同一个库时 `POST /audio/remove`、`DELETE /folders/{id}`，§6.8） | 409 | `BUSY` |
-| 库修改请求缺少 `X-AudioLib-Library-Id` 或包含重复/空值；读取端点、管理页和根检查除外 | 409 | `LIBRARY_ID_REQUIRED` |
+| 库修改请求缺少 `X-AudioLib-Library-Id`，或库请求携带重复/空值；普通读取允许旧客户端省略，封面仍要求身份 | 409 | `LIBRARY_ID_REQUIRED` |
 | `X-AudioLib-Library-Id` 与处理该请求的库身份不一致 | 409 | `LIBRARY_CHANGED` |
 | 浏览器修改请求带非同源、无效或无法验证的 Origin | 403 | `ORIGIN_FORBIDDEN` |
 | JSON 修改请求的 Content-Type 缺少或不是 application/json | 415 | `JSON_CONTENT_TYPE_REQUIRED` |

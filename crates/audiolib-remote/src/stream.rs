@@ -142,6 +142,8 @@ impl std::fmt::Debug for SourceAuth {
 pub struct StreamSource {
     pub url: String,
     pub auth: SourceAuth,
+    /// Snapshot identity for server API reads; WebDAV and legacy unbound callers omit it.
+    pub library_id: Option<String>,
     /// Wait for the response of each request ([`FIRST_BYTE_TIMEOUT`] by default).
     pub first_byte_timeout: Duration,
     /// `Some(duration)` for a `codec=flac` preview: decoded into a PCM WAV of that
@@ -157,6 +159,7 @@ impl StreamSource {
         Self {
             url: url.into(),
             auth,
+            library_id: None,
             first_byte_timeout: FIRST_BYTE_TIMEOUT,
             flac_duration: None,
             read_ahead: None,
@@ -707,10 +710,25 @@ impl MemoryCache {
         length: Option<u64>,
         output: &mut dyn io::Write,
     ) -> io::Result<bool> {
+        self.copy_complete_for_library(url, None, etag, length, output)
+    }
+
+    pub(crate) fn copy_complete_for_library(
+        &self,
+        url: &str,
+        library_id: Option<&str>,
+        etag: &str,
+        length: Option<u64>,
+        output: &mut dyn io::Write,
+    ) -> io::Result<bool> {
         let found = self
             .entries()
             .iter()
-            .find(|entry| entry.source.url == url && entry.source.flac_duration.is_none())
+            .find(|entry| {
+                entry.source.url == url
+                    && entry.source.flac_duration.is_none()
+                    && entry.source.library_id.as_deref() == library_id
+            })
             .cloned();
         let Some(entry) = found else {
             return Ok(false);
@@ -1411,6 +1429,9 @@ pub fn probe_stream(source: &StreamSource) -> Result<StreamProbe> {
     if let Some(value) = source.auth.header() {
         request = request.header("Authorization", &value);
     }
+    if let Some(identity) = &source.library_id {
+        request = request.header(crate::client::LIBRARY_ID_HEADER, identity);
+    }
     let mut response = request
         .call()
         .map_err(|error| RemoteError::from_transport(error, url))?;
@@ -1498,6 +1519,9 @@ fn fetch(
         let mut request = agent.get(url).header("Range", &range);
         if let Some(value) = entry.source.auth.header() {
             request = request.header("Authorization", &value);
+        }
+        if let Some(identity) = &entry.source.library_id {
+            request = request.header(crate::client::LIBRARY_ID_HEADER, identity);
         }
         if let Some(etag) = &if_range {
             request = request.header("If-Range", etag);
@@ -1705,6 +1729,9 @@ fn fetch_flac(
         let mut request = agent.get(&url);
         if let Some(value) = entry.source.auth.header() {
             request = request.header("Authorization", &value);
+        }
+        if let Some(identity) = &entry.source.library_id {
+            request = request.header(crate::client::LIBRARY_ID_HEADER, identity);
         }
         request
     })
@@ -2170,6 +2197,10 @@ mod tests {
         let server = {
             let (bytes, log, calls) = (bytes.clone(), log.clone(), calls.clone());
             TestServer::start(move |request| {
+                assert_eq!(
+                    request.header("x-audiolib-library-id"),
+                    Some("resume-library")
+                );
                 note(request, &log);
                 let response = serve(request, &bytes, "\"v1\"");
                 if calls.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -2179,7 +2210,11 @@ mod tests {
                 }
             })
         };
-        let stream = start("4", format!("{}/s", server.url));
+        let client = crate::RemoteClient::new(&server.url, "secret-token")
+            .unwrap()
+            .with_library_id("resume-library")
+            .unwrap();
+        let stream = MemoryStream::start(&cache(), "4", client.stream_source(1)).unwrap();
         stream.wait_complete(Duration::from_secs(10)).unwrap();
         assert_eq!(read_all(&stream), *bytes);
         let log = log.lock().unwrap();
@@ -2188,6 +2223,51 @@ mod tests {
             log[1],
             ("bytes=100000-".to_owned(), Some("\"v1\"".to_owned()))
         );
+    }
+
+    #[test]
+    fn identical_stream_urls_and_etags_do_not_share_bytes_across_library_bindings() {
+        let server = TestServer::start(|request| {
+            let fill = match request.header("x-audiolib-library-id") {
+                Some("library-a") => 11,
+                Some("library-b") => 42,
+                _ => return TestResponse::json(409, r#"{"error_code":"LIBRARY_CHANGED"}"#),
+            };
+            serve(request, &[fill; 64], "\"same-validator\"")
+        });
+        let cache = cache();
+        let client = crate::RemoteClient::new(&server.url, "").unwrap();
+        let source_a = client
+            .clone()
+            .with_library_id("library-a")
+            .unwrap()
+            .stream_source(1);
+        let source_b = client
+            .with_library_id("library-b")
+            .unwrap()
+            .stream_source(1);
+        assert_eq!(probe_stream(&source_a).unwrap().total, Some(64));
+        let first = MemoryStream::start(&cache, "shared-key", source_a.clone()).unwrap();
+        first.wait_complete(Duration::from_secs(5)).unwrap();
+        let reused = MemoryStream::start(&cache, "shared-key", source_a.clone()).unwrap();
+        assert!(first.shares_buffer_with(&reused));
+        assert_eq!(read_all(&reused), vec![11; 64]);
+        assert!(
+            !cache
+                .copy_complete_for_library(
+                    &source_a.url,
+                    Some("library-b"),
+                    "\"same-validator\"",
+                    Some(64),
+                    &mut Vec::new()
+                )
+                .unwrap()
+        );
+        let second = MemoryStream::start(&cache, "shared-key", source_b).unwrap();
+        second.wait_complete(Duration::from_secs(5)).unwrap();
+        assert!(!first.shares_buffer_with(&second));
+        assert_eq!(read_all(&second), vec![42; 64]);
+        assert_eq!(read_all(&first), vec![11; 64]);
     }
 
     /// Serves `old` (ETag v1, cut after 100 kB) on the first request and `new` (v2) after.

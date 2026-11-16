@@ -22,6 +22,21 @@ static ASIO_ACCESS: Mutex<()> = Mutex::new(());
 static ACTIVE_ASIO_STREAMS: AtomicUsize = AtomicUsize::new(0);
 static ASIO_DEVICE_CACHE: Mutex<Option<Vec<AudioDevice>>> = Mutex::new(None);
 
+/// Bounded device period supported by both explicit settings and default streams.
+const MAX_OUTPUT_BUFFER_FRAMES: u32 = 65_536;
+
+// Reserve two largest supported callbacks without making ordinary streams decode
+// that much before starting. The worker's per-stream prefill target stays smaller.
+fn output_ring_capacity(sample_rate: u32) -> usize {
+    2 * (sample_rate as usize / 4).max(MAX_OUTPUT_BUFFER_FRAMES as usize * 2)
+}
+
+fn output_prefill_frames(sample_rate: u32, callback_frames: u32) -> usize {
+    (sample_rate as usize / 8)
+        .max(callback_frames as usize)
+        .max(1)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioBackend {
@@ -68,7 +83,10 @@ impl PlaybackConfig {
         if !self.volume.is_finite() || !(0.0..=1.0).contains(&self.volume) {
             return Err(Error::Validation("Volume must be 0..=1".into()));
         }
-        if self.buffer_frames > 65536 || self.output_pair > 127 || self.source_pair > 127 {
+        if self.buffer_frames > MAX_OUTPUT_BUFFER_FRAMES
+            || self.output_pair > 127
+            || self.source_pair > 127
+        {
             return Err(Error::Validation(
                 "Invalid output buffer or channel pair".into(),
             ));
@@ -706,6 +724,8 @@ struct Output {
     realtime: Arc<Realtime>,
     decoder: AuditionDecoder,
     sample_rate: u32,
+    /// PCM frames prepared before the next device callback, bounded by the ring.
+    prefill_frames: usize,
     /// Output gain to restore after buffering.
     volume: f32,
     buffering: Buffering,
@@ -741,7 +761,9 @@ impl Output {
     /// Output frames for `seconds`, never less than one fill block ([`Self::lookahead`]),
     /// so a started or resumed output can always fill.
     fn frames_for(&self, seconds: f64) -> u64 {
-        ((seconds * f64::from(self.sample_rate)).ceil() as u64).max(self.lookahead())
+        ((seconds * f64::from(self.sample_rate)).ceil() as u64)
+            .max(self.lookahead())
+            .max(self.prefill_frames as u64)
     }
     /// What must be in memory before the next decoder block: covers one decode call
     /// (2048 source frames, or a resampler block) at any rate.
@@ -752,7 +774,7 @@ impl Output {
     /// have the next block in memory yet (it never waits for the network).
     fn fill(&mut self) -> Result<bool> {
         let lookahead = self.lookahead();
-        while self.realtime.ring.len() < self.realtime.ring.capacity() / 2 && !self.eof {
+        while self.realtime.ring.len() < self.prefill_frames * 2 && !self.eof {
             if self.pending_offset >= self.pending.len() {
                 if !self.decoder.is_buffered(lookahead) {
                     return Ok(true);
@@ -784,10 +806,14 @@ impl Output {
     /// Start (or resume) the output: at once when the source has the prebuffer in memory,
     /// otherwise silent until it has ([`Buffering::Waiting`]).
     fn start_running(&mut self) -> Result<()> {
+        self.fill()?;
         if self.realtime.transition.fade_out.load(Ordering::Acquire) {
             self.realtime.arm_fade_in();
         }
-        if self.eof || self.decoder.is_buffered(self.frames_for(PREBUFFER_SECONDS)) {
+        if self.eof
+            || (self.realtime.ring.len() >= self.prefill_frames * 2
+                && self.decoder.is_buffered(self.frames_for(PREBUFFER_SECONDS)))
+        {
             self.realtime
                 .gain
                 .store(self.volume.to_bits(), Ordering::Relaxed);
@@ -806,7 +832,12 @@ impl Output {
     /// memory, ramp the gain down and pause (no glitch, no noise); resume with a ramp once
     /// [`REBUFFER_SECONDS`] are buffered. Files are never starved, so this is a no-op.
     fn regulate(&mut self, starved: bool) -> Result<()> {
-        let low = (self.sample_rate as usize / 16).max(64) * 2;
+        let ordinary_low = (self.sample_rate as usize / 16).max(64) * 2;
+        let low = if self.prefill_frames > self.sample_rate as usize / 8 {
+            ordinary_low.max(self.prefill_frames * 2)
+        } else {
+            ordinary_low
+        };
         match self.buffering {
             Buffering::Off => {
                 if starved && !self.eof && self.realtime.ring.len() < low {
@@ -831,6 +862,9 @@ impl Output {
             Buffering::Waiting(frames) => {
                 if self.eof || self.decoder.is_buffered(frames) {
                     self.fill()?;
+                    if !self.eof && self.realtime.ring.len() < self.prefill_frames * 2 {
+                        return Ok(());
+                    }
                     self.realtime
                         .gain
                         .store(self.volume.to_bits(), Ordering::Relaxed);
@@ -1084,6 +1118,14 @@ impl RenderCallback {
         }
     }
     fn render<T: cpal::SizedSample + cpal::FromSample<f32>>(&mut self, output: &mut [T]) {
+        if output.len() / self.channels > MAX_OUTPUT_BUFFER_FRAMES as usize {
+            // A host that exceeds its reported/supported period cannot consume
+            // beyond our bounded reservoir. Fail on the worker, never allocate
+            // or wait for producer work on the realtime thread.
+            output.fill(T::from_sample(0.0));
+            self.realtime.failed.store(true, Ordering::Release);
+            return;
+        }
         self.realtime.active.store(true, Ordering::SeqCst);
         // This application callback only reads/writes atomics and a preallocated ring.
         // There are no locks, allocations, file operations, Python calls, or logging.
@@ -1615,7 +1657,7 @@ impl Worker {
             status.playback_range,
         )?;
         let realtime = Arc::new(Realtime {
-            ring: Ring::new(2 * (rate as usize / 4).max(8192)),
+            ring: Ring::new(output_ring_capacity(rate)),
             running: AtomicBool::new(false),
             gain: AtomicU32::new(self.config.volume.to_bits()),
             consumed: AtomicU64::new(0),
@@ -1658,8 +1700,25 @@ impl Worker {
             )),
         }?;
         let actual_buffer_frames = stream.buffer_size().unwrap_or(self.config.buffer_frames);
+        if actual_buffer_frames > MAX_OUTPUT_BUFFER_FRAMES {
+            return Err(Error::Audio(format!(
+                "Output buffer {actual_buffer_frames} exceeds the supported maximum {MAX_OUTPUT_BUFFER_FRAMES} frames"
+            )));
+        }
+        // A stream may leave its default period unspecified. Use its bounded
+        // advertised maximum then, or the supported limit if the host has none.
+        let callback_frames = if actual_buffer_frames > 0 {
+            actual_buffer_frames
+        } else {
+            match default.buffer_size() {
+                cpal::SupportedBufferSize::Range { max, .. } => {
+                    (*max).clamp(1, MAX_OUTPUT_BUFFER_FRAMES)
+                }
+                cpal::SupportedBufferSize::Unknown => MAX_OUTPUT_BUFFER_FRAMES,
+            }
+        };
         realtime.callback_latency_nanos.fetch_max(
-            (f64::from(actual_buffer_frames) / f64::from(rate) * 1_000_000_000.0).ceil() as u64,
+            (f64::from(callback_frames) / f64::from(rate) * 1_000_000_000.0).ceil() as u64,
             Ordering::Relaxed,
         );
         let device_id = identity(&device)?;
@@ -1706,6 +1765,7 @@ impl Worker {
             realtime,
             decoder,
             sample_rate: rate,
+            prefill_frames: output_prefill_frames(rate, callback_frames),
             volume: self.config.volume,
             buffering: Buffering::Off,
             pending: Vec::new(),
@@ -1715,7 +1775,7 @@ impl Worker {
             start_position: status.position,
             drain_deadline: None,
         };
-        let started = output.fill().and_then(|_| output.start_running());
+        let started = output.start_running();
         if let Err(error) = started {
             drop(device_iterator);
             drop(driver_guard.take());
@@ -2276,6 +2336,10 @@ mod seek_tests;
 mod transport_tests;
 
 #[cfg(test)]
+#[path = "buffer_tests.rs"]
+mod buffer_tests;
+
+#[cfg(test)]
 #[path = "playback_range_tests.rs"]
 mod playback_range_tests;
 
@@ -2501,6 +2565,7 @@ mod tests {
             )
             .unwrap(),
             sample_rate: 1000,
+            prefill_frames: 4,
             volume: 0.8,
             buffering: Buffering::Off,
             pending: Vec::new(),

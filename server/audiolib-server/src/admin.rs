@@ -678,10 +678,11 @@ struct TokenList {
     tokens: Vec<TokenInfo>,
 }
 
-async fn list_tokens(State(service): State<Service>) -> Json<TokenList> {
-    Json(TokenList {
-        tokens: service.security().tokens(),
-    })
+async fn list_tokens(State(service): State<Service>) -> Result<Json<TokenList>, ApiError> {
+    let security = service.security().clone();
+    Ok(Json(TokenList {
+        tokens: run_blocking(move || security.current_tokens()).await?,
+    }))
 }
 
 #[derive(Debug, Deserialize)]

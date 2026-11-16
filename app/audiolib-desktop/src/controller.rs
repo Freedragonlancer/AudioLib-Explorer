@@ -72,6 +72,9 @@ mod ai_search;
 mod client_review_tests;
 #[path = "controller_history.rs"]
 mod history;
+#[cfg(test)]
+#[path = "ipc_load_tests.rs"]
+mod ipc_load_tests;
 #[path = "library_progress.rs"]
 mod library_progress;
 #[path = "result_page_navigation.rs"]
@@ -166,7 +169,17 @@ pub(crate) fn apply_ui_scale(ui: &AppWindow, percent: u32) {
     } else {
         percent as f32 / 100.0
     };
+    // Divider drags and restored panes assign lengths, replacing Slint's initial
+    // scale bindings. Preserve their scale-100% widths before changing the
+    // global, otherwise a later capture persists a different logical layout.
+    let previous_scale = ui.global::<crate::Theme>().get_ui_scale();
+    let sidebar_width = ui.get_sidebar_preferred_width();
+    let inspector_width = ui.get_inspector_preferred_width();
     ui.global::<crate::Theme>().set_ui_scale(scale);
+    if previous_scale.is_finite() && previous_scale > 0.0 && previous_scale != scale {
+        ui.set_sidebar_preferred_width(sidebar_width / previous_scale * scale);
+        ui.set_inspector_preferred_width(inspector_width / previous_scale * scale);
+    }
 }
 
 fn table_preferences(ui: &AppWindow) -> AudioTablePreferences {
@@ -844,6 +857,10 @@ pub struct Controller {
     selection_generation: AtomicU64,
     selection_job: Mutex<Option<SelectionJob>>,
     latest_selection: Mutex<Option<SelectionJob>>,
+    /// A one-shot test observer for an already entered UI publication, before
+    /// its Metadata capture can wait on the real write-state mutex.
+    #[cfg(test)]
+    selection_metadata_capture_probe: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
     /// Admitted selection Plays remain pending until their exact engine ACK.
     pending_selection_plays: Mutex<Vec<audiolib_audio::CommandCompletion>>,
     selection_wake: Condvar,
@@ -1159,6 +1176,8 @@ impl Controller {
             selection_generation: AtomicU64::new(0),
             selection_job: Mutex::new(None),
             latest_selection: Mutex::new(None),
+            #[cfg(test)]
+            selection_metadata_capture_probe: Mutex::new(None),
             pending_selection_plays: Mutex::new(Vec::new()),
             selection_wake: Condvar::new(),
             selection_audio_job: Mutex::new(None),
@@ -4254,13 +4273,18 @@ impl Controller {
                                     path,
                                 )
                             });
+                        // Explicit IPC Load invalidates pending Waveform work even
+                        // when it loads the selected record. Its cancelled render
+                        // then needs a replacement from this engine generation.
+                        let waveform_cancelled =
+                            c.waveform_cancel.lock().unwrap().load(Ordering::Acquire);
                         if !cached_copy
-                            && !selected.as_ref().is_some_and(|file| {
-                                status
-                                    .file_path
-                                    .as_ref()
-                                    .is_some_and(|path| same_path(Path::new(&file.file_path), path))
-                            })
+                            && (waveform_cancelled
+                                || !selected.as_ref().is_some_and(|file| {
+                                    status.file_path.as_ref().is_some_and(|path| {
+                                        same_path(Path::new(&file.file_path), path)
+                                    })
+                                }))
                             && let Some(file) = c.waveform_file(&status)
                         {
                             c.queue_waveform(&file);
@@ -5441,6 +5465,11 @@ impl Controller {
     /// A consumed play request must not be replayed by a later profile save.
     fn selection_request_completed(&self, generation: u64) {
         let mut pending = self.latest_selection.lock().unwrap();
+        Self::complete_selection_request_locked(&mut pending, generation);
+    }
+
+    /// Complete a request while its caller already owns the admission mutex.
+    fn complete_selection_request_locked(pending: &mut Option<SelectionJob>, generation: u64) {
         if pending
             .as_ref()
             .is_some_and(|job| job.generation == generation)
@@ -5511,8 +5540,23 @@ impl Controller {
                 return;
             }
             // Also save edits entered after the selection request, while its read ran.
-            if let Err(error) = c2.enqueue_current_metadata(&ui) {
-                c2.selection_request_completed(generation);
+            #[cfg(test)]
+            if let Some(probe) = c2.selection_metadata_capture_probe.lock().unwrap().take() {
+                let _ = probe.send(());
+            }
+            let captured = c2.enqueue_current_metadata(&ui);
+            // Capture may have waited while IPC Load/Stop invalidated this
+            // request. Keep its existing Metadata writes, but make the second
+            // identity check and all selection/reload/job publication atomic
+            // with those commands' admission.
+            let mut remembered = c2.latest_selection.lock().unwrap();
+            if c2.selection_generation.load(Ordering::Acquire) != generation
+                || c2.closing.load(Ordering::Acquire)
+            {
+                return;
+            }
+            if let Err(error) = captured {
+                Self::complete_selection_request_locked(&mut remembered, generation);
                 ui.set_status(error.into());
                 return;
             }
@@ -5539,7 +5583,7 @@ impl Controller {
             // Client-local covers are available even when the source WAV is missing.
             c2.queue_artwork(&displayed);
             if displayed.missing {
-                c2.selection_request_completed(generation);
+                Self::complete_selection_request_locked(&mut remembered, generation);
                 ui.set_waveform_ready(false);
                 ui.set_waveform_image(Image::default());
                 ui.set_waveform_mask(Image::default());
@@ -7427,6 +7471,17 @@ impl Controller {
         &self,
         remembered: &mut Option<SelectionJob>,
     ) -> audiolib_core::Result<audiolib_audio::CommandCompletion> {
+        self.cancel_pending_selection_locked(remembered);
+        let completion = self.audio.enqueue_with_ack(AudioCommand::Stop);
+        if completion.is_ok() {
+            self.pending_selection_plays.lock().unwrap().clear();
+        }
+        completion
+    }
+
+    /// Invalidate preparations while retaining the ordered Metadata write queue.
+    /// The caller holds `latest_selection` until its replacing command is admitted.
+    fn cancel_pending_selection_locked(&self, remembered: &mut Option<SelectionJob>) {
         self.selection_generation.fetch_add(1, Ordering::AcqRel);
         *remembered = None;
         *self.selection_job.lock().unwrap() = None;
@@ -7437,10 +7492,24 @@ impl Controller {
             .store(true, Ordering::Release);
         // Interrupt decoder reads blocked on an incomplete server stream too.
         self.interrupt_remote_audio();
-        let completion = self.audio.enqueue_with_ack(AudioCommand::Stop);
+    }
+
+    /// An explicit IPC path supersedes an inspector reload and all older GUI
+    /// preparations. A later IPC Play then belongs to this admitted Load.
+    fn enqueue_ipc_load(
+        &self,
+        path: PathBuf,
+    ) -> audiolib_core::Result<audiolib_audio::CommandCompletion> {
+        let mut remembered = self.latest_selection.lock().unwrap();
+        self.cancel_pending_selection_locked(&mut remembered);
+        self.invalidate_waveform();
+        let completion = self.audio.enqueue_with_ack(AudioCommand::Load(path));
         if completion.is_ok() {
+            *self.audio_reload.lock().unwrap() = None;
             self.pending_selection_plays.lock().unwrap().clear();
         }
+        drop(remembered);
+        self.metadata_wake.notify_all();
         completion
     }
     fn status(&self, message: String) {
@@ -8075,6 +8144,7 @@ impl Controller {
             self.list_waveforms.note_audition_start();
         }
         let completion = match command {
+            AudioCommand::Load(path) => self.enqueue_ipc_load(path),
             AudioCommand::SetVolume(volume) => self.enqueue_volume(volume),
             command => self.audio.enqueue_with_ack(command),
         };

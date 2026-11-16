@@ -623,6 +623,17 @@ pub(crate) fn register_casefold(conn: &Connection) -> Result<()> {
         ))
     })
     .map_err(db_error)?;
+    // Query-only semantic check. Keep legacy partial-index predicates unchanged
+    // and filter their candidate superset without allocating or case-folding tags.
+    conn.create_scalar_function("audiolib_has_user_tags", 1, flags, |context| {
+        let value = context
+            .get_raw(0)
+            .as_str_or_null()
+            .map_err(|error| rusqlite::Error::UserFunctionError(error.into()))?
+            .unwrap_or_default();
+        Ok(!value.trim().is_empty())
+    })
+    .map_err(db_error)?;
     let tags_mapper = icu_casemap::CaseMapper::new();
     conn.create_scalar_function("audiolib_user_tags_key", 1, flags, move |context| {
         let mut value = context.get::<Option<String>>(0)?.unwrap_or_default();

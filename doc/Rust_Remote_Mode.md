@@ -586,6 +586,15 @@ like `503`). A `404` means the file is missing on a reachable root: "the server 
 find this file in its root <name>: moved, renamed or deleted". `remote download` and
 drag-out report the same message.
 
+Snapshot-based audio details, Waveform, audition previews and original-file downloads
+send `X-AudioLib-Library-Id` from the opened cache. The server validates a supplied
+identity against the same pinned AppState used to serve the response, including HEAD,
+Range and conditional reads. A mismatch returns `409 LIBRARY_CHANGED` before opening
+the other library's file. Memory-cache reuse also compares the source library identity.
+Older clients may omit the header; an older server that ignores it must be upgraded
+to provide this atomic read protection. Discovery and snapshot synchronization remain
+unbound so they can discover and open a replacement library.
+
 ## Writes in server mode
 
 From 0.4.4, each writer binds the opened snapshot's immutable library ID. Before every

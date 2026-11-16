@@ -204,15 +204,19 @@ pub(crate) async fn headers(
     let vendor = request.uri().path() == "/api/vendor-import"
         || request.uri().path().starts_with("/api/vendor-import/");
     let mut response = if vendor && let Some(response) = switching_write(&request) {
-        let connection = request.extensions().get::<crate::ConnectionInfo>();
-        match service
-            .security()
-            .authorize(request.headers(), connection)
-            .and_then(|()| {
-                service
-                    .security()
-                    .authorize_manage(request.headers(), connection)
-            }) {
+        let connection = request.extensions().get::<crate::ConnectionInfo>().copied();
+        match crate::routes::authorize_token(
+            service.security().clone(),
+            request.headers().clone(),
+            connection,
+            false,
+        )
+        .await
+        .and_then(|()| {
+            service
+                .security()
+                .authorize_manage(request.headers(), connection.as_ref())
+        }) {
             Ok(()) => response,
             Err(error) => error.into_response(),
         }

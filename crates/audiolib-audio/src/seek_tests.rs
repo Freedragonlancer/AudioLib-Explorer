@@ -452,6 +452,7 @@ fn seek_through_worker_with_simulated_callbacks(
         )
         .unwrap(),
         sample_rate,
+        prefill_frames: realtime.ring.capacity() / 4,
         volume: 0.8,
         buffering: Buffering::Off,
         pending: Vec::new(),

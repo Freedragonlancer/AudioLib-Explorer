@@ -1,6 +1,6 @@
 // crates/audiolib-ai/src/config.rs
 //! Provider identity and configuration; API keys are deliberately separate.
-use crate::{AiError, Result};
+use crate::{AiError, ConfigField, Result};
 use serde::{Deserialize, Serialize};
 
 /// User-requested default role prompt; fixed query/response contracts are appended separately.
@@ -194,21 +194,24 @@ impl Profile {
     pub fn validate(&self) -> Result<()> {
         self.validate_discovery()?;
         if !valid_model_id(&self.model) {
-            return Err(AiError::Invalid);
+            return Err(AiError::InvalidConfig(ConfigField::Model));
         }
         Ok(())
     }
     /// Model discovery only needs a safe endpoint and bounded controls, not a model ID.
     pub fn validate_discovery(&self) -> Result<()> {
-        if self.name.trim().is_empty()
-            || self.name.chars().count() > 80
-            || self.id.len() > 80
+        if self.name.trim().is_empty() || self.name.chars().count() > 80 {
+            return Err(AiError::InvalidConfig(ConfigField::Name));
+        }
+        if self.id.len() > 80
             || self.credential_ref.len() > 80
             || self.id.is_empty()
             || self.credential_ref.is_empty()
-            || !(MIN_TIMEOUT_SECONDS..=MAX_TIMEOUT_SECONDS).contains(&self.timeout_seconds)
         {
-            return Err(AiError::Invalid);
+            return Err(AiError::InvalidConfig(ConfigField::Identity));
+        }
+        if !(MIN_TIMEOUT_SECONDS..=MAX_TIMEOUT_SECONDS).contains(&self.timeout_seconds) {
+            return Err(AiError::InvalidConfig(ConfigField::Timeout));
         }
         validate_endpoint_url(&self.base_url, self.protocol == Protocol::Magpie)?;
         Ok(())
@@ -245,12 +248,14 @@ fn validate_endpoint_url(value: &str, allow_private_http: bool) -> Result<()> {
         || value.contains(['@', '?', '#', '\\'])
         || value.chars().any(char::is_whitespace)
     {
-        return Err(AiError::Invalid);
+        return Err(AiError::InvalidConfig(ConfigField::Url));
     }
-    let uri: ureq::http::Uri = value.parse().map_err(|_| AiError::Invalid)?;
-    let host = uri.host().ok_or(AiError::Invalid)?;
+    let uri: ureq::http::Uri = value
+        .parse()
+        .map_err(|_| AiError::InvalidConfig(ConfigField::Url))?;
+    let host = uri.host().ok_or(AiError::InvalidConfig(ConfigField::Url))?;
     if host.is_empty() || !matches!(uri.scheme_str(), Some("https") | Some("http")) {
-        return Err(AiError::Invalid);
+        return Err(AiError::InvalidConfig(ConfigField::Url));
     }
     if uri.scheme_str() == Some("http")
         && !matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1")
@@ -264,7 +269,7 @@ fn validate_endpoint_url(value: &str, allow_private_http: bool) -> Result<()> {
                     std::net::IpAddr::V6(ip) => ip.is_unique_local(),
                 }))
     {
-        return Err(AiError::Invalid);
+        return Err(AiError::InvalidConfig(ConfigField::Url));
     }
     Ok(())
 }
@@ -278,12 +283,13 @@ impl std::fmt::Debug for ApiKey {
     }
 }
 impl ApiKey {
-    /// Reject values that cannot be safely placed in an HTTP header.
+    /// Trim surrounding clipboard whitespace and reject embedded header controls.
     pub fn new(value: String) -> Result<Self> {
-        if value.len() > 4096 || value.chars().any(char::is_control) {
-            Err(AiError::Invalid)
+        let trimmed = value.trim();
+        if value.len() > 4096 || trimmed.chars().any(char::is_control) {
+            Err(AiError::InvalidConfig(ConfigField::Key))
         } else {
-            Ok(Self(value))
+            Ok(Self(trimmed.to_owned()))
         }
     }
     /// Whether the profile has a session or stored credential.
@@ -298,6 +304,84 @@ impl ApiKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clipboard_keys_trim_outer_whitespace_and_reject_embedded_controls() {
+        for value in [
+            "example-key",
+            "  example-key\r\n",
+            "\t\nexample-key\u{00a0}",
+        ] {
+            let key = ApiKey::new(value.into()).unwrap();
+            assert_eq!(key.expose(), "example-key");
+            assert!(!format!("{key:?}").contains("example-key"));
+        }
+        assert!(ApiKey::new(" \t\r\n".into()).unwrap().is_empty());
+        for value in [
+            "example\nkey",
+            "example\rkey",
+            "example\tkey",
+            "example\0key",
+        ] {
+            let error = ApiKey::new(value.into()).unwrap_err();
+            assert!(matches!(error, AiError::InvalidConfig(ConfigField::Key)));
+            assert!(!error.to_string().contains("example"));
+        }
+        assert!(matches!(
+            ApiKey::new("x".repeat(4097)),
+            Err(AiError::InvalidConfig(ConfigField::Key))
+        ));
+    }
+
+    #[test]
+    fn configuration_errors_identify_the_rejected_field_without_its_value() {
+        let valid = Profile {
+            model: "configured-model".into(),
+            ..Default::default()
+        };
+        for (profile, field) in [
+            (
+                Profile {
+                    name: String::new(),
+                    ..valid.clone()
+                },
+                ConfigField::Name,
+            ),
+            (
+                Profile {
+                    id: String::new(),
+                    ..valid.clone()
+                },
+                ConfigField::Identity,
+            ),
+            (
+                Profile {
+                    timeout_seconds: 1,
+                    ..valid.clone()
+                },
+                ConfigField::Timeout,
+            ),
+            (
+                Profile {
+                    base_url: "https://invalid.example/?credential=secret".into(),
+                    ..valid.clone()
+                },
+                ConfigField::Url,
+            ),
+            (
+                Profile {
+                    model: "invalid model".into(),
+                    ..valid.clone()
+                },
+                ConfigField::Model,
+            ),
+        ] {
+            let error = profile.validate_request().unwrap_err();
+            assert!(matches!(error, AiError::InvalidConfig(found) if found == field));
+            assert!(!error.to_string().contains("secret"));
+        }
+        valid.validate_request().unwrap();
+    }
+
     #[test]
     fn provider_timeouts_accept_slow_requests_and_remain_bounded() {
         assert_eq!(Profile::default().timeout_seconds, 180);

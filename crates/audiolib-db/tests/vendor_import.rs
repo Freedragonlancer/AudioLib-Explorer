@@ -878,6 +878,91 @@ fn commit_pause_resume_is_atomic_and_status_exposes_the_original_key() {
 }
 
 #[test]
+fn active_vendor_import_excludes_restore_between_batches_and_preserves_all_rows() {
+    const ROWS: u64 = 600;
+    let (temp, provider, database) = fixture(false);
+    let editor = SqliteProvider::open_existing(&database).unwrap();
+    let mut content = String::from("Filename,Description\n");
+    for row in 0..ROWS {
+        content.push_str(&format!("door.wav,restoreguard{row:04}\n"));
+    }
+    let file = text(temp.path(), "restore-guard.csv", &content);
+    let preview = provider.vendor_import_preview_impl(&file).unwrap();
+    assert_eq!((preview.rows, preview.matched), (ROWS, ROWS));
+    let backup = temp.path().join("after-first-batch.db");
+    let mut callbacks = 0;
+    let mut first_completed = 0;
+    let mut checked_restore = false;
+    let result = provider
+        .vendor_import_commit_cancellable_impl(
+            &preview.import_id,
+            "restore-guard-key",
+            &AtomicBool::new(false),
+            &mut |status| {
+                callbacks += 1;
+                if callbacks == 1 {
+                    first_completed = status.completed;
+                    assert!(first_completed > 0 && first_completed < ROWS);
+                    editor.backup_library(&backup).unwrap();
+                } else if callbacks == 2 {
+                    assert!(status.completed > first_completed);
+                    // The previous batch's writer and SQLite transaction are
+                    // already gone. A different provider must still be unable
+                    // to replace its durable checkpoint or provenance baseline.
+                    assert!(matches!(
+                        editor.restore_library(&backup),
+                        Err(audiolib_core::Error::Busy(_))
+                    ));
+                    assert!(matches!(
+                        editor.maintain_library(audiolib_core::MaintenanceAction::Optimize),
+                        Err(audiolib_core::Error::Busy(_))
+                    ));
+                    // Ordinary annotations remain permitted during this shared
+                    // administration lease, just as they are during scanning.
+                    editor
+                        .update_metadata(
+                            2,
+                            &audiolib_core::MetadataPatch {
+                                notes: Some("saved between vendor batches".into()),
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                    checked_restore = true;
+                }
+            },
+        )
+        .unwrap();
+    assert!(checked_restore);
+    assert_eq!(result.state.as_deref(), Some("committed"));
+    assert_eq!(result.written, ROWS);
+    let persisted: i64 = connection(&database)
+        .query_row(
+            "SELECT count(*) FROM audiolib_vendor_events WHERE import_id=?1",
+            [&preview.import_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(u64::try_from(persisted).unwrap(), ROWS);
+    assert_eq!(
+        provider.get_audio(2).unwrap().notes,
+        "saved between vendor batches"
+    );
+    let complete_backup = temp.path().join("complete.db");
+    editor.backup_library(&complete_backup).unwrap();
+    editor.restore_library(&complete_backup).unwrap();
+    assert_eq!(
+        provider
+            .vendor_import_rollback_impl(&preview.import_id)
+            .unwrap()
+            .state
+            .as_deref(),
+        Some("rolled_back")
+    );
+    assert_eq!(count(&provider, "restoreguard"), 0);
+}
+
+#[test]
 fn limits_refuse_entire_file_skip_system_names_and_truncate_only_at_utf8_boundaries() {
     let (temp, provider, _) = fixture(false);
     let large = temp.path().join("large.xls");

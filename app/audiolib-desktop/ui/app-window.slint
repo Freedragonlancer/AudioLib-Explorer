@@ -163,6 +163,37 @@ component SearchHistoryNavigation inherits Rectangle {
     }
 }
 
+// Result shortcuts act immediately, but a held key must never repeatedly toggle
+// playback or restart audition. Keep this separate from repeatable navigation.
+component ResultShortcutScope inherits FocusScope {
+    private property <bool> space-held: false;
+    private property <bool> return-held: false;
+    function clear-activation() { root.space-held = false; root.return-held = false; }
+    changed has-focus => { if !root.has-focus { root.clear-activation(); } }
+    changed enabled => { if !root.enabled { root.clear-activation(); } }
+    public function first-activation(event: KeyEvent) -> bool {
+        // A repeat received after focus/availability changes is never a fresh
+        // gesture, even when its original key-down belonged to another owner.
+        if !root.enabled || event.repeat { return false; }
+        if event.text == " " {
+            let first = !root.space-held;
+            root.space-held = true;
+            return first;
+        }
+        if event.text == Key.Return {
+            let first = !root.return-held;
+            root.return-held = true;
+            return first;
+        }
+        return false;
+    }
+    key-released(event) => {
+        if event.text == " " { root.space-held = false; return accept; }
+        if event.text == Key.Return { root.return-held = false; return accept; }
+        reject
+    }
+}
+
 component Label inherits Text { color: Theme.dim; font-size: Theme.font(11); vertical-alignment: center; }
 
 // The number of active filters on a panel switch.
@@ -1144,7 +1175,6 @@ export component AppWindow inherits Window {
         root.workbench-switch-pending = true;
     }
     public function restore-workbench-switch() {
-        root.content-width = root.width - (Theme.modern-style ? 8px : 32px) * Theme.ui-scale;
         if root.workbench-switch-pending {
             root.restore-search-task-viewport(
                 root.workbench-switch-result-row * root.task-result-row-height,
@@ -2263,11 +2293,13 @@ export component AppWindow inherits Window {
     }
 
     // Menu targets are immutable IDs/paths captured when opened, never row positions.
-    private property <length> content-width: (Theme.modern-style ? 1432px : 1408px) * Theme.ui-scale;
-    property <bool> wide-layout: root.content-width - root.sidebar-width - (root.inspector-visible ? root.inspector-width + 24px * Theme.ui-scale : 12px * Theme.ui-scale) >= 720px * Theme.ui-scale;
-    property <bool> short-layout: false;
-    changed height => { root.short-layout = self.height < 800px * Theme.ui-scale; }
-    changed width => { root.content-width = self.width - (Theme.modern-style ? 8px : 32px) * Theme.ui-scale; }
+    // Derived geometry must stay bound to the current presentation and scale;
+    // cached width/height callbacks become stale when Appearance changes alone.
+    private property <length> content-width: root.width - (Theme.modern-style ? 8px : 32px) * Theme.ui-scale;
+    private property <length> visible-sidebar-width: root.sidebar-visible ? root.sidebar-width : 0px;
+    private property <length> pane-dividers-width: ((root.sidebar-visible ? 12px : 0px) + (root.inspector-visible ? 12px : 0px)) * Theme.ui-scale;
+    property <bool> wide-layout: root.content-width - root.visible-sidebar-width - (root.inspector-visible ? root.inspector-width : 0px) - root.pane-dividers-width >= 720px * Theme.ui-scale;
+    property <bool> short-layout: root.height < 800px * Theme.ui-scale;
     // Preferred widths survive temporary window constraints and inspector hiding.
     in-out property <length> sidebar-preferred-width: round(198 * Theme.ui-scale) * 1px;
     in-out property <length> inspector-preferred-width: round(320 * Theme.ui-scale) * 1px;
@@ -2275,9 +2307,12 @@ export component AppWindow inherits Window {
     in-out property <bool> folders-section-expanded: true;
     in-out property <bool> libraries-section-expanded: true;
     in-out property <float> folders-section-ratio: 0.55;
-    private property <length> sidebar-budget: root.content-width - 520px * Theme.ui-scale - (root.inspector-visible ? 24px * Theme.ui-scale : 12px * Theme.ui-scale);
-    out property <length> sidebar-width: clamp(root.sidebar-preferred-width, 170px * Theme.ui-scale, min(480px * Theme.ui-scale, root.sidebar-budget - (root.inspector-visible ? 240px * Theme.ui-scale : 0px)));
-    out property <length> inspector-width: clamp(root.inspector-preferred-width, 240px * Theme.ui-scale, min(600px * Theme.ui-scale, root.sidebar-budget - root.sidebar-width));
+    private property <length> sidebar-budget: root.content-width - 520px * Theme.ui-scale - root.pane-dividers-width;
+    // The outer ScrollView supplies extra room when scaled minimums cannot fit.
+    // Keep clamp bounds ordered in that case, and reserve only visible panes.
+    out property <length> sidebar-width: clamp(root.sidebar-preferred-width, 170px * Theme.ui-scale, max(170px * Theme.ui-scale, min(480px * Theme.ui-scale, root.sidebar-budget - (root.inspector-visible ? 240px * Theme.ui-scale : 0px))));
+    private property <length> inspector-maximum-width: max(240px * Theme.ui-scale, min(600px * Theme.ui-scale, root.sidebar-budget - root.visible-sidebar-width));
+    out property <length> inspector-width: clamp(root.inspector-preferred-width, 240px * Theme.ui-scale, root.inspector-maximum-width);
     // The right sidebar holds two pages: `inspector-visible` opens the sidebar and
     // `filters-visible` selects the filter page instead of the sound details page.
     // Whether the sidebar is open persists; every start shows the details page.
@@ -2709,7 +2744,7 @@ export component AppWindow inherits Window {
     clipboard-input := TextInput { visible: false; }
     // Measures one tag chip for the Rust row wrapping (tag-probe-width); never shown.
     tag-probe := TagChipView { visible: false; enabled: false; text: root.tag-probe-text; chinese: root.chinese; }
-    init => { Palette.color-scheme = ColorScheme.dark; root.content-width = self.width - (Theme.modern-style ? 8px : 32px) * Theme.ui-scale; }
+    init => { Palette.color-scheme = ColorScheme.dark; }
     // Windows/macOS use the operating system's menu bar; other backends use Slint's standard menu bar.
     MenuBar {
         visible: true;
@@ -3003,7 +3038,9 @@ main-scroll := ScrollView {
             }
         }
         workspace := HorizontalLayout { vertical-stretch: 1; min-height: results-column.min-height; spacing: 0px;
-            library-sidebar := Rectangle { visible: root.sidebar-visible; width: root.sidebar-width; background: Theme.panel; border-radius: 7px * Theme.ui-scale; border-width: 1px; border-color: Theme.border; clip: true;
+            // Invisible layout children still reserve their fixed width. Collapse
+            // the allocation too, retaining the native list owners and offsets.
+            library-sidebar := Rectangle { visible: root.sidebar-visible; width: root.sidebar-visible ? root.sidebar-width : 0px; background: Theme.panel; border-radius: 7px * Theme.ui-scale; border-width: 1px; border-color: Theme.border; clip: true;
                 VerticalLayout { padding: 12px * Theme.ui-scale; padding-top: (root.short-layout ? 8px : 12px) * Theme.ui-scale; padding-bottom: (root.short-layout ? 8px : 12px) * Theme.ui-scale; spacing: (root.short-layout ? 4px : 8px) * Theme.ui-scale;
                     Rectangle { height: 32px * Theme.ui-scale; background: Theme.trough; border-radius: 8px * Theme.ui-scale;
                         accessible-role: tab-list; accessible-label: root.chinese ? "素材库页面" : "Library pages";
@@ -3155,7 +3192,7 @@ main-scroll := ScrollView {
             if root.sidebar-visible: PaneDivider {
                 pane-width: root.sidebar-width; enabled: !root.background-blocked;
                 label: root.chinese ? "调整素材库侧栏宽度" : "Resize library sidebar";
-                resized(width) => { root.sidebar-preferred-width = clamp(width, 170px * Theme.ui-scale, min(480px * Theme.ui-scale, root.sidebar-budget - (root.inspector-visible ? root.inspector-width : 0px))); }
+                resized(width) => { root.sidebar-preferred-width = clamp(width, 170px * Theme.ui-scale, max(170px * Theme.ui-scale, min(480px * Theme.ui-scale, root.sidebar-budget - (root.inspector-visible ? root.inspector-width : 0px)))); }
                 finished => { root.pane-layout-changed(); }
             }
             results-column := VerticalLayout { horizontal-stretch: 1; min-width: 520px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
@@ -3304,7 +3341,7 @@ main-scroll := ScrollView {
                                 }
                             }
                         }
-                        results-focus := FocusScope { vertical-stretch: 1; min-height: 0px; focus-on-click: false;
+                        results-focus := ResultShortcutScope { vertical-stretch: 1; min-height: 0px; focus-on-click: false; enabled: !root.background-blocked;
                             key-pressed(event) => {
                                 if event.text == Key.DownArrow || event.text == Key.UpArrow {
                                     let step = event.text == Key.DownArrow ? 1 : -1;
@@ -3326,8 +3363,8 @@ main-scroll := ScrollView {
                                 if (event.text == Key.Home || event.text == Key.End) && root.rows.length > 0 {
                                     root.user-row-clicked(event.text == Key.Home ? 0 : root.rows.length - 1, event.modifiers.control, event.modifiers.shift, false); return accept;
                                 }
-                                if event.text == " " && root.audio-ready { root.play-requested(); return accept; }
-                                if event.text == Key.Return && root.selected-row >= 0 { root.audition-requested(root.selected-row); return accept; }
+                                if event.text == " " { if self.first-activation(event) && root.audio-ready { root.play-requested(); } return accept; }
+                                if event.text == Key.Return { if self.first-activation(event) && root.selected-row >= 0 { root.audition-requested(root.selected-row); } return accept; }
                                 if (event.text == Key.Menu || (event.text == Key.F10 && event.modifiers.shift)) && root.selected-row >= 0 {
                                     root.show-file-menu(root.rows[root.selected-row], {x: self.absolute-position.x + 80px * Theme.ui-scale, y: self.absolute-position.y + 40px * Theme.ui-scale}); return accept;
                                 }
@@ -3481,7 +3518,7 @@ main-scroll := ScrollView {
             if root.inspector-visible: PaneDivider {
                 pane-width: root.inspector-width; reverse: true; enabled: !root.background-blocked;
                 label: root.chinese ? "调整声音详情宽度" : "Resize sound details";
-                resized(width) => { root.inspector-preferred-width = clamp(width, 240px * Theme.ui-scale, min(600px * Theme.ui-scale, root.sidebar-budget - root.sidebar-width)); }
+                resized(width) => { root.inspector-preferred-width = clamp(width, 240px * Theme.ui-scale, root.inspector-maximum-width); }
                 finished => { root.pane-layout-changed(); }
             }
             if root.inspector-visible: details-sidebar := Rectangle { width: root.inspector-width; background: Theme.panel; border-radius: 7px * Theme.ui-scale; border-width: 1px; border-color: Theme.border; clip: true;
@@ -3814,7 +3851,7 @@ main-scroll := ScrollView {
             }
         }
         studio-workspace := HorizontalLayout { vertical-stretch: 1; min-height: studio-results-column.min-height; spacing: 0px;
-            studio-library-sidebar := Rectangle { visible: root.sidebar-visible; width: root.sidebar-width; background: Theme.library-surface; border-radius: 3px * Theme.ui-scale; clip: true;
+            studio-library-sidebar := Rectangle { visible: root.sidebar-visible; width: root.sidebar-visible ? root.sidebar-width : 0px; background: Theme.library-surface; border-radius: 3px * Theme.ui-scale; clip: true;
                 Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: Theme.library-backdrop; opacity: Theme.workbench-backdrop-opacity; image-fit: fill; accessible-role: none; }
                 VerticalLayout { padding: 12px * Theme.ui-scale; padding-top: (root.short-layout ? 8px : 12px) * Theme.ui-scale; padding-bottom: (root.short-layout ? 8px : 12px) * Theme.ui-scale; spacing: (root.short-layout ? 4px : 8px) * Theme.ui-scale;
                     HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
@@ -3971,7 +4008,7 @@ main-scroll := ScrollView {
             if root.sidebar-visible: PaneDivider {
                 pane-width: root.sidebar-width; enabled: !root.background-blocked;
                 label: root.chinese ? "调整素材库侧栏宽度" : "Resize library sidebar";
-                resized(width) => { root.sidebar-preferred-width = clamp(width, 170px * Theme.ui-scale, min(480px * Theme.ui-scale, root.sidebar-budget - (root.inspector-visible ? root.inspector-width : 0px))); }
+                resized(width) => { root.sidebar-preferred-width = clamp(width, 170px * Theme.ui-scale, max(170px * Theme.ui-scale, min(480px * Theme.ui-scale, root.sidebar-budget - (root.inspector-visible ? root.inspector-width : 0px)))); }
                 finished => { root.pane-layout-changed(); }
             }
             studio-results-column := VerticalLayout { horizontal-stretch: 1; min-width: 520px * Theme.ui-scale; spacing: 2px * Theme.ui-scale;
@@ -4175,7 +4212,7 @@ main-scroll := ScrollView {
                                 }
                             }
                         }
-                        studio-results-focus := FocusScope { vertical-stretch: 1; min-height: 0px; focus-on-click: false;
+                        studio-results-focus := ResultShortcutScope { vertical-stretch: 1; min-height: 0px; focus-on-click: false; enabled: !root.background-blocked;
                             key-pressed(event) => {
                                 if event.text == Key.DownArrow || event.text == Key.UpArrow {
                                     let step = event.text == Key.DownArrow ? 1 : -1;
@@ -4199,8 +4236,8 @@ main-scroll := ScrollView {
                                 if (event.text == Key.Home || event.text == Key.End) && root.rows.length > 0 {
                                     root.user-row-clicked(event.text == Key.Home ? 0 : root.rows.length - 1, event.modifiers.control, event.modifiers.shift, false);  return accept;
                                 }
-                                if event.text == " " && root.audio-ready { root.play-requested(); return accept; }
-                                if event.text == Key.Return && root.selected-row >= 0 { root.audition-requested(root.selected-row); return accept; }
+                                if event.text == " " { if self.first-activation(event) && root.audio-ready { root.play-requested(); } return accept; }
+                                if event.text == Key.Return { if self.first-activation(event) && root.selected-row >= 0 { root.audition-requested(root.selected-row); } return accept; }
                                 if (event.text == Key.Menu || (event.text == Key.F10 && event.modifiers.shift)) && root.selected-row >= 0 {
                                     root.show-file-menu(root.rows[root.selected-row], {x: self.absolute-position.x + 80px * Theme.ui-scale, y: self.absolute-position.y + 40px * Theme.ui-scale}); return accept;
                                 }
@@ -4345,7 +4382,7 @@ main-scroll := ScrollView {
             if root.inspector-visible: PaneDivider {
                 pane-width: root.inspector-width; reverse: true; enabled: !root.background-blocked;
                 label: root.chinese ? "调整声音详情宽度" : "Resize sound details";
-                resized(width) => { root.inspector-preferred-width = clamp(width, 240px * Theme.ui-scale, min(600px * Theme.ui-scale, root.sidebar-budget - root.sidebar-width)); }
+                resized(width) => { root.inspector-preferred-width = clamp(width, 240px * Theme.ui-scale, root.inspector-maximum-width); }
                 finished => { root.pane-layout-changed(); }
             }
             if root.inspector-visible: studio-details-sidebar := Rectangle { width: root.inspector-width; background: Theme.inspector-surface; border-radius: 3px * Theme.ui-scale; clip: true;

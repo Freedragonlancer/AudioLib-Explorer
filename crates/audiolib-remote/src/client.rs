@@ -223,7 +223,7 @@ pub struct RemoteClient {
     library: Timeouts,
     pub(crate) bulk: Timeouts,
     pub(crate) writes: Timeouts,
-    expected_library_id: Option<String>,
+    pub(crate) expected_library_id: Option<String>,
     library_changed: Arc<AtomicBool>,
 }
 
@@ -499,14 +499,16 @@ impl RemoteClient {
     /// API base URL, e.g. `http://host:8790/api/v1`.
     /// Range stream source for a record: `GET <api>/audio/{id}/stream` with the token.
     pub fn stream_source(&self, id: i64) -> crate::stream::StreamSource {
-        crate::stream::StreamSource::new(
+        let mut source = crate::stream::StreamSource::new(
             format!("{}/audio/{id}/stream", self.api),
             if self.token.is_empty() {
                 crate::stream::SourceAuth::None
             } else {
                 crate::stream::SourceAuth::Bearer(self.token.clone())
             },
-        )
+        );
+        source.library_id = self.expected_library_id.clone();
+        source
     }
 
     pub fn api_url(&self) -> &str {
@@ -551,6 +553,16 @@ impl RemoteClient {
             }
             if authenticated && !self.token.is_empty() {
                 request = request.header("Authorization", &format!("Bearer {}", self.token));
+            }
+            if authenticated && let Some(identity) = &self.expected_library_id {
+                // Discovery must still report a replacement library. ID-based reads
+                // are bound atomically by the server without a /library preflight.
+                if path.starts_with("/audio/")
+                    || path.starts_with("/scans/")
+                    || path.starts_with("/waveforms")
+                {
+                    request = request.header(LIBRARY_ID_HEADER, identity);
+                }
             }
             request
         })
@@ -794,6 +806,7 @@ impl RemoteClient {
         }
         let url = format!("{}{path}", self.api);
         let token = (!self.token.is_empty()).then(|| format!("Bearer {}", self.token));
+        let library_id = self.expected_library_id.clone();
         let if_none_match = if_none_match.map(str::to_owned);
         let context = format!("GET {path}");
         let (status, etag, encoding, body, retry) = call_cancellable(
@@ -804,6 +817,9 @@ impl RemoteClient {
                     let mut request = agent.get(&url).header("Accept-Encoding", "zstd");
                     if let Some(token) = &token {
                         request = request.header("Authorization", token);
+                    }
+                    if let Some(identity) = &library_id {
+                        request = request.header(LIBRARY_ID_HEADER, identity);
                     }
                     if let Some(etag) = &if_none_match {
                         request = request.header("If-None-Match", etag);
