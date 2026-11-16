@@ -19,7 +19,7 @@ Windows 新源码为 `87a994edd6158ae3ac45145613b00f4fb2978a38`，Rust 1.97.1 MS
 
 ignored 均保留原含义，不计为通过。桌面新回归覆盖无模型发现、剪贴板密钥、失败保存不落盘、有效保存和跨端点凭据隔离。原始检查证据在本次隔离源码目录的 `.rust-validation/local-checks/` 与 `.rust-validation/release-102/`；严格 Clippy 的单阶段报告仍标记 format/tests 为 not-requested，格式与测试通过由上述独立记录证明。
 
-下两节 `e19f4d0`／`b8b3e22` 开发验证的原身份继续适用于未改变的 core/db/audio、扫描／Metadata／库管理和 UI 布局实现；本次没有改变其写入顺序、租约、存储或关闭契约。UI 布局原组合为 192 passed、2 ignored，保留失败后的修复记录；未为了新版本重复全工作区、ASIO 硬件或旧库 fixture 验收。新公共 AI 错误类型的实际消费者已经重新检查。Mac/Linux 原生检查、beta 环境、最终 main/tag 产物验收及固定安装仍按 [1.0.2 发布记录](Rust_Release_1.0.2.md) 分别完成和记录；本节不是已发布证明。
+下两节 `e19f4d0`／`b8b3e22` 开发验证的原身份继续适用于未改变的 core/db/audio、扫描／Metadata／库管理和 UI 布局实现；本次没有改变其写入顺序、租约、存储或关闭契约。UI 布局原组合为 192 passed、2 ignored，保留失败后的修复记录；未为了新版本重复全工作区、ASIO 硬件或旧库 fixture 验收。新公共 AI 错误类型的实际消费者已经重新检查。Mac/Linux 原生检查、beta 环境、最终 main/tag 产物验收及固定安装仍按 [1.0.2 发布记录](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_1.0.2.md) 分别完成和记录；本节不是已发布证明。
 
 ## 主界面与主题审查（2026-11-16，1.0.1 开发工作区）
 
