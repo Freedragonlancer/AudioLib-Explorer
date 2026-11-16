@@ -50,7 +50,7 @@ export component AiSidebarToggle inherits Rectangle {
         width: max(0px, parent.width - 46px * Theme.ui-scale);
         height: parent.height;
         text: root.collapsed ? (root.chinese ? "展开 AI" : "Show AI") : (root.chinese ? "收起" : "Hide");
-        color: Theme.ink; font-size: Theme.font(12);
+        color: Theme.text(6, 0, Theme.ink); font-size: Theme.font(12);
         horizontal-alignment: left;
         vertical-alignment: center; overflow: elide;
         accessible-role: none;
@@ -81,7 +81,7 @@ export component AiSidebarToggle inherits Rectangle {
             Text {
                 x: 10px * Theme.ui-scale; y: 0px;
                 width: parent.width - 20px * Theme.ui-scale; height: parent.height;
-                text: root.action-label; color: Theme.ink; font-size: Theme.font(11);
+                text: root.action-label; color: Theme.text(6, 0, Theme.ink); font-size: Theme.font(11);
                 vertical-alignment: center;
             }
         }

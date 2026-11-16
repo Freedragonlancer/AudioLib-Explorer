@@ -13,7 +13,7 @@ component TaskTabIcon inherits Rectangle {
     accessible-role: button; accessible-label: root.label; accessible-enabled: root.enabled;
     accessible-action-default => { if root.enabled { root.clicked(); } }
     forward-focus: icon-focus;
-    Text { text: root.text; color: root.lit ? Theme.accent : Theme.dim; font-size: Theme.font(16); horizontal-alignment: center; vertical-alignment: center; }
+    Text { text: root.text; color: root.lit ? Theme.text(1, 6, Theme.accent) : Theme.text(1, 1, Theme.dim); font-size: Theme.font(16); horizontal-alignment: center; vertical-alignment: center; }
     icon-focus := FocusScope {
         enabled: root.enabled; focus-on-click: false;
         key-pressed(event) => { if event.text == " " || event.text == Key.Return { root.clicked(); return accept; } reject }
@@ -72,7 +72,7 @@ export component SearchTaskTab inherits Rectangle {
     }
     if !root.searched: Text {
         x: 12px * Theme.ui-scale; width: max(0px, parent.width - 52px * Theme.ui-scale); height: parent.height;
-        text: root.name; color: root.active ? Theme.ink : Theme.dim; font-size: Theme.font(12);
+        text: root.name; color: Theme.text(1, !root.enabled ? 3 : task-hit.pressed ? 14 : task-hit.has-hover ? 4 : root.active ? 5 : 1, root.active ? Theme.text(1, 0, Theme.ink) : Theme.text(1, 1, Theme.dim)); font-size: Theme.font(12);
         font-weight: root.active ? 600 : 400; vertical-alignment: center; overflow: elide;
     }
     if root.searched: Rectangle {
@@ -86,14 +86,14 @@ export component SearchTaskTab inherits Rectangle {
             width: directory-label.visible && root.keywords != "" ? min(parent.width, self.preferred-width) : parent.width;
             height: parent.height; visible: root.keywords != "";
             text: root.keywords;
-            color: Theme.accent-hover; font-size: Theme.font(11);
+            color: Theme.text(1, !root.enabled ? 3 : task-hit.has-hover ? 4 : root.active ? 5 : 6, Theme.accent-hover); font-size: Theme.font(11);
             horizontal-alignment: left; vertical-alignment: center; overflow: elide;
         }
         directory-separator := Text {
             visible: directory-label.visible && (root.keywords != "" || root.folder != "");
             x: root.keywords != "" ? keyword-label.width + 6px * Theme.ui-scale : 0px;
             width: self.preferred-width; height: parent.height;
-            text: ">"; color: Theme.dim; font-size: Theme.font(11);
+            text: ">"; color: Theme.text(1, 1, Theme.dim); font-size: Theme.font(11);
             horizontal-alignment: left; vertical-alignment: center;
         }
         directory-label := Text {
@@ -103,7 +103,7 @@ export component SearchTaskTab inherits Rectangle {
                 : (root.folder != "" ? directory-separator.preferred-width + 6px * Theme.ui-scale : 0px);
             height: parent.height;
             text: root.folder != "" ? root.folder : (root.keywords != "" ? (root.chinese ? "全部目录" : "All folders") : (root.chinese ? "筛选" : "Filters"));
-            color: root.folder != "" || root.keywords != "" ? Theme.warning : Theme.accent-hover;
+            color: root.folder != "" || root.keywords != "" ? Theme.text(1, 8, Theme.warning) : Theme.text(1, 4, Theme.accent-hover);
             font-size: Theme.font(11); horizontal-alignment: left; vertical-alignment: center; overflow: elide;
         }
     }
@@ -136,7 +136,7 @@ export component SearchTaskTab inherits Rectangle {
             border-width: 1px; border-color: Theme.strong-border;
             VerticalLayout { padding: 10px * Theme.ui-scale;
                 Text {
-                    text: root.tooltip-text; color: Theme.ink; font-size: Theme.font(11); wrap: word-wrap;
+                    text: root.tooltip-text; color: Theme.text(1, 0, Theme.ink); font-size: Theme.font(11); wrap: word-wrap;
                     accessible-role: text; accessible-label: root.tooltip-text;
                 }
             }

@@ -117,6 +117,7 @@ fn child_real_pointer_preview_modes() {
         max_search_tasks: 6,
         ui_scale_percent: 0,
         theme: audiolib_core::config::DEFAULT_THEME.into(),
+        appearance: Default::default(),
         ui_font_size: audiolib_core::config::DEFAULT_FONT_SIZE,
         list_font_size: audiolib_core::config::DEFAULT_FONT_SIZE,
         audio_table: Default::default(),

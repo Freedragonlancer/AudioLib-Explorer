@@ -3,6 +3,26 @@ import { Slider, CheckBox, LineEdit } from "std-widgets.slint";
 
 // Soft charcoal surfaces and restrained gray-teal actions keep spectral peaks readable.
 export global Theme {
+    in-out property <string> font-family;
+    // Transparent slots inherit the matching General role, then the original theme color.
+    in-out property <[color]> text-colors;
+    public pure function text(module: int, state: int, fallback: color) -> color {
+        let index = module * 15 + state;
+        if state >= 0 && state < 15 && index >= 0 && index < Theme.text-colors.length && Theme.text-colors[index].alpha > 0 { return Theme.text-colors[index]; }
+        if state >= 0 && state < Theme.text-colors.length && Theme.text-colors[state].alpha > 0 { return Theme.text-colors[state]; }
+        return fallback;
+    }
+    public pure function role-default(state: int) -> color {
+        if state == 1 { return Theme.dim; }
+        if state == 2 || state == 3 { return Theme.muted; }
+        if state == 4 || state == 14 { return Theme.accent-hover; }
+        if state == 5 || state == 6 || state == 11 { return Theme.accent; }
+        if state == 7 { return Theme.mint; }
+        if state == 8 || state == 12 || state == 13 { return Theme.warning; }
+        if state == 9 { return Theme.danger; }
+        if state == 10 { return Theme.on-accent; }
+        return Theme.ink;
+    }
     // Workbench and player can be selected independently: Default v2 uses the
     // Studio workbench with the original beta player.
     in-out property <bool> modern-style: false;
@@ -173,6 +193,7 @@ export component ThemedSlider inherits Rectangle {
 }
 
 export component ThemedCheckBox inherits Rectangle {
+    in property <int> text-module: 0;
     in property <string> text <=> native.text;
     in property <bool> enabled <=> native.enabled;
     in-out property <bool> checked <=> native.checked;
@@ -202,13 +223,14 @@ export component ThemedCheckBox inherits Rectangle {
             }
         }
         if root.text != "": Text {
-            text: root.text; color: Theme.ink; vertical-alignment: center;
+            text: root.text; color: Theme.text(root.text-module, root.enabled ? 0 : 3, Theme.ink); vertical-alignment: center;
             opacity: root.enabled ? 1 : 0.45;
         }
     }
 }
 
 export component ThemedLineEdit inherits Rectangle {
+    in property <int> text-module: 0;
     in property <string> input-label;
     in property <bool> enabled <=> native.enabled;
     in property <string> placeholder-text <=> native.placeholder-text;

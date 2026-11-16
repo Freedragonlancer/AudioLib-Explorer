@@ -43,7 +43,7 @@ component Tip inherits Rectangle {
         ? root.anchor-height + 6px * Theme.ui-scale - (1 - self.shown) * 3px * Theme.ui-scale
         : -self.height - 6px * Theme.ui-scale + (1 - self.shown) * 3px * Theme.ui-scale;
     background: Theme.tooltip; border-width: 1px; border-color: Theme.strong-border; border-radius: 3px * Theme.ui-scale;
-    tip-text := Text { text: root.text; color: Theme.ink; font-size: Theme.font(10); horizontal-alignment: center; vertical-alignment: center; accessible-role: none; }
+    tip-text := Text { text: root.text; color: Theme.text(4, 0, Theme.ink); font-size: Theme.font(10); horizontal-alignment: center; vertical-alignment: center; accessible-role: none; }
 }
 
 // Track hover even while unavailable, but only activate a gesture that began
@@ -167,7 +167,7 @@ component Tool inherits Rectangle {
             animate opacity, width { duration: Theme.motion-base; easing: ease-out; }
             animate colorize { duration: Theme.motion-fast; }
         }
-        if root.icon.width == 0: Text { text: root.symbol; color: root.ink; font-size: root.symbol-size; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.motion-fast; } }
+        if root.icon.width == 0: Text { text: root.symbol; color: Theme.text(4, !root.enabled ? 3 : root.pressed ? 14 : root.hovered ? 4 : root.primary ? 10 : root.active ? 6 : 0, root.ink); font-size: root.symbol-size; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.motion-fast; } }
     }
     focus := ActionKeyScope { enabled: root.enabled; keyboard-active: root.keyboard-active; activated => { root.clicked(); } }
     // Hover is tracked while disabled too, so the tooltip can say why.
@@ -284,7 +284,7 @@ component PlayToggle inherits Rectangle {
         show: root.tip-ready && !hit.pressed && !focus.held;
     }
 }
-component Caption inherits Text { color: Theme.dim; font-size: Theme.font(11); vertical-alignment: center; }
+component Caption inherits Text { color: Theme.text(4, 1, Theme.dim); font-size: Theme.font(11); vertical-alignment: center; }
 
 // A Pitch / Rate entry: type a value and press Enter, or step it with the mouse
 // wheel or Up / Down (Shift for fine steps). The controller rejects out-of-range
@@ -490,10 +490,10 @@ component OutputPill inherits Rectangle {
             }
         }
         Text {
-            min-width: 0px; overflow: elide; vertical-alignment: center; font-size: Theme.font(10); color: Theme.dim;
+            min-width: 0px; overflow: elide; vertical-alignment: center; font-size: Theme.font(10); color: Theme.text(4, 1, Theme.dim);
             text: root.idle ? (root.chinese ? "输出空闲" : "Output idle") : root.backend + (!root.compact && root.rate != "" ? " · " + root.rate : "");
         }
-        if root.xruns > 0: Text { text: root.xruns + " xruns"; color: Theme.warning; font-size: Theme.font(10); vertical-alignment: center; }
+        if root.xruns > 0: Text { text: root.xruns + " xruns"; color: Theme.text(4, 8, Theme.warning); font-size: Theme.font(10); vertical-alignment: center; }
     }
     hit := TouchArea {
         mouse-cursor: pointer; clicked => { root.clicked(); }
@@ -1005,7 +1005,7 @@ component WaveSelectionOverlay inherits Rectangle {
                 accessible-enabled: root.enabled && root.selection-active && root.export-state != 3;
                 accessible-description: root.chinese ? "按住并拖出，导出当前选区；短选区也可使用此手柄" : "Press and drag to export the current selection; this handle also works for narrow ranges";
                 Image { source: @image-url("icons/export.svg"); colorize: Theme.accent-hover; width: 15px * Theme.ui-scale; height: self.width; x: 5px * Theme.ui-scale; y: (parent.height - self.height) / 2; }
-                if root.width >= 460px * Theme.ui-scale: Text { x: 25px * Theme.ui-scale; width: parent.width - self.x; height: parent.height; text: root.chinese ? "拖出 WAV" : "Drag WAV"; color: Theme.ink; font-size: Theme.font(10); vertical-alignment: center; accessible-role: none; }
+                if root.width >= 460px * Theme.ui-scale: Text { x: 25px * Theme.ui-scale; width: parent.width - self.x; height: parent.height; text: root.chinese ? "拖出 WAV" : "Drag WAV"; color: Theme.text(4, 0, Theme.ink); font-size: Theme.font(10); vertical-alignment: center; accessible-role: none; }
                 grip := TouchArea {
                     changed has-hover => { if !self.has-hover { grip-frame.tip-ready = false; } }
                     mouse-cursor: root.native-cursor ? crosshair : (root.pointer-kind > 0 && root.pointer-kind < 11 ? none : default);
@@ -1034,13 +1034,13 @@ component WaveSelectionOverlay inherits Rectangle {
             if root.shown-active: Text {
                 width: (root.width >= 650px * Theme.ui-scale ? 245px : root.width >= 420px * Theme.ui-scale ? 190px : 82px) * Theme.ui-scale;
                 text: root.width >= 420px * Theme.ui-scale ? Clock.format(root.shown-start) + " – " + Clock.format(root.shown-end) + "  ·  " + Clock.format(root.shown-end - root.shown-start) : "Δ " + Clock.format(root.shown-end - root.shown-start);
-                color: Theme.ink; font-size: Theme.font(9); vertical-alignment: center; overflow: elide;
+                color: Theme.text(4, 0, Theme.ink); font-size: Theme.font(9); vertical-alignment: center; overflow: elide;
                 accessible-role: text; accessible-label: root.chinese ? "选区起点、终点和时长" : "Selection start, end and duration";
                 accessible-description: Clock.format(root.shown-start) + " – " + Clock.format(root.shown-end) + " · " + Clock.format(root.shown-end - root.shown-start);
             }
             Text {
                 horizontal-stretch: 1; min-width: 0px; text: root.editing || root.mode >= 4 ? root.hint : root.export-label;
-                color: root.export-state == 5 && !root.gesture ? Theme.danger : root.export-state == 2 && !root.gesture ? Theme.accent-hover : Theme.dim;
+                color: root.export-state == 5 && !root.gesture ? Theme.text(4, 9, Theme.danger) : root.export-state == 2 && !root.gesture ? Theme.text(4, 4, Theme.accent-hover) : Theme.text(4, 1, Theme.dim);
                 font-size: Theme.font(9); vertical-alignment: center; overflow: elide;
                 accessible-role: text; accessible-label: root.chinese ? "波形导出状态" : "Waveform export status";
                 accessible-description: root.export-label;
@@ -1295,7 +1295,7 @@ component ClassicAuditionPanel inherits Rectangle {
                     x: (root.view-start - root.shown-start) / root.shown-span * parent.width;
                     width: max(0px, (root.view-end - root.view-start) / root.shown-span * parent.width);
                 }
-                if !root.waveform-ready: Text { text: root.busy || root.missing || root.state == 1 || root.state == 7 ? root.unavailable : root.ready ? (root.spectral ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.chinese ? "正在分析波形…" : "Analyzing waveform…")) : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition")); color: root.spectral ? #263238 : Theme.dim; horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(11); }
+                if !root.waveform-ready: Text { text: root.busy || root.missing || root.state == 1 || root.state == 7 ? root.unavailable : root.ready ? (root.spectral ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.chinese ? "正在分析波形…" : "Analyzing waveform…")) : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition")); color: root.spectral ? #263238 : Theme.text(4, 1, Theme.dim); horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(11); }
                 // These overlays are paint-only, leaving click/scroll ownership to scrub.
                 if root.ready && root.duration > 0: PlayedRegion {
                     x: 0px; y: 0px; width: parent.width; height: parent.height;
@@ -1354,7 +1354,7 @@ component ClassicAuditionPanel inherits Rectangle {
         }
         Rectangle { height: 24px * Theme.ui-scale; accessible-role: groupbox; accessible-label: root.chinese ? "波形时间尺" : "Waveform time ruler";
             for tick in 51: Rectangle { x: tick * (parent.width - 1px) / 50; width: 1px; height: Math.mod(tick,5) == 0 ? 9px * Theme.ui-scale : 4px * Theme.ui-scale; background: Theme.muted; }
-            for index in 11: Text { x: clamp(index * (parent.width - 1px)/10,0px,parent.width - self.width); y: 10px * Theme.ui-scale; width: 55px * Theme.ui-scale; height: 13px * Theme.ui-scale; text: root.ruler-label(index); color: Theme.dim; font-size: Theme.font(9); horizontal-alignment: index == 10 ? right : left; }
+            for index in 11: Text { x: clamp(index * (parent.width - 1px)/10,0px,parent.width - self.width); y: 10px * Theme.ui-scale; width: 55px * Theme.ui-scale; height: 13px * Theme.ui-scale; text: root.ruler-label(index); color: Theme.text(4, 1, Theme.dim); font-size: Theme.font(9); horizontal-alignment: index == 10 ? right : left; }
             TouchArea { enabled: root.ready; mouse-cursor: pointer;
                 clicked => { root.seek-play(root.shown-start + clamp(self.mouse-x/self.width,0,1)*(root.shown-end - root.shown-start)); }
                 scroll-event(event) => { return root.wheel-zoom(event.delta-y, self.mouse-x / max(1px,self.width)); }
@@ -1369,15 +1369,15 @@ component ClassicAuditionPanel inherits Rectangle {
             ClassicTool { width: 38px * Theme.ui-scale; height: 18px * Theme.ui-scale; icon: @image-url("icons/fit.svg"); label: root.chinese ? "显示完整声音" : "Fit entire sound"; enabled: root.ready; clicked => { root.zoom-change(0); } }
         }
         HorizontalLayout { height: 25px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
-            Text { accessible-role: text; accessible-label: root.chinese ? "试听时间" : "Audition time"; width: 208px * Theme.ui-scale; height: 25px * Theme.ui-scale; text: root.time + "  /  " + root.end-time; color: Theme.ink; font-family: "Consolas"; font-size: Theme.font(14); vertical-alignment: center; }
+            Text { accessible-role: text; accessible-label: root.chinese ? "试听时间" : "Audition time"; width: 208px * Theme.ui-scale; height: 25px * Theme.ui-scale; text: root.time + "  /  " + root.end-time; color: Theme.text(4, 0, Theme.ink); font-family: Theme.font-family == "" ? "Consolas" : Theme.font-family; font-size: Theme.font(14); vertical-alignment: center; }
             Rectangle { width: 1px; background: Theme.player-border; }
             if root.state != 0 || root.missing || root.busy: Rectangle {
                 width: phase.preferred-width + 14px * Theme.ui-scale; height: 20px * Theme.ui-scale; y: (25px * Theme.ui-scale - self.height) / 2;
                 background: Theme.raised; border-radius: 4px * Theme.ui-scale;
                 accessible-role: text; accessible-label: root.chinese ? "播放状态" : "Playback status"; accessible-description: root.state-label;
-                phase := Text { text: root.state-label; color: root.state == 7 || root.missing ? Theme.danger : (root.state == 3 ? Theme.accent-hover : Theme.dim); font-size: Theme.font(10); horizontal-alignment: center; vertical-alignment: center; }
+                phase := Text { text: root.state-label; color: root.state == 7 || root.missing ? Theme.text(4, 9, Theme.danger) : (root.state == 3 ? Theme.text(4, 4, Theme.accent-hover) : Theme.text(4, 1, Theme.dim)); font-size: Theme.font(10); horizontal-alignment: center; vertical-alignment: center; }
             }
-            Text { horizontal-stretch: 1; min-width: 0px; height: 25px * Theme.ui-scale; text: root.name == "" ? (root.chinese ? "未加载声音" : "No sound loaded") : root.name; overflow: elide; color: Theme.ink; font-size: Theme.font(11); vertical-alignment: center; accessible-role: text; accessible-label: root.chinese ? "当前试听文件" : "Audition filename"; }
+            Text { horizontal-stretch: 1; min-width: 0px; height: 25px * Theme.ui-scale; text: root.name == "" ? (root.chinese ? "未加载声音" : "No sound loaded") : root.name; overflow: elide; color: Theme.text(4, 0, Theme.ink); font-size: Theme.font(11); vertical-alignment: center; accessible-role: text; accessible-label: root.chinese ? "当前试听文件" : "Audition filename"; }
             Caption { height: 25px * Theme.ui-scale; text: root.info; font-size: Theme.font(10); }
         }
     }
@@ -1607,7 +1607,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                 name-text := Text {
                     x: 0px; width: max(0px, parent.width - status-badge.width - (status-badge.badge != "" ? 8px * Theme.ui-scale : 0px)); height: parent.height;
                     text: root.name == "" ? (root.chinese ? "未加载声音" : "No sound loaded") : root.name;
-                    overflow: elide; color: Theme.ink; font-size: Theme.font(12); horizontal-alignment: left; vertical-alignment: center;
+                    overflow: elide; color: Theme.text(4, 0, Theme.ink); font-size: Theme.font(12); horizontal-alignment: left; vertical-alignment: center;
                     states [
                     fresh when root.name-fresh: {
                         opacity: 0;
@@ -1640,7 +1640,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                     x: 0px; width: parent.width; height: parent.height; horizontal-alignment: left;
                     accessible-role: text; accessible-label: root.chinese ? "试听时间" : "Audition time";
                     text: (root.show-remaining ? "−" + Clock.format(max(0, root.duration - root.position)) : root.time) + "  /  " + root.end-time;
-                    color: time-touch.has-hover ? Theme.accent-hover : Theme.ink; font-family: "Consolas"; font-size: Theme.font(14); vertical-alignment: center;
+                    color: time-touch.has-hover ? Theme.text(4, 4, Theme.accent-hover) : Theme.text(4, 0, Theme.ink); font-family: Theme.font-family == "" ? "Consolas" : Theme.font-family; font-size: Theme.font(14); vertical-alignment: center;
                     animate color { duration: Theme.motion-fast; }
                 }
                 time-touch := TouchArea { mouse-cursor: pointer; clicked => { root.show-remaining = !root.show-remaining; } }
@@ -1649,7 +1649,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
         Rectangle { row: 0; col: 3; width: (root.narrow ? 398px : 440px) * Theme.ui-scale * root.font-factor; vertical-stretch: 1; min-height: max(64px * Theme.ui-scale, Theme.font(20) + 40px * Theme.ui-scale);
             transform-controls := HorizontalLayout { width: parent.width; height: max(32px * Theme.ui-scale, Theme.font(20) + 12px * Theme.ui-scale); y: max(0px, min((parent.height - self.height) / 2, parent.height - self.height - 24px * Theme.ui-scale)); spacing: 8px * Theme.ui-scale;
                 HorizontalLayout { spacing: 4px * Theme.ui-scale; horizontal-stretch: 0;
-                    Caption { text: root.chinese ? "音高" : "Pitch"; color: pitch-field.modified ? Theme.accent-hover : Theme.dim; animate color { duration: Theme.motion-base; } }
+                    Caption { text: root.chinese ? "音高" : "Pitch"; color: pitch-field.modified ? Theme.text(4, 4, Theme.accent-hover) : Theme.text(4, 1, Theme.dim); animate color { duration: Theme.motion-base; } }
                     pitch-field := NumberField {
                         width: 62px * Theme.ui-scale * max(1, Theme.ui-font-px / 13.0); enabled: root.ready; text <=> root.pitch-text;
                         minimum: -24; maximum: 24; default-value: 0; step: 1; fine-step: 0.1;
@@ -1659,7 +1659,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                     }
                 }
                 HorizontalLayout { spacing: 4px * Theme.ui-scale; horizontal-stretch: 0;
-                    Caption { text: root.chinese ? "速度" : "Rate"; color: rate-field.modified ? Theme.accent-hover : Theme.dim; animate color { duration: Theme.motion-base; } }
+                    Caption { text: root.chinese ? "速度" : "Rate"; color: rate-field.modified ? Theme.text(4, 4, Theme.accent-hover) : Theme.text(4, 1, Theme.dim); animate color { duration: Theme.motion-base; } }
                     rate-field := NumberField {
                         width: 57px * Theme.ui-scale * max(1, Theme.ui-font-px / 13.0); enabled: root.ready; text <=> root.rate-text;
                         minimum: 0.25; maximum: 4; default-value: 1; step: 0.05; fine-step: 0.01;
@@ -1807,7 +1807,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                         background: Theme.tooltip.with-alpha(0.9); border-width: 1px; border-color: root.scrubbing ? Theme.accent : Theme.strong-border; border-radius: 3px * Theme.ui-scale;
                         pointer-time := Text {
                             text: Clock.format(root.time-at(wave.pointer-x / max(1px, wave.width)));
-                            color: root.scrubbing ? Theme.accent-hover : Theme.ink; font-family: "Consolas"; font-size: Theme.font(10);
+                            color: root.scrubbing ? Theme.text(4, 4, Theme.accent-hover) : Theme.text(4, 0, Theme.ink); font-family: Theme.font-family == "" ? "Consolas" : Theme.font-family; font-size: Theme.font(10);
                             horizontal-alignment: center; vertical-alignment: center; accessible-role: none;
                         }
                     }
@@ -1818,7 +1818,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                     // Empty, loading, error, missing and maintenance states explain themselves.
                     if root.phase == 0 || root.phase == 1: VerticalLayout { alignment: center; spacing: 6px * Theme.ui-scale;
                         Text {
-                            horizontal-alignment: center; font-size: Theme.font(11); color: root.show-spectral && root.waveform-ready ? #263238 : Theme.dim;
+                            horizontal-alignment: center; font-size: Theme.font(11); color: root.show-spectral && root.waveform-ready ? #263238 : Theme.text(4, 1, Theme.dim);
                             text: root.phase == 1
                             ? (root.ready ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.chinese ? "正在加载声音…" : "Loading sound…"))
                             : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition"));
@@ -1883,12 +1883,12 @@ component WorkbenchAuditionPanel inherits Rectangle {
                                     }
                                     VerticalLayout { alignment: center; spacing: 2px * Theme.ui-scale;
                                         Text {
-                                            font-size: Theme.font(11); font-weight: 600; color: Theme.ink;
+                                            font-size: Theme.font(11); font-weight: 600; color: Theme.text(4, 0, Theme.ink);
                                             text: root.phase == 3 ? (root.chinese ? "无法加载此声音" : "Couldn't load this sound")
                                             : root.phase == 4 ? (root.chinese ? "文件缺失：原位置找不到此 WAV" : "File missing at its original location")
                                             : (root.chinese ? "音效库维护中，暂不可试听" : "Library maintenance in progress · Audition unavailable");
                                         }
-                                        if root.phase == 3 && root.error-text != "": Text { max-width: 420px * Theme.ui-scale; text: root.error-text; overflow: elide; font-size: Theme.font(10); color: Theme.dim; }
+                                        if root.phase == 3 && root.error-text != "": Text { max-width: 420px * Theme.ui-scale; text: root.error-text; overflow: elide; font-size: Theme.font(10); color: Theme.text(4, 9, Theme.dim); }
                                     }
                                     if root.phase == 3: VerticalLayout { alignment: center;
                                         Tool { width: 64px * Theme.ui-scale; height: 26px * Theme.ui-scale; symbol: root.chinese ? "重试" : "Retry"; symbol-size: Theme.font(11); label: root.chinese ? "重新加载并试听" : "Reload and audition"; primary: true; clicked => { root.retry(); } }
@@ -1909,7 +1909,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                     // Labels sit right of their tick so the line never crosses a digit.
                     if tick.label != "": Text {
                         x: min(3px * Theme.ui-scale, ruler.width - parent.x - self.width); y: 7px * Theme.ui-scale; height: 13px * Theme.ui-scale;
-                        text: tick.label; color: Theme.dim; font-size: Theme.font(9);
+                        text: tick.label; color: Theme.text(4, 1, Theme.dim); font-size: Theme.font(9);
                     }
                 }
                 ruler-touch := TouchArea { enabled: root.ready; mouse-cursor: pointer;
@@ -1920,7 +1920,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
             HorizontalLayout { visible: root.zoom > 1; height: root.zoom > 1 ? 10px * Theme.ui-scale : 0px; spacing: 7px * Theme.ui-scale;
                 Text {
                     width: 42px * Theme.ui-scale; vertical-alignment: center; font-size: Theme.font(9);
-                    text: Math.round(root.zoom * 10) / 10 + "×"; color: root.zoom-pulse ? Theme.accent-hover : Theme.dim;
+                    text: Math.round(root.zoom * 10) / 10 + "×"; color: root.zoom-pulse ? Theme.text(4, 4, Theme.accent-hover) : Theme.text(4, 1, Theme.dim);
                     animate color { duration: Theme.motion-slow; easing: ease-out; }
                 }
                 Rectangle { horizontal-stretch: 1;
@@ -2261,7 +2261,7 @@ export component PeakSettings inherits FocusScope {
     Rectangle { width: 480px * Theme.ui-scale; height: 384px * Theme.ui-scale; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; background: Theme.panel; border-radius: 8px * Theme.ui-scale; border-width: 1px; border-color: Theme.strong-border;
         VerticalLayout { padding: 20px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
             HorizontalLayout { height: 30px * Theme.ui-scale;
-                Text { horizontal-stretch: 1; text: root.chinese ? "波形显示设置" : "Peak display settings"; color: Theme.ink; font-size: Theme.font(17); font-weight: 600; vertical-alignment: center; }
+                Text { horizontal-stretch: 1; text: root.chinese ? "波形显示设置" : "Peak display settings"; color: Theme.text(4, 0, Theme.ink); font-size: Theme.font(17); font-weight: 600; vertical-alignment: center; }
                 // A fixed focus proxy preserves the modal's forward/reverse wrap,
                 // while only the selected close control can receive keyboard input.
                 peaks-close := FocusScope {
@@ -2297,7 +2297,7 @@ export component PeakSettings inherits FocusScope {
             // Muted frequency anchors from audiolib-audio/src/spectral.rs.
             Rectangle { height: 92px * Theme.ui-scale; background: @linear-gradient(90deg, #5bafb5, #707cbe, #b073ab, #c57564, #c0a954, #6fae79, #5bafb5, #707cbe); border-radius: 3px * Theme.ui-scale;
                 Rectangle { x: 0px; y: 0px; background: @linear-gradient(180deg, #0e0e0eff, #0e0e0e00); height: 65px * Theme.ui-scale; }
-                for frequency[index] in ["14 Hz", "36 Hz", "92 Hz", "239 Hz", "619 Hz", "1604 Hz", "4155 Hz"]: Text { x: 4px * Theme.ui-scale + index * (parent.width - 8px * Theme.ui-scale) / 7; y: 69px * Theme.ui-scale; height: 20px * Theme.ui-scale; text: frequency; color: #101820; font-size: Theme.font(10); font-weight: 600; vertical-alignment: center; }
+                for frequency[index] in ["14 Hz", "36 Hz", "92 Hz", "239 Hz", "619 Hz", "1604 Hz", "4155 Hz"]: Text { x: 4px * Theme.ui-scale + index * (parent.width - 8px * Theme.ui-scale) / 7; y: 69px * Theme.ui-scale; height: 20px * Theme.ui-scale; text: frequency; color: Theme.text(4, 10, #101820); font-size: Theme.font(10); font-weight: 600; vertical-alignment: center; }
             }
             HorizontalLayout { height: 26px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
                 Caption { text: root.chinese ? "噪声阈值" : "Noise threshold"; width: 80px * Theme.ui-scale; }

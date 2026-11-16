@@ -1,5 +1,27 @@
 # Rust 验证报告
 
+## 系统字体、文字配色预设与跟随系统语言（2026-11-16，beta 开发工作区）
+
+基于 `origin/beta` 的 `ba45837`，功能分支 `codex/appearance-font-presets`。新增系统字体搜索/选择、8 个文字模块及 15 类状态色、恢复当前主题默认文字配色、3 套内置文字配色，以及自定义主题/字体/字号/颜色预设的保存、加载、更新、重命名、删除。语言新增默认 `system`，保留已有显式中英文偏好；启动、设置页、视图菜单与启动错误提示使用一致的系统语言解析。功能范围及原生控件配色边界见 [架构说明](Rust_Architecture.md)。
+
+Windows Rust 1.97.1 MSVC、Slint 1.17.1、已核验 ASIO SDK 2.3.4。`cargo fmt --all -- --check`、core/desktop/CLI 的 all-targets strict Clippy 通过，desktop/CLI 选择 ASIO。新增直接引用的是锁文件已有的 `fontdb 0.23.0`（fs）和 `sys-locale 0.3.2`，没有升级依赖版本。
+
+| 本次实际验证 | 结果 |
+| --- | --- |
+| core lib：`config::`、`appearance::` | 47 passed，0 ignored |
+| desktop ASIO：新增 appearance、`ui_scale_tests`、通用主题控件、语言菜单、受争用的偏好保存/关闭回归 | 24 passed，0 ignored |
+| `validate-review-fixes.ps1 -CleanCheckout`，使用本次源码构建的开发 CLI | 10 checks passed；2000 条隔离扫描夹具，无实际音频输出 |
+| 中英文、小窗口 1080×700、100%/200% 新设置截图检查 | 通过；底部预设操作、关闭按钮可滚动访问 |
+| Windows 字体发现 | 实际发现 257 个已安装字体名称 |
+
+上表 71 个 Rust 测试不重复计算其隔离子进程的 1 passed。配置覆盖默认系统语言、显式语言保留、异常颜色/预设恢复、持久化往返；桌面覆盖模块颜色继承和恢复、底色不受影响、主题切换保留字体/配色、预设增改删与加载、连续语言修改后关闭仍保存 `system`、配置写锁争用时字体/配色回调仍返回且关闭保存最终值。首轮发现原生 ComboBox 的 `current-value` 写入不会改变选中项，已改为 `current-index` 并检查选中字体模型；最终日志无该警告。字体扫描仅在首次进入通用设置时于后台运行，读取字体期间不持有界面筛选锁。
+
+最终证据：`.rust-validation/appearance/fmt-final.log`、`clippy-verified.log`、`core-tests.log`、`desktop-verified.log`、`review-regression.json` 与 `screenshots/`。旧 `doc/Rust_Review_Regression.json` 已保持原内容，本次隔离报告单独保存。配置安全脚本跳过真实旧库只读拒绝/整库哈希检查；没有打开工作库、修改源音频或发起服务器请求。
+
+范围选择：core 设置契约及桌面/CLI 消费者本次重新检查。`e19f4d0` / `b8b3e22` 与下节 1.0.2 记录中的数据库、扫描、Metadata 写入、音频后端和 IPC 基线对本次未变化的存储/租约/播放实现仍适用；本次只复用其机制，没有重跑整个 workspace、百万条基准、真实 ASIO 硬件或 Mac/Linux 原生验收。桌面偏好采用现有后台写入及关闭保存，并新增针对性争用回归；没有删除任何正式测试。
+
+本次没有打包、部署 beta、发布或更新 `local_release/`。缓存清理通过，移除 **31.33 GiB 逻辑大小**的已核验归属编译中间文件；目标中保留 2.72 GiB 最终产物/元数据。结果记录于 `.rust-validation/appearance/cleanup.json`，最终二进制、截图及日志保留。
+
 ## 1.0.2 发布前 IPC／OpenAI 补修（2026-11-16）
 
 对 beta `944bdf3` 相对 main 的独立审查发现：显式 IPC Load 当前选中素材会取消在途 Waveform，而状态观察因素材仍被选中跳过替代渲染。补修保留过期任务取消，并按新的音频 generation 补发渲染；真实解码、Slint 排队发布回归同时检查同素材重载和异素材旧结果拒绝。

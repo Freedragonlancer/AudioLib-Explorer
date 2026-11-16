@@ -24,6 +24,8 @@ audiolib-ipc = { path = "../../crates/audiolib-ipc" }
 audiolib-windows = { path = "../../crates/audiolib-windows" }
 audiolib-remote = { path = "../../crates/audiolib-remote" }
 audiolib-update = { path = "../../crates/audiolib-update" }
+fontdb = { version = "=0.23.0", default-features = false, features = ["fs"] }
+sys-locale = "=0.3.2"
 chrono.workspace = true
 serde_json.workspace = true
 slint.workspace = true

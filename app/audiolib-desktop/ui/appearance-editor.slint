@@ -1,0 +1,78 @@
+// app/audiolib-desktop/ui/appearance-editor.slint
+import { Button, ComboBox, LineEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component AppearanceEditor inherits VerticalLayout {
+    in property <bool> chinese;
+    in property <bool> enabled: true;
+    in property <[string]> fonts;
+    in property <bool> fonts-loading;
+    in-out property <int> font-index;
+    in-out property <string> font-family;
+    in-out property <string> font-filter;
+    in property <[string]> presets;
+    in-out property <int> preset-index: -1;
+    in-out property <string> preset-name;
+    in-out property <int> module-index;
+    in-out property <int> state-index;
+    in-out property <string> color-value;
+    in property <bool> color-error;
+    in property <string> message;
+    callback font-selected(string);
+    callback filter-edited(string);
+    callback color-selected;
+    callback color-applied(string);
+    callback colors-reset;
+    callback builtin-selected(int);
+    callback preset-action(int);
+    horizontal-stretch: 1;
+    spacing: 10px * Theme.ui-scale;
+    alignment: start;
+    Text { text: root.chinese ? "字体与文字颜色" : "Font and text colors"; color: Theme.text(5, 0, Theme.ink); font-size: Theme.font(17); font-weight: 600; }
+    HorizontalLayout { spacing: 8px * Theme.ui-scale;
+        LineEdit { enabled: root.enabled; horizontal-stretch: 1; text <=> root.font-filter; placeholder-text: root.chinese ? "搜索已安装字体" : "Find installed fonts"; accessible-label: self.placeholder-text; edited => { root.filter-edited(self.text); } }
+        Button { enabled: root.enabled; text: root.chinese ? "系统默认字体" : "System font"; clicked => { root.font-selected(""); } }
+    }
+    if root.fonts-loading: Text { text: root.chinese ? "正在读取系统字体…" : "Loading installed fonts…"; color: Theme.text(5, 1, Theme.dim); }
+    ComboBox { enabled: root.enabled && !root.fonts-loading; model: root.fonts; current-index <=> root.font-index; accessible-label: root.chinese ? "已安装字体" : "Installed fonts"; selected => { root.font-selected(self.current-index == 0 ? "" : self.current-value); } }
+    Text { text: root.chinese ? "字体预览：音效库 · Waveform · 0123456789" : "Font preview: Audio library · 音效库 · 0123456789"; color: Theme.text(5, 0, Theme.ink); font-size: Theme.font(13); wrap: word-wrap; }
+    Text { text: root.chinese ? "空白颜色继承通用设置；通用空白沿用当前主题。输入 #RRGGBB 后应用。" : "Empty colors inherit General, then the current theme. Enter #RRGGBB and apply."; color: Theme.text(5, 1, Theme.dim); wrap: word-wrap; font-size: Theme.font(11); }
+    HorizontalLayout { spacing: 8px * Theme.ui-scale;
+        ComboBox { enabled: root.enabled; horizontal-stretch: 1; model: root.chinese ? ["通用 / 控件", "搜索 / 导航", "结果列表", "Metadata / 详情", "播放器", "设置 / 对话框", "AI 搜索", "状态 / 服务器"] : ["General / controls", "Search / navigation", "Result list", "Metadata / details", "Player", "Settings / dialogs", "AI search", "Status / server"]; current-index <=> root.module-index; accessible-label: root.chinese ? "文字模块" : "Text module"; selected => { root.color-selected(); } }
+        ComboBox { enabled: root.enabled; horizontal-stretch: 1; model: root.chinese ? ["普通", "次要", "弱化", "禁用", "悬停", "选中", "激活", "成功", "警告", "错误", "强调背景上", "已播放", "缺失", "收藏", "按下"] : ["Normal", "Secondary", "Muted", "Disabled", "Hover", "Selected", "Active", "Success", "Warning", "Error", "On accent", "Played", "Missing", "Favorite", "Pressed"]; current-index <=> root.state-index; accessible-label: root.chinese ? "文字状态" : "Text state"; selected => { root.color-selected(); } }
+    }
+    HorizontalLayout { spacing: 8px * Theme.ui-scale;
+        Rectangle { width: 30px * Theme.ui-scale; min-height: 30px * Theme.ui-scale; border-radius: 4px; border-width: 1px; border-color: Theme.strong-border; background: Theme.text(root.module-index, root.state-index, Theme.role-default(root.state-index)); }
+        LineEdit { enabled: root.enabled; horizontal-stretch: 1; text <=> root.color-value; placeholder-text: root.chinese ? "继承默认" : "Inherit default"; accessible-label: root.chinese ? "文字颜色 RGB" : "Text color RGB"; accepted => { root.color-applied(self.text); } }
+        Button { enabled: root.enabled; text: root.chinese ? "应用颜色" : "Apply color"; clicked => { root.color-applied(root.color-value); } }
+        Button { enabled: root.enabled; text: root.chinese ? "重置此项" : "Reset role"; clicked => { root.color-applied(""); } }
+    }
+    if root.color-error: Text { text: root.chinese ? "请输入有效的 #RRGGBB，例如 #D9DEE3。" : "Use a valid #RRGGBB, for example #D9DEE3."; color: Theme.danger; wrap: word-wrap; }
+    Rectangle { min-height: 72px * Theme.ui-scale; background: Theme.raised; border-radius: 6px * Theme.ui-scale;
+        VerticalLayout { padding: 10px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
+            Text { text: root.chinese ? "当前状态预览 · 音效库 / Waveform" : "Selected state preview · Audio library / 音效库"; color: Theme.text(root.module-index, root.state-index, Theme.role-default(root.state-index)); wrap: word-wrap; }
+            HorizontalLayout { spacing: 12px * Theme.ui-scale;
+                Text { text: root.chinese ? "普通" : "Normal"; color: Theme.text(root.module-index, 0, Theme.ink); }
+                Text { text: root.chinese ? "选中" : "Selected"; color: Theme.text(root.module-index, 5, Theme.accent); }
+                Text { text: root.chinese ? "成功" : "Success"; color: Theme.text(root.module-index, 7, Theme.mint); }
+                Text { text: root.chinese ? "警告" : "Warning"; color: Theme.text(root.module-index, 8, Theme.warning); }
+                Text { text: root.chinese ? "错误" : "Error"; color: Theme.text(root.module-index, 9, Theme.danger); }
+            }
+        }
+    }
+    HorizontalLayout { spacing: 8px * Theme.ui-scale;
+        ComboBox { enabled: root.enabled; horizontal-stretch: 1; model: root.chinese ? ["选择内置文字配色…", "柔和鼠尾草", "冷灰冰蓝", "暖砂琥珀"] : ["Built-in text palette…", "Soft sage", "Glacier blue", "Warm amber"]; selected => { if self.current-index > 0 { root.builtin-selected(self.current-index); } } }
+        Button { enabled: root.enabled; text: root.chinese ? "恢复默认配色" : "Default colors"; clicked => { root.colors-reset(); } }
+    }
+    Text { text: root.chinese ? "自定义预设保存主题、字体、字号和全部文字颜色。" : "Custom presets include theme, font, sizes and all text colors."; color: Theme.text(5, 1, Theme.dim); wrap: word-wrap; font-size: Theme.font(11); }
+    ComboBox { enabled: root.enabled; model: root.presets; current-index <=> root.preset-index; accessible-label: root.chinese ? "自定义外观预设" : "Custom appearance presets"; selected => { root.preset-name = self.current-value; } }
+    LineEdit { enabled: root.enabled; text <=> root.preset-name; placeholder-text: root.chinese ? "预设名称" : "Preset name"; accessible-label: self.placeholder-text; }
+    HorizontalLayout { spacing: 6px * Theme.ui-scale;
+        Button { enabled: root.enabled && root.preset-index >= 0 && root.preset-index < root.presets.length; text: root.chinese ? "加载" : "Load"; clicked => { root.preset-action(0); } }
+        Button { enabled: root.enabled; text: root.chinese ? "另存为" : "Save new"; clicked => { root.preset-action(1); } }
+        Button { enabled: root.enabled && root.preset-index >= 0 && root.preset-index < root.presets.length; text: root.chinese ? "更新" : "Update"; clicked => { root.preset-action(2); } }
+        Button { enabled: root.enabled && root.preset-index >= 0 && root.preset-index < root.presets.length; text: root.chinese ? "重命名" : "Rename"; clicked => { root.preset-action(3); } }
+        Button { enabled: root.enabled && root.preset-index >= 0 && root.preset-index < root.presets.length; text: root.chinese ? "删除" : "Delete"; clicked => { root.preset-action(4); } }
+    }
+    if root.message != "": Text { text: root.message; color: Theme.text(5, 1, Theme.dim); wrap: word-wrap; }
+}
