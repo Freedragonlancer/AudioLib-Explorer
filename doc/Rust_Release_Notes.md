@@ -11,7 +11,7 @@
 - **主题与输入**：修正三个主题的缩放、字号、隐藏侧栏、Studio 操作可达性、控件点击与取消；保留原生按键重复状态和交互焦点边界。
 - **构建维护**：中间产物清理保留可验证的部分执行证明，使被占用中断后的同范围清理能够恢复。
 
-性能目标仍为 **P95 latency <500ms for 1M+ records**。开发定向验证的原始身份、失败后修复和复用边界见 [Rust 验证报告](Rust_Validation.md)，本次发布进度见 [1.0.2 发布记录](Rust_Release_1.0.2.md)；不把既有 Windows 结果当作 macOS/Linux 原生验收或真实 ASIO 硬件测量。
+性能目标仍为 **P95 latency <500ms for 1M+ records**。开发定向验证的原始身份、失败后修复和复用边界见 [Rust 验证报告](Rust_Validation.md)，本次发布进度见 [1.0.2 发布记录](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_1.0.2.md)；不把既有 Windows 结果当作 macOS/Linux 原生验收或真实 ASIO 硬件测量。
 
 # 1.0.1：AI 网关转发、收藏与 Windows 修复
 
