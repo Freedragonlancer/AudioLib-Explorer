@@ -124,6 +124,36 @@ pub(crate) fn request_url(profile: &Profile, suffix: &str) -> String {
     format!("{base}{suffix}")
 }
 
+fn chat_body(profile: &Profile, model: &str, instructions: &str, content: &str) -> Value {
+    let example = json!({"schema_version":1,"intent":"wind","queries":[{"text":"wind","reason":"Direct wind recording","kind":"main","layer":"direct","source_ids":[],"cat_ids":[]}],"cautions":[]});
+    let mut body = json!({"model":model,"messages":[{"role":"system","content":format!("{instructions} JSON schema: {}. Example JSON output: {example}",schema())},{"role":"user","content":content}],"response_format":{"type":"json_object"}});
+    // The official Chat API deprecates max_tokens and rejects it for o-series
+    // models. Keep compatible gateways' existing contract unless the endpoint
+    // is OpenAI itself; this bound includes both reasoning and final output.
+    let official_openai = profile.protocol == Protocol::ChatCompletions
+        && profile
+            .base_url
+            .parse::<ureq::http::Uri>()
+            .is_ok_and(|uri| {
+                uri.host()
+                    .is_some_and(|host| host.eq_ignore_ascii_case("api.openai.com"))
+            });
+    body[if official_openai {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    }] = json!(1800);
+    if profile.protocol == Protocol::DeepSeek {
+        // The native API uses its own thinking toggle.
+        body["thinking"] = json!({"type":"disabled"});
+    } else if profile.protocol == Protocol::OpenCodeGo && model.starts_with("deepseek-") {
+        // Go translates the compatible Chat reasoning control. Keep this
+        // bounded keyword request's budget for its final JSON.
+        body["reasoning_effort"] = json!("none");
+    }
+    body
+}
+
 /// Explicit model refresh; a public catalogue does not verify account authorization.
 pub fn models(profile: &Profile, key: &ApiKey, cancel: &AtomicBool) -> Result<Vec<String>> {
     profile.validate_discovery_request()?;
@@ -202,7 +232,6 @@ pub fn generate(
                 "/chat/completions".into()
             },
             {
-                let example = json!({"schema_version":1,"intent":"wind","queries":[{"text":"wind","reason":"Direct wind recording","kind":"main","layer":"direct","source_ids":[],"cat_ids":[]}],"cautions":[]});
                 let model = if profile.protocol == Protocol::OpenCodeGo {
                     profile
                         .model
@@ -211,17 +240,7 @@ pub fn generate(
                 } else {
                     &profile.model
                 };
-                let mut body = json!({"model":model,"messages":[{"role":"system","content":format!("{instructions} JSON schema: {}. Example JSON output: {example}",schema())},{"role":"user","content":content}],"response_format":{"type":"json_object"},"max_tokens":1800});
-                if profile.protocol == Protocol::DeepSeek {
-                    // The native API uses its own thinking toggle.
-                    body["thinking"] = json!({"type":"disabled"});
-                } else if profile.protocol == Protocol::OpenCodeGo && model.starts_with("deepseek-")
-                {
-                    // Go translates the compatible Chat reasoning control. Keep
-                    // this bounded keyword request's budget for its final JSON.
-                    body["reasoning_effort"] = json!("none");
-                }
-                body
+                chat_body(profile, model, &instructions, &content)
             },
         ),
         Protocol::Responses => (
@@ -490,6 +509,51 @@ mod jev_http_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn official_openai_chat_uses_the_modern_bounded_completion_contract() {
+        for model in ["o1", "o3", "o4-mini", "gpt-5", "gpt-4.1"] {
+            let profile = Profile {
+                base_url: "https://api.openai.com/v1".into(),
+                model: model.into(),
+                ..Default::default()
+            };
+            profile.validate_request().unwrap();
+            let body = chat_body(&profile, model, "instructions", "JSON input");
+            let serialized = serde_json::to_vec(&body).unwrap();
+            let wire: Value = serde_json::from_slice(&serialized).unwrap();
+            assert_eq!(wire["model"], model);
+            assert_eq!(wire["max_completion_tokens"], 1800);
+            assert!(wire.get("max_tokens").is_none());
+            assert!(wire.get("reasoning_effort").is_none());
+            assert_eq!(wire["response_format"]["type"], "json_object");
+            assert_eq!(
+                request_url(&profile, "/chat/completions"),
+                "https://api.openai.com/v1/chat/completions"
+            );
+        }
+        for (protocol, url) in [
+            (Protocol::ChatCompletions, "https://gateway.example/v1"),
+            (
+                Protocol::ChatCompletions,
+                "https://api.openai.com.example/v1",
+            ),
+            (Protocol::DeepSeek, "https://api.deepseek.com"),
+            (Protocol::OpenCodeGo, "https://opencode.ai/inference/go"),
+            (Protocol::Magpie, "http://127.0.0.1:3425/v1"),
+        ] {
+            let profile = Profile {
+                protocol,
+                base_url: url.into(),
+                model: "gpt-5".into(),
+                ..Default::default()
+            };
+            profile.validate_request().unwrap();
+            let body = chat_body(&profile, &profile.model, "instructions", "JSON input");
+            assert_eq!(body["max_tokens"], 1800);
+            assert!(body.get("max_completion_tokens").is_none());
+        }
+    }
+
     use std::{io::Write, net::TcpListener, thread};
 
     fn delayed_gateway_response(
@@ -975,8 +1039,10 @@ mod tests {
     }
 
     #[test]
-    fn unsaved_deepseek_and_go_profiles_discover_models_without_a_model_id() {
+    fn unsaved_chat_responses_deepseek_and_go_profiles_discover_without_a_model_id() {
         for (protocol, suffix) in [
+            (Protocol::ChatCompletions, "/models"),
+            (Protocol::Responses, "/models"),
             (Protocol::DeepSeek, "/models"),
             (Protocol::OpenCodeGo, "/v1/models"),
         ] {
@@ -1011,7 +1077,7 @@ mod tests {
             assert_eq!(
                 models(
                     &profile,
-                    &ApiKey::new("draft-key".into()).unwrap(),
+                    &ApiKey::new(" \tdraft-key\r\n".into()).unwrap(),
                     &AtomicBool::new(false)
                 )
                 .unwrap(),

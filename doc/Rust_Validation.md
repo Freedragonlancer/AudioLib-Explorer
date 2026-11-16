@@ -1,5 +1,26 @@
 # Rust 验证报告
 
+## 1.0.2 发布前 IPC／OpenAI 补修（2026-11-16）
+
+对 beta `944bdf3` 相对 main 的独立审查发现：显式 IPC Load 当前选中素材会取消在途 Waveform，而状态观察因素材仍被选中跳过替代渲染。补修保留过期任务取消，并按新的音频 generation 补发渲染；真实解码、Slint 排队发布回归同时检查同素材重载和异素材旧结果拒绝。
+
+用户报告官方 OpenAI URL 下的通用配置错误。该 URL 本身有效；密钥尾随换行的本地拒绝路径已由隔离 HTTP 夹具复现并修复，内部控制字符继续拒绝。官方 Chat 请求按其 API 使用 `max_completion_tokens`，其他兼容供应商保持 `max_tokens`；新增固定字段诊断，不含输入值或密钥。未持有原失败草稿／密钥、未执行真实付费 API，不能将可复现路径认定为用户当时唯一原因。
+
+Windows 新源码为 `87a994edd6158ae3ac45145613b00f4fb2978a38`，Rust 1.97.1 MSVC；desktop 使用 ASIO SDK 2.3.4，remote/server 使用 no-default-features。格式检查通过；desktop/AI ASIO 与 remote/server no-default-features 的 all-targets strict Clippy 均通过。外部依赖、工具链和 feature 选择未变，Cargo.lock 只更新 11 个工作区 package 的版本。
+
+| 本次定向测试 | passed | ignored |
+| --- | ---: | ---: |
+| audiolib-ai lib | 55 | 0 |
+| desktop `controller::ipc_load_tests` | 4 | 2 |
+| desktop `controller::search_tasks::tests::ai_search` | 37 | 37 |
+| remote AI relay lib | 9 | 0 |
+| server `ai_relay` integration | 9 | 0 |
+| 合计（不重复计算子进程） | 114 | 39 |
+
+ignored 均保留原含义，不计为通过。桌面新回归覆盖无模型发现、剪贴板密钥、失败保存不落盘、有效保存和跨端点凭据隔离。原始检查证据在本次隔离源码目录的 `.rust-validation/local-checks/` 与 `.rust-validation/release-102/`；严格 Clippy 的单阶段报告仍标记 format/tests 为 not-requested，格式与测试通过由上述独立记录证明。
+
+下两节 `e19f4d0`／`b8b3e22` 开发验证的原身份继续适用于未改变的 core/db/audio、扫描／Metadata／库管理和 UI 布局实现；本次没有改变其写入顺序、租约、存储或关闭契约。UI 布局原组合为 192 passed、2 ignored，保留失败后的修复记录；未为了新版本重复全工作区、ASIO 硬件或旧库 fixture 验收。新公共 AI 错误类型的实际消费者已经重新检查。Mac/Linux 原生检查、beta 环境、最终 main/tag 产物验收及固定安装仍按 [1.0.2 发布记录](Rust_Release_1.0.2.md) 分别完成和记录；本节不是已发布证明。
+
 ## 主界面与主题审查（2026-11-16，1.0.1 开发工作区）
 
 基于 `e19f4d0` 的开发工作区，修复九项布局、控件输入及辅助功能问题，见 [审查修复记录](Rust_Review_Fixes.md#主界面与主题边缘情况2026-11-16开发工作区)。本轮没有打包、发布或更新 `local_release/`，所有窗口、合成音频展示及设置均来自隔离测试，未使用工作库或源 WAV。

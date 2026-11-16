@@ -4273,13 +4273,18 @@ impl Controller {
                                     path,
                                 )
                             });
+                        // Explicit IPC Load invalidates pending Waveform work even
+                        // when it loads the selected record. Its cancelled render
+                        // then needs a replacement from this engine generation.
+                        let waveform_cancelled =
+                            c.waveform_cancel.lock().unwrap().load(Ordering::Acquire);
                         if !cached_copy
-                            && !selected.as_ref().is_some_and(|file| {
-                                status
-                                    .file_path
-                                    .as_ref()
-                                    .is_some_and(|path| same_path(Path::new(&file.file_path), path))
-                            })
+                            && (waveform_cancelled
+                                || !selected.as_ref().is_some_and(|file| {
+                                    status.file_path.as_ref().is_some_and(|path| {
+                                        same_path(Path::new(&file.file_path), path)
+                                    })
+                                }))
                             && let Some(file) = c.waveform_file(&status)
                         {
                             c.queue_waveform(&file);

@@ -140,6 +140,98 @@ fn child_unsaved_provider() {
 }
 
 #[test]
+fn ai_configuration_errors_allow_model_discovery_and_preserve_saved_credentials() {
+    isolated("ai_search::child_ai_configuration_errors");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_ai_configuration_errors() {
+    use audiolib_ai::storage::ProfileStore;
+    use std::io::{Read, Write};
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    ui.show().unwrap();
+    ui.invoke_ai_action(22, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    ui.invoke_ai_action(9, 0);
+    ui.set_ai_endpoint("invalid endpoint".into());
+    ui.set_ai_key("  owned-test-key\r\n".into());
+    ui.invoke_ai_action(11, 0);
+    assert!(ui.get_ai_error());
+    assert!(!ui.get_ai_busy());
+    assert!(ui.get_ai_status().contains("URL"));
+    let profiles = fixture.root.join("preferences/ai/profiles.json");
+    assert!(!profiles.exists());
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    ui.set_ai_endpoint(endpoint.clone().into());
+    let worker = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(stream) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "model discovery was not sent");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("owned model listener: {error}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+            assert!(head.len() < 16 * 1024);
+        }
+        let head = String::from_utf8(head).unwrap();
+        assert!(head.starts_with("GET /v1/models "));
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("authorization: bearer owned-test-key\r\n")
+        );
+        let body = r#"{"data":[{"id":"owned-model"}]}"#;
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    });
+    // Discovery does not need a model and accepts clipboard whitespace on a key.
+    ui.set_ai_model("".into());
+    ui.invoke_ai_action(11, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_error(), "{}", ui.get_ai_status());
+    assert_eq!(ui.get_ai_model(), "owned-model");
+    worker.join().unwrap();
+    assert!(!profiles.exists());
+
+    ui.set_ai_model("".into());
+    ui.invoke_ai_action(8, 0);
+    assert!(ui.get_ai_error());
+    assert!(!profiles.exists());
+    ui.set_ai_model("owned-model".into());
+    ui.invoke_ai_action(8, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_error(), "{}", ui.get_ai_status());
+    let retained = std::fs::read(&profiles).unwrap();
+    let store = ProfileStore::open(&fixture.root.join("preferences")).unwrap();
+    assert_eq!(store.selected().unwrap().base_url, endpoint);
+    assert!(ui.get_ai_key().is_empty());
+    // A new endpoint must not implicitly receive the previous endpoint's key.
+    ui.set_ai_endpoint("https://api.openai.com/v1".into());
+    ui.invoke_ai_action(11, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_error());
+    assert!(ui.get_ai_status().contains("re-enter"));
+    assert_eq!(std::fs::read(&profiles).unwrap(), retained);
+    finish(&fixture);
+}
+
+#[test]
 fn provider_timeouts_show_the_configured_deadline_and_how_to_raise_it() {
     isolated("ai_search::child_provider_timeout_notice");
 }
