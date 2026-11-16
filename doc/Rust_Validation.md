@@ -1,5 +1,17 @@
 # Rust 验证报告
 
+## 护眼黑曜替换静谧森林（2026-11-16，beta）
+
+基于 beta `056621e`，分支 `codex/obsidian-theme`。推荐列表和视图菜单以护眼黑曜 / Obsidian 替换森林；背景、面板、文字、强调与选中态使用中性灰阶，保留低饱和语义状态色。旧 `forest` 配置和命名预设自动规范化为 `obsidian`，保留字体、自定义颜色和其他偏好。设计依据及颜色值见 [架构说明](Rust_Architecture.md)。
+
+Windows Rust 1.97.1 MSVC、Slint 1.17.1；desktop/CLI 检查使用已核验 ASIO SDK 2.3.4。core、desktop、CLI all-targets strict Clippy 通过；最终 UI 补修后重新通过 desktop strict Clippy 与格式检查。core `config::` 46 passed，desktop 外观 4 passed、受争用偏好保存/立即关闭 1 passed、经典播放器 3 passed（共 54 个不同测试，0 ignored）。源码及测试使用隔离数据，无工作库、音频素材或真实音频设备操作。
+
+真实 Slint 软件渲染截图发现经典播放器空波形错误使用固定频谱底色，已对齐现有现代播放器的就绪判断：空白/加载态使用主题普通画布，真实频谱继续使用数据画布。按钮切换动画不再影响配色截图的最终状态。最终截图 `.rust-validation/obsidian/screenshots/theme-3.png` 已人工检查；四套推荐卡片与实际界面颜色一致。黑曜普通文字/面板对比度 12.11:1，弱化文字/浮层 5.03:1，选中行、勾选态、强调背景及语义状态文字均通过相应 4.5:1 检查，强边框/面板至少 3:1。中英文设置及 100%/200% 外观交互截图继续通过。
+
+日志位于 `.rust-validation/local-checks/`：初始三包 Clippy `eb9a5546d1a146f9869d6c187a328ec5`、core `d70ee825ff1842af9bc4a73024c7d34b`、最终 desktop 外观/静态检查 `e0b8e1e0ab6a4cafa57f898b9040dfb4`、偏好保存 `88b6116f037e497fb4dd96d7ef3201b5`、经典播放器 `3a22a6619b2142d9b237654d126cae9f`。末次补修只改变空画布显示与截图测试，不影响此前 core/CLI 或偏好写入证据。
+
+范围复用：`056621e` 的设置结构、缩放、语言、后台写入与关闭排空基线，以及此前数据库、扫描、Metadata、IPC 和音频后端基线仍适用；这些实现、依赖和平台配置没有变化。未重复 workspace、完整数据安全脚本、百万条基准或真实 ASIO 硬件验收。沿用 `windows-local` 计划交付固定 `local_release/`，实际构建、portable 验收、安装身份/启动和统一缓存清理以本次管线收据为准。
+
 ## 推荐主题与高级外观设置重构（2026-11-16，beta）
 
 基于 beta `2c5da47`，分支 `codex/appearance-settings-redesign`。设置页先展示石墨、静谧森林、深海蓝、暖砂琥珀四张主题缩略卡片，再按需展开字体与阅读、文字颜色、个人预设。推荐主题现在统一改变界面底色、强调色、选中背景和文字；点击时清除旧的文字覆盖，保留字体与用户预设。原 `default-v2` 标识及配色不变，显示名改为石墨；原默认和工作室主题继续保留。新纯色主题跳过不可见的旧 SVG 背景栅格化，避免首次选择时阻塞界面。

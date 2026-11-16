@@ -659,9 +659,9 @@ pub const BUILTIN_THEMES: [BuiltinTheme; 6] = [
         player_style: PlayerStyle::Classic,
     },
     BuiltinTheme {
-        id: "forest",
-        name: "Forest",
-        name_cn: "静谧森林",
+        id: "obsidian",
+        name: "Obsidian",
+        name_cn: "护眼黑曜",
         workbench_style: WorkbenchStyle::Studio,
         player_style: PlayerStyle::Classic,
     },
@@ -692,9 +692,11 @@ pub const THEME_IDS: [&str; BUILTIN_THEMES.len()] = {
     ids
 };
 
-/// Keep a known theme identifier; anything else uses the default theme.
+/// Keep a known theme, migrate retired Forest preferences, or use the default.
 pub fn normalize_theme(theme: &str) -> String {
-    if THEME_IDS.contains(&theme) {
+    if theme == "forest" {
+        "obsidian".to_owned()
+    } else if THEME_IDS.contains(&theme) {
         theme.to_owned()
     } else {
         DEFAULT_THEME.to_owned()
@@ -1778,6 +1780,38 @@ mod tests {
         let loaded = AppConfig::load_with_roots(root, &[]).unwrap();
         assert_eq!(loaded.theme, DEFAULT_THEME);
         assert_eq!(loaded.ui_font_size, 17);
+    }
+
+    #[test]
+    fn retired_forest_theme_migrates_settings_and_presets_to_obsidian() {
+        let root = tempfile::tempdir().unwrap();
+        let config = AppConfig::load_with_roots(root.path().to_owned(), &[]).unwrap();
+        config.save().unwrap();
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config.paths.settings).unwrap()).unwrap();
+        raw["theme"] = serde_json::json!("forest");
+        raw["language"] = serde_json::json!("cn");
+        raw["appearance"] = serde_json::json!({
+            "font_family": "Microsoft YaHei UI",
+            "text_colors": {"results.missing": "#D49A9A"},
+            "presets": [{"name": "My theme", "theme": "forest", "ui_font_size": 17}]
+        });
+        std::fs::write(&config.paths.settings, serde_json::to_vec(&raw).unwrap()).unwrap();
+
+        let loaded = AppConfig::load_with_roots(root.path().to_owned(), &[]).unwrap();
+        assert_eq!(loaded.theme, "obsidian");
+        assert_eq!(loaded.appearance.presets[0].theme, "obsidian");
+        assert_eq!(loaded.appearance.presets[0].name, "My theme");
+        assert_eq!(loaded.appearance.presets[0].ui_font_size, 17);
+        assert_eq!(loaded.appearance.font_family, "Microsoft YaHei UI");
+        assert_eq!(loaded.appearance.text_colors["results.missing"], "#D49A9A");
+        assert_eq!(loaded.language, "cn");
+        assert!(!THEME_IDS.contains(&"forest"));
+        loaded.save().unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&loaded.paths.settings).unwrap()).unwrap();
+        assert_eq!(saved["theme"], "obsidian");
+        assert_eq!(saved["appearance"]["presets"][0]["theme"], "obsidian");
     }
 
     #[test]

@@ -197,6 +197,7 @@ fn recommended_theme_previews_match_distinct_readable_workbench_palettes() {
     .unwrap();
     let ui = AppWindow::new().unwrap();
     ui.window().set_size(slint::LogicalSize::new(1280.0, 800.0));
+    ui.global::<Theme>().set_motion(0.0);
     ui.set_chinese(true);
     ui.show().unwrap();
     crate::theme::apply_theme(&ui, "default-v2");
@@ -215,7 +216,58 @@ fn recommended_theme_previews_match_distinct_readable_workbench_palettes() {
         assert!(contrast(theme.get_dim(), theme.get_panel()) >= 4.5);
         assert!(contrast(theme.get_on_accent(), theme.get_accent()) >= 4.5);
         assert!(contrast(theme.get_ink(), theme.get_selected()) >= 4.5);
+        if crate::theme::theme_id(card.index) == "obsidian" {
+            // Neutral chrome must not inherit the retired green surfaces or accents.
+            for color in [
+                theme.get_bg(),
+                theme.get_panel(),
+                theme.get_raised(),
+                theme.get_hover(),
+                theme.get_ink(),
+                theme.get_dim(),
+                theme.get_muted(),
+                theme.get_accent(),
+                theme.get_selected(),
+                theme.get_checked(),
+                theme.get_player(),
+            ] {
+                let rgb = color.to_argb_u8();
+                assert_eq!(rgb.red, rgb.green);
+                assert_eq!(rgb.green, rgb.blue);
+            }
+            assert!(contrast(theme.get_muted(), theme.get_raised()) >= 4.5);
+            assert!(contrast(theme.get_ink(), theme.get_checked()) >= 4.5);
+            assert!(contrast(theme.get_strong_border(), theme.get_panel()) >= 3.0);
+            for status in [theme.get_mint(), theme.get_warning(), theme.get_danger()] {
+                assert!(contrast(status, theme.get_hover()) >= 4.5);
+            }
+            assert_eq!(theme.get_workbench_backdrop_opacity(), 0.0);
+            assert_eq!(theme.get_normal_canvas(), theme.get_trough());
+            assert!(contrast(theme.get_dim(), theme.get_normal_canvas()) >= 4.5);
+            // Old stored identifiers also render the replacement, not the fallback theme.
+            crate::theme::apply_theme(&ui, "forest");
+            assert_eq!(ui.get_theme_index(), card.index);
+            assert_eq!(theme.get_bg(), card.bg);
+        }
         let pixels = ui.window().take_snapshot().unwrap();
+        if crate::theme::theme_id(card.index) == "obsidian" {
+            let canvas = theme.get_normal_canvas().to_argb_u8();
+            assert!(
+                pixels
+                    .as_bytes()
+                    .chunks_exact(4)
+                    .any(|p| { p[..3] == [canvas.red, canvas.green, canvas.blue] }),
+                "empty waveform must use the dark theme canvas"
+            );
+            let spectral = theme.get_spectral_canvas().to_argb_u8();
+            assert!(
+                !pixels
+                    .as_bytes()
+                    .chunks_exact(4)
+                    .any(|p| { p[..3] == [spectral.red, spectral.green, spectral.blue] }),
+                "spectral data canvas must not fill an empty waveform"
+            );
+        }
         let panel = card.panel.to_argb_u8();
         assert!(
             pixels
