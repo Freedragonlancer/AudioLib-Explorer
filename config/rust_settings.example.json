@@ -1,5 +1,10 @@
 {
-  "language": "en",
+  "language": "system",
+  "appearance": {
+    "font_family": "",
+    "text_colors": {},
+    "presets": []
+  },
   "active_database": null,
   "audition_play_on_single_click": true,
   "play_history_limit": 5000,

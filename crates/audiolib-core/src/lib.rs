@@ -10,6 +10,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 pub mod ai_search;
 pub mod albums;
+pub mod appearance;
 mod audio_file;
 mod audio_range;
 mod audio_source;

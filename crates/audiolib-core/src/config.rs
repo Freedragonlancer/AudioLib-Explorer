@@ -409,6 +409,7 @@ fn deserialize_tags_width<'de, D: serde::Deserializer<'de>>(
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppConfig {
     pub paths: AppPaths,
+    /// `system` (default), `en` or `cn`; resolved by the desktop at startup.
     pub language: String,
     pub playback: serde_json::Value,
     /// Start preview playback when an audio list item is selected by a single click.
@@ -450,6 +451,12 @@ pub struct AppConfig {
     /// Appearance theme identifier from [`THEME_IDS`]; unknown values use [`DEFAULT_THEME`].
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// System font, module text colors and saved appearance presets.
+    #[serde(
+        default,
+        deserialize_with = "crate::appearance::deserialize_appearance"
+    )]
+    pub appearance: crate::appearance::AppearancePreferences,
     /// Interface text size in pixels before the interface scale, clamped to
     /// [`FONT_SIZE_MIN`]..=[`FONT_SIZE_MAX`]; [`DEFAULT_FONT_SIZE`] keeps the design sizes.
     #[serde(default = "default_font_size")]
@@ -489,7 +496,7 @@ pub struct DataSourceFallback {
 struct SavedPreferences {
     #[serde(default)]
     active_database: Option<PathBuf>,
-    #[serde(default = "english")]
+    #[serde(default = "system_language")]
     language: String,
     #[serde(default = "default_playback")]
     playback: serde_json::Value,
@@ -516,6 +523,11 @@ struct SavedPreferences {
     ui_scale_percent: u32,
     #[serde(default = "default_theme", deserialize_with = "lenient_theme")]
     theme: String,
+    #[serde(
+        default,
+        deserialize_with = "crate::appearance::deserialize_appearance"
+    )]
+    appearance: crate::appearance::AppearancePreferences,
     #[serde(default = "default_font_size", deserialize_with = "lenient_font_size")]
     ui_font_size: u32,
     #[serde(default = "default_font_size", deserialize_with = "lenient_font_size")]
@@ -720,8 +732,8 @@ fn lenient_font_size<'de, D: serde::Deserializer<'de>>(
 fn default_true() -> bool {
     true
 }
-fn english() -> String {
-    "en".into()
+fn system_language() -> String {
+    "system".into()
 }
 fn default_playback() -> serde_json::Value {
     serde_json::json!({"backend":"wasapi","device_id":null,"buffer_frames":0,
@@ -823,7 +835,7 @@ impl AppConfig {
                     .map(|path| path.join("resources/audio_terms.txt"))
                     .find(|path| path.is_file()),
             },
-            language: english(),
+            language: system_language(),
             playback: default_playback(),
             audition_play_on_single_click: true,
             stop_playback_on_focus_loss: false,
@@ -835,6 +847,7 @@ impl AppConfig {
             max_search_tasks: DEFAULT_MAX_SEARCH_TASKS,
             ui_scale_percent: 0,
             theme: default_theme(),
+            appearance: Default::default(),
             ui_font_size: DEFAULT_FONT_SIZE,
             list_font_size: DEFAULT_FONT_SIZE,
             search_scope: default_search_scope(),
@@ -897,6 +910,7 @@ impl AppConfig {
             config.max_search_tasks = normalize_max_search_tasks(saved.max_search_tasks);
             config.ui_scale_percent = normalize_ui_scale_percent(saved.ui_scale_percent);
             config.theme = normalize_theme(&saved.theme);
+            config.appearance = saved.appearance.normalized();
             config.ui_font_size = clamp_font_size(i64::from(saved.ui_font_size));
             config.list_font_size = clamp_font_size(i64::from(saved.list_font_size));
             config.search_scope = normalize_search_scope(&saved.search_scope);
@@ -926,8 +940,8 @@ impl AppConfig {
             }
         }
         config.reconcile_local_libraries()?;
-        if config.language != "cn" && config.language != "en" {
-            config.language = english();
+        if !["cn", "en", "system"].contains(&config.language.as_str()) {
+            config.language = system_language();
         }
         for directory in [&root, &config.paths.cache, &config.paths.logs] {
             std::fs::create_dir_all(directory)?;
@@ -956,6 +970,7 @@ impl AppConfig {
             max_search_tasks: normalize_max_search_tasks(self.max_search_tasks),
             ui_scale_percent: normalize_ui_scale_percent(self.ui_scale_percent),
             theme: normalize_theme(&self.theme),
+            appearance: self.appearance.clone().normalized(),
             ui_font_size: clamp_font_size(i64::from(self.ui_font_size)),
             list_font_size: clamp_font_size(i64::from(self.list_font_size)),
             search_scope: normalize_search_scope(&self.search_scope),
@@ -1745,6 +1760,56 @@ mod tests {
     }
 
     #[test]
+    fn appearance_preferences_round_trip_and_recover_independently() {
+        use crate::appearance::{AppearancePreferences, AppearancePreset};
+        let root = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::load_in(root.path().to_owned()).unwrap();
+        config.language = "system".into();
+        config.playback = serde_json::json!({"volume": 0.37});
+        config.appearance.font_family = "Microsoft YaHei UI".into();
+        config
+            .appearance
+            .text_colors
+            .insert("results.missing".into(), "#AABBCC".into());
+        config.appearance.presets.push(AppearancePreset {
+            name: "My studio".into(),
+            theme: STUDIO_THEME.into(),
+            font_family: config.appearance.font_family.clone(),
+            text_colors: config.appearance.text_colors.clone(),
+            ..Default::default()
+        });
+        config.save().unwrap();
+        let loaded = AppConfig::load_in(root.path().to_owned()).unwrap();
+        assert_eq!(loaded.appearance, config.appearance);
+        assert_eq!(loaded.language, "system");
+        for bad in [
+            serde_json::json!(false),
+            serde_json::json!({"font_family": 7, "text_colors":{"results.normal": false, "player.warning":"#bbccdd"}, "presets":[null]}),
+        ] {
+            let mut raw: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&config.paths.settings).unwrap()).unwrap();
+            raw["appearance"] = bad;
+            std::fs::write(&config.paths.settings, serde_json::to_vec(&raw).unwrap()).unwrap();
+            let loaded = AppConfig::load_in(root.path().to_owned()).unwrap();
+            assert_eq!(loaded.language, "system");
+            assert_eq!(loaded.playback["volume"], 0.37);
+            assert!(loaded.appearance.font_family.is_empty());
+            assert!(loaded.appearance.presets.is_empty());
+            if let Some(color) = loaded.appearance.text_colors.get("player.warning") {
+                assert_eq!(color, "#BBCCDD");
+            }
+        }
+        config.appearance = AppearancePreferences::default();
+        config.save().unwrap();
+        assert_eq!(
+            AppConfig::load_in(root.path().to_owned())
+                .unwrap()
+                .appearance,
+            config.appearance
+        );
+    }
+
+    #[test]
     fn theme_and_font_sizes_default_round_trip_and_clamp() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("userdata");
@@ -1752,6 +1817,7 @@ mod tests {
         assert_eq!(config.theme, DEFAULT_THEME);
         assert_eq!(config.ui_font_size, 13);
         assert_eq!(config.list_font_size, 13);
+        assert_eq!(config.language, "system");
         // Settings written before these fields existed load with the defaults.
         config.save().unwrap();
         let mut raw: serde_json::Value =
