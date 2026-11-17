@@ -503,13 +503,101 @@ fn settings_pages_at_2_0_in_1080x700_scroll_to_their_last_controls() {
                 top >= 0.0 && panel_bottom <= 700.0,
                 "panel {top}..{panel_bottom}"
             );
+            let fixed_positions = [
+                ui.get_settings_title_top(),
+                ui.get_settings_navigation_top(),
+                ui.get_settings_content_top(),
+                ui.get_settings_content_bottom(),
+                ui.get_settings_footer_top(),
+                ui.get_settings_last_bottom(),
+            ];
+            assert!(fixed_positions[0] >= top);
+            assert!(fixed_positions[2] > fixed_positions[0]);
+            assert!(fixed_positions[3] > fixed_positions[2]);
+            assert!(
+                ui.get_settings_navigation_bottom() <= ui.get_settings_content_bottom(),
+                "{name}: category navigation must fit above the footer"
+            );
+            assert!(fixed_positions[4] >= fixed_positions[3]);
+            assert!(fixed_positions[5] <= panel_bottom);
+            let initial_page_bottom = ui.get_settings_page_bottom();
             ui.invoke_scroll_main_to_end();
             save_snapshot(&ui, &format!("{name}-{language}-x2-1080x700-scrollmax.png"));
+            let scrolled_positions = [
+                ui.get_settings_title_top(),
+                ui.get_settings_navigation_top(),
+                ui.get_settings_content_top(),
+                ui.get_settings_content_bottom(),
+                ui.get_settings_footer_top(),
+                ui.get_settings_last_bottom(),
+            ];
+            assert_eq!(
+                fixed_positions, scrolled_positions,
+                "{name}: scrolling must keep the title, navigation and footer fixed"
+            );
+            let page_bottom = ui.get_settings_page_bottom();
+            assert!(
+                page_bottom <= ui.get_settings_content_bottom() + 1.0,
+                "{name}: page bottom {page_bottom} must fit the content viewport"
+            );
+            if initial_page_bottom > ui.get_settings_content_bottom() + 1.0 {
+                assert!(
+                    page_bottom < initial_page_bottom,
+                    "{name}: overflowing settings content must actually scroll"
+                );
+            }
             let last = ui.get_settings_last_bottom();
             assert!(
                 last <= panel_bottom && last > top,
                 "{name}: last {last}, panel {top}..{panel_bottom}"
             );
+            if page == 0 || page == 3 {
+                use i_slint_backend_testing::ElementHandle;
+                use slint::platform::{PointerEventButton, WindowEvent};
+
+                let applied = std::rc::Rc::new(std::cell::Cell::new(0));
+                let observed = applied.clone();
+                ui.on_output_apply_requested(move || observed.set(observed.get() + 1));
+                let observed = applied.clone();
+                ui.on_shared_sync_save_requested(move || observed.set(observed.get() + 1));
+                ui.set_output_dirty(page == 0);
+                ui.set_shared_sync_dirty(page == 3);
+                let apply =
+                    ElementHandle::find_by_element_id(&ui, "AppWindow::settings-footer-apply")
+                        .next()
+                        .expect("fixed footer apply action");
+                let origin = apply.absolute_position();
+                let size = apply.size();
+                let position = slint::LogicalPosition::new(
+                    origin.x + size.width / 2.0,
+                    origin.y + size.height / 2.0,
+                );
+                ui.window()
+                    .dispatch_event(WindowEvent::PointerMoved { position });
+                ui.window().dispatch_event(WindowEvent::PointerPressed {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+                ui.window().dispatch_event(WindowEvent::PointerReleased {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+                assert_eq!(applied.get(), 1, "{name}: scrolled footer stays clickable");
+                assert!(ui.get_settings_visible());
+                ui.set_output_dirty(false);
+                ui.set_shared_sync_dirty(false);
+            }
+            // The title close action remains physically clickable after the
+            // settings content reaches its end at the highest supported scale.
+            crate::ui_tests::click_label(
+                &ui,
+                if chinese {
+                    "关闭全局设置"
+                } else {
+                    "Close global settings"
+                },
+            );
+            assert!(!ui.get_settings_visible());
             ui.hide().unwrap();
         }
     }
