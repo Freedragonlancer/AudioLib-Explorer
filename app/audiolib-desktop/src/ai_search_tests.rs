@@ -8,6 +8,200 @@ fn skill_editor_preserves_legacy_and_drafts_and_commits_only_saved_documents() {
 }
 
 #[test]
+fn skill_save_failures_survive_unrelated_saves_until_retry_or_discard() {
+    isolated("ai_search::child_skill_save_failure_identity");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_skill_save_failure_identity() {
+    use audiolib_ai::storage::ProfileStore;
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    let root = fixture.root.join("preferences");
+    ui.invoke_ai_action(22, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    ui.invoke_ai_action(31, 0);
+    ui.set_ai_skill_prompt("saved Skill A".into());
+    ui.set_ai_skill_dirty(true);
+    ui.invoke_ai_action(33, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    let a_id = ui.get_ai_skill_id().to_string();
+    assert!(!a_id.is_empty());
+    assert!(fixture.controller.ai.wait_saves().is_ok());
+
+    let path = root.join("ai/customization.json");
+    let backup = root.join("ai/customization.saved");
+    // The target being a directory deterministically rejects atomic persistence,
+    // without changing permissions or affecting any user-owned configuration.
+    std::fs::rename(&path, &backup).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    ui.set_ai_skill_prompt("failed Skill A edit".into());
+    ui.set_ai_skill_dirty(true);
+    ui.invoke_ai_action(32, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_error());
+    assert!(fixture.controller.ai.wait_saves().is_err());
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&backup, &path).unwrap();
+
+    // A successful write to the very same JSON file saves only behavior; it
+    // must not acknowledge the failed document or release close protection.
+    ui.set_ai_auto_search_count(1);
+    ui.invoke_ai_action(39, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_error());
+    assert!(fixture.controller.ai.wait_saves().is_err());
+    let saved = ProfileStore::open(&root).unwrap();
+    assert_eq!(saved.customization().auto_search_count, 1);
+    assert_eq!(
+        saved.customization().active().unwrap().documents[1],
+        "saved Skill A"
+    );
+    assert_eq!(ui.get_ai_skill_prompt(), "failed Skill A edit");
+    assert!(ui.get_ai_skill_dirty());
+    drop(saved);
+
+    // Provider configuration is another valid durable write, with no external
+    // provider request, and cannot resolve a failed Skill document either.
+    ui.invoke_ai_action(9, 0);
+    ui.set_ai_endpoint("https://owned-ai.example/v1".into());
+    ui.set_ai_model("owned-model".into());
+    ui.invoke_ai_action(8, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_error());
+    assert!(fixture.controller.ai.wait_saves().is_err());
+    assert_eq!(ProfileStore::open(&root).unwrap().profiles().len(), 1);
+
+    // Nor may validation-only rejection erase the retained persistence failure.
+    ui.set_ai_skill_folder(root.to_string_lossy().into_owned().into());
+    ui.invoke_ai_action(41, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_error());
+    assert!(fixture.controller.ai.wait_saves().is_err());
+
+    // Save a different Skill while A's failed draft is retained by navigation.
+    ui.set_ai_skill_index(0);
+    ui.invoke_ai_action(30, 0);
+    ui.invoke_ai_action(31, 0);
+    ui.set_ai_skill_name("Skill B".into());
+    ui.set_ai_skill_prompt("saved Skill B".into());
+    ui.set_ai_skill_dirty(true);
+    ui.invoke_ai_action(32, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_error());
+    assert!(fixture.controller.ai.wait_saves().is_err());
+    let a_index = fixture
+        .controller
+        .ai
+        .skill_ids
+        .lock()
+        .unwrap()
+        .iter()
+        .position(|id| id == &a_id)
+        .unwrap() as i32;
+    ui.set_ai_skill_index(a_index);
+    ui.invoke_ai_action(30, a_index);
+    assert_eq!(ui.get_ai_skill_prompt(), "failed Skill A edit");
+    assert!(ui.get_ai_skill_dirty());
+
+    // Retrying the admitted document, rather than an unrelated write, resolves
+    // its failure and persists the previously retained text.
+    ui.invoke_ai_action(32, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_error());
+    assert!(!ui.get_ai_skill_dirty());
+    assert!(fixture.controller.ai.wait_saves().is_ok());
+    assert_eq!(
+        ProfileStore::open(&root)
+            .unwrap()
+            .customization()
+            .active()
+            .unwrap()
+            .documents[1],
+        "failed Skill A edit"
+    );
+
+    // A later failed edit can also be explicitly abandoned. Discard restores
+    // its saved version and releases only that document's close protection.
+    std::fs::rename(&path, &backup).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    ui.set_ai_skill_prompt("explicitly discarded edit".into());
+    ui.set_ai_skill_dirty(true);
+    ui.invoke_ai_action(32, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(fixture.controller.ai.wait_saves().is_err());
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&backup, &path).unwrap();
+    ui.invoke_ai_action(35, 0);
+    assert_eq!(ui.get_ai_skill_prompt(), "failed Skill A edit");
+    assert!(!ui.get_ai_skill_dirty());
+    assert!(fixture.controller.ai.wait_saves().is_ok());
+
+    // Symmetrically, a provider write cannot acknowledge failed search behavior.
+    std::fs::rename(&path, &backup).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    ui.set_ai_auto_search_count(2);
+    ui.invoke_ai_action(39, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(fixture.controller.ai.wait_saves().is_err());
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&backup, &path).unwrap();
+    ui.invoke_ai_action(8, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_error());
+    assert!(fixture.controller.ai.wait_saves().is_err());
+    assert_eq!(
+        ProfileStore::open(&root)
+            .unwrap()
+            .customization()
+            .auto_search_count,
+        1
+    );
+    ui.invoke_ai_action(39, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(fixture.controller.ai.wait_saves().is_ok());
+    assert_eq!(
+        ProfileStore::open(&root)
+            .unwrap()
+            .customization()
+            .auto_search_count,
+        2
+    );
+
+    // New customization saves also leave a failed legacy-provider-file write
+    // protected; only retrying that prompt can resolve its own failure.
+    let profiles = root.join("ai/profiles.json");
+    let profiles_backup = root.join("ai/profiles.saved");
+    std::fs::rename(&profiles, &profiles_backup).unwrap();
+    std::fs::create_dir(&profiles).unwrap();
+    ui.set_ai_preset_index(1);
+    ui.set_ai_instruction("failed legacy prompt edit".into());
+    ui.invoke_ai_action(15, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_error());
+    assert!(fixture.controller.ai.wait_saves().is_err());
+    std::fs::remove_dir(&profiles).unwrap();
+    std::fs::rename(&profiles_backup, &profiles).unwrap();
+    ui.invoke_ai_action(39, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_error());
+    assert!(fixture.controller.ai.wait_saves().is_err());
+    assert_ne!(
+        ProfileStore::open(&root).unwrap().prompt().effective(),
+        "failed legacy prompt edit"
+    );
+    ui.invoke_ai_action(15, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(fixture.controller.ai.wait_saves().is_ok());
+    assert_eq!(
+        ProfileStore::open(&root).unwrap().prompt().effective(),
+        "failed legacy prompt edit"
+    );
+    finish(&fixture);
+}
+
+#[test]
 #[ignore = "runs in an owned isolated child"]
 fn child_skill_editor() {
     use audiolib_ai::storage::ProfileStore;
