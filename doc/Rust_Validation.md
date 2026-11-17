@@ -1,5 +1,17 @@
 # Rust 验证报告
 
+## 1.0.3 beta 审查与发布准备（2026-11-18）
+
+从 beta `bd1225f` 审查外观、字体、AI Skill 与全局设置改动，候选修复为 `b83d834`。发现并修复 Skill 实际写入失败被无关保存成功掩盖的问题：新增 customization 操作按 Skill ID、搜索行为、兼容选择和导入分别记录失败，只有对应重试成功或明确放弃才解除关闭保护。供应商和兼容提示词的既有错误独立保留。真实 Controller 回归使用自有临时目录制造原子保存失败，验证草稿、磁盘内容、关闭屏障及同文件／跨文件无关操作。
+
+Windows Rust 1.97.1 MSVC、Slint 1.17.1、已核验 ASIO SDK 2.3.4。AI 控制器组合为 39 个不同父测试通过，39 个 ignored 子入口由父测试启动；新增保存失败回归通过。首次完整所选运行 `8a354ef9f8264e36a162bf7bc1cb68bf` 为 38 passed／1 failed／39 ignored，原零命中剪枝用例早于目录模型完整发布取值，单独重跑 `76c90114d1a84e95871d71c5c275f055` 通过。最终仅为四个受影响等待增加既有完整发布条件，数量、顺序和超时断言不变；格式、ASIO all-targets strict Clippy 及修正用例通过于 `ce200eae0d2744c1bedcae1d9e8da3fc`。其他 38 项的应用及测试输入未变，复用原通过身份。更早测试访问私有字段的编译失败单独保留，改为通过公开 ProfileStore 查找 Skill 后编译通过。
+
+外观检查保留真实点击和主题／预设断言，将已经失效的整页跳到底部前置条件改为有界真实滚轮寻找控件。Mac arm64 上的中英文 100%／200%、收起／展开共 8 张软件渲染截图及对应测试通过；Windows 同一修正用例通过于 `8ec134c922694c5dad224ffa3b6ef883`，复用上述静态检查。初始 Mac 用例在改版后的滚动位置找不到控件，其失败与中间尝试均保留，不计为成功。
+
+Linux arm64 使用 Rust 1.97.1、server no-default-features，所选配置 44、外观 2、AI customization/storage/relay 17、remote relay 9、server relay 9，共 81 passed／0 ignored；core/AI/remote/server strict Clippy 通过。Linux x64 在 ARM64 OrbStack 上仿真，同一所选依赖闭包 strict Clippy 通过；功能测试按平台无关输入复用 arm64 和 Windows 证据，未声称 x64 执行 81 项。候选与原检查身份的 crates/server/tools/资源 Git 对象一致，Cargo.lock 仅 11 个本地 workspace 包版本变更，外部依赖不变。
+
+复用本报告 2026-11-16／17 的配置持久化、受争用偏好、AI 设置／Skill 文件夹、主题与固定设置导航的原通过身份。数据库、扫描、Metadata、音频引擎、IPC、更新器和查询性能实现未改，相关 `v1.0.2` 数据安全及平台基线继续适用；本轮不执行无关 workspace 或百万条基准。新增 AI 写入错误归类已有专门回归，另选择原生关闭检查。实际包、原生关闭、beta 同步、发布和安装状态在 [1.0.3 发布记录](Rust_Release_1.0.3.md) 按实际完成收据补齐；本节源码检查不替代最终 main/tag payload 验收。
+
 ## 全局设置固定标题与操作区（2026-11-17，开发验证）
 
 基于 beta `5bfa04f`，分支 `codex/settings-scroll-layout`。全局设置的标题、右上快捷关闭、分类导航和底部关闭／应用操作固定，右侧设置项独立滚动并预留滚动条间距。切换分类从内容开头显示并保留草稿；底部应用提交当前音频或同步页，保存后保持打开，其他偏好继续即时保存。两处关闭入口共用已有未应用草稿确认。200% 小窗口使用紧凑导航，避免最后一个分类进入底部操作区。
