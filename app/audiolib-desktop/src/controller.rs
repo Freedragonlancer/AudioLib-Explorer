@@ -67,6 +67,7 @@ struct ScanTerminal {
 }
 #[path = "ai_search.rs"]
 mod ai_search;
+mod appearance;
 #[cfg(test)]
 #[path = "client_review_tests.rs"]
 mod client_review_tests;
@@ -917,6 +918,10 @@ pub struct Controller {
     scan_ui_poll: AtomicU64,
     shutdown: AtomicBool,
     chinese: AtomicBool,
+    language: Mutex<String>,
+    appearance: Mutex<audiolib_core::appearance::AppearancePreferences>,
+    system_fonts: Mutex<Vec<String>>,
+    system_fonts_started: AtomicBool,
     remote: Mutex<remote_mode::RemoteRuntime>,
     /// The provider is a server snapshot: annotation writes go to the server, structural
     /// library writes are refused.
@@ -1066,7 +1071,9 @@ impl Controller {
         remote: Option<RemoteStartup>,
     ) -> Arc<Self> {
         let playback = platform_playback_config(playback);
-        let chinese = config.language == "cn";
+        let chinese = crate::appearance::chinese(&config.language);
+        ui.set_language_index(crate::appearance::language_index(&config.language));
+        crate::appearance::apply(ui, &config.appearance);
         ui.set_chinese(chinese);
         ui.set_native_macos(cfg!(target_os = "macos"));
         if cfg!(target_os = "macos") {
@@ -1161,6 +1168,10 @@ impl Controller {
             window_layout: Mutex::new(config.window_layout.normalized()),
             single_click_play_pending: Mutex::new(false),
             single_click_play_wake: Condvar::new(),
+            language: Mutex::new(config.language.clone()),
+            appearance: Mutex::new(config.appearance.clone()),
+            system_fonts: Mutex::new(Vec::new()),
+            system_fonts_started: AtomicBool::new(false),
             config: Arc::new(Mutex::new(config)),
             playback: Mutex::new(playback),
             records: Mutex::new(Vec::new()),
@@ -1270,6 +1281,7 @@ impl Controller {
     }
 
     fn bind(self: &Arc<Self>, ui: &AppWindow) {
+        self.bind_appearance(ui);
         self.bind_search_tasks(ui);
         self.bind_ai_search(ui);
         self.bind_artwork(ui);
@@ -2000,32 +2012,6 @@ impl Controller {
                     c.waveform_refresh_file(&c.audio.status(), ui.get_waveform_ready())
                 {
                     c.queue_waveform(&file);
-                }
-            }
-        });
-        let c = self.clone();
-        ui.on_language_requested(move |chinese| {
-            c.chinese.store(chinese, Ordering::Release);
-            let saving = c.clone();
-            std::thread::spawn(move || {
-                let mut config = saving.config.lock().unwrap();
-                config.language = if chinese { "cn" } else { "en" }.into();
-                if let Err(error) = config.save() {
-                    saving.status(error.to_string());
-                }
-                drop(config);
-                saving.reload_tree();
-            });
-            if let Some(ui) = c.ui.upgrade() {
-                c.publish_search_tasks(&ui);
-                c.publish_ai_profiles(&ui);
-                c.request_search(&ui, true, false);
-                c.refresh_library_info();
-                c.publish_data_source(&ui);
-                c.refresh_generated_text(&ui);
-                c.refresh_generated_source_text(&ui);
-                if ui.get_library_visible() {
-                    c.load_history(0);
                 }
             }
         });
@@ -3436,6 +3422,8 @@ impl Controller {
                             c.hold_list_waveform_batches.load(Ordering::Acquire);
                         config.ui_scale_percent = c.ui_scale_percent.load(Ordering::Acquire);
                         config.theme = c.theme.lock().unwrap().clone();
+                        config.language = c.language.lock().unwrap().clone();
+                        config.appearance = c.appearance.lock().unwrap().clone();
                         config.ui_font_size = c.ui_font_size.load(Ordering::Acquire);
                         config.list_font_size = c.list_font_size.load(Ordering::Acquire);
                         config.audio_table = c.audio_table.lock().unwrap().clone();
@@ -8041,6 +8029,8 @@ impl Controller {
             self.hold_list_waveform_batches.load(Ordering::Acquire);
         config.ui_scale_percent = self.ui_scale_percent.load(Ordering::Acquire);
         config.theme = self.theme.lock().unwrap().clone();
+        config.language = self.language.lock().unwrap().clone();
+        config.appearance = self.appearance.lock().unwrap().clone();
         config.ui_font_size = self.ui_font_size.load(Ordering::Acquire);
         config.list_font_size = self.list_font_size.load(Ordering::Acquire);
         config.audio_table = self.audio_table.lock().unwrap().clone();
@@ -10334,6 +10324,7 @@ mod tests {
             hold_list_waveform_batches_after_audition: false,
             ui_scale_percent: 0,
             theme: audiolib_core::config::DEFAULT_THEME.into(),
+            appearance: Default::default(),
             ui_font_size: audiolib_core::config::DEFAULT_FONT_SIZE,
             list_font_size: audiolib_core::config::DEFAULT_FONT_SIZE,
             audio_table: Default::default(),

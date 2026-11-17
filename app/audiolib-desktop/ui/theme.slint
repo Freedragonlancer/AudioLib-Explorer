@@ -3,12 +3,34 @@ import { Slider, CheckBox, LineEdit } from "std-widgets.slint";
 
 // Soft charcoal surfaces and restrained gray-teal actions keep spectral peaks readable.
 export global Theme {
+    in-out property <string> font-family;
+    // Transparent slots inherit the matching General role, then the original theme color.
+    in-out property <[color]> text-colors;
+    public pure function text(module: int, state: int, fallback: color) -> color {
+        let index = module * 15 + state;
+        if state >= 0 && state < 15 && index >= 0 && index < Theme.text-colors.length && Theme.text-colors[index].alpha > 0 { return Theme.text-colors[index]; }
+        if state >= 0 && state < Theme.text-colors.length && Theme.text-colors[state].alpha > 0 { return Theme.text-colors[state]; }
+        return fallback;
+    }
+    public pure function role-default(state: int) -> color {
+        if state == 1 { return Theme.dim; }
+        if state == 2 || state == 3 { return Theme.muted; }
+        if state == 4 || state == 14 { return Theme.accent-hover; }
+        if state == 5 || state == 6 || state == 11 { return Theme.accent; }
+        if state == 7 { return Theme.mint; }
+        if state == 8 || state == 12 || state == 13 { return Theme.warning; }
+        if state == 9 { return Theme.danger; }
+        if state == 10 { return Theme.on-accent; }
+        return Theme.ink;
+    }
     // Workbench and player can be selected independently: Default v2 uses the
     // Studio workbench with the original beta player.
     in-out property <bool> modern-style: false;
     in-out property <bool> modern-player: false;
-    // Studio keeps its warm surface artwork; Default v2 blends it into graphite.
-    out property <float> workbench-backdrop-opacity: Theme.modern-player ? 1.0 : 0.22;
+    // Studio keeps its artwork; the recommended palettes paint solid surfaces.
+    in-out property <bool> pure-black-workspace: false;
+    in-out property <bool> tinted-surfaces: false;
+    out property <float> workbench-backdrop-opacity: Theme.tinted-surfaces ? 0 : Theme.modern-player ? 1.0 : 0.22;
     // GUI scale factor selected by the interface Appearance setting.
     // Literal lengths are written as `Npx * Theme.ui-scale`. 0px and 1px hairlines
     // (borders, separators, `/ 1px` unit conversions) stay unscaled.
@@ -88,10 +110,10 @@ export global Theme {
     out property <image> tab-indicator: Theme.modern-style ? Theme.studio-tab-indicator : Theme.empty-backdrop;
     out property <color> toolbar-surface: Theme.modern-player ? #28282a : Theme.bg;
     out property <color> rail-surface: Theme.modern-player ? #2a2b2e : Theme.panel;
-    out property <color> library-surface: Theme.modern-player ? #202224 : Theme.panel;
+    out property <color> library-surface: Theme.pure-black-workspace ? Theme.bg : (Theme.modern-player ? #202224 : Theme.panel);
     out property <color> inspector-surface: Theme.modern-player ? #202224 : Theme.panel;
     out property <color> player-surface: Theme.modern-player ? #202225 : Theme.player;
-    out property <color> table-surface: Theme.modern-player ? #1d1f21 : Theme.panel;
+    out property <color> table-surface: Theme.pure-black-workspace ? Theme.bg : (Theme.modern-player ? #1d1f21 : Theme.panel);
     out property <color> table-alternate: Theme.modern-player ? #1f2123 : Theme.alternate;
     out property <brush> control-surface: Theme.modern-player ? @linear-gradient(180deg, #2e3033 0%, #25272a 100%) : Theme.raised;
     out property <brush> control-hover-surface: Theme.modern-player ? @linear-gradient(180deg, #373a3d 0%, #2c3033 100%) : Theme.hover;
@@ -101,7 +123,7 @@ export global Theme {
     out property <brush> tab-surface: Theme.modern-player ? @linear-gradient(180deg, #343537 0%, #272a2c 100%) : Theme.panel;
     // Not themeable. Matches the pixel renderer. Frequency hues and noise-to-black are audio data.
     out property <color> spectral-canvas: #849094;
-    out property <color> normal-canvas: Theme.modern-player ? transparent : #1d2328;
+    out property <color> normal-canvas: Theme.modern-player ? transparent : (Theme.tinted-surfaces ? Theme.trough : #1d2328);
     // Motion. Transitions stay short and ease out; nothing bounces or travels far.
     // `motion` scales every duration below: 1 keeps the designed timing, 0 turns
     // transitions off (state changes then apply immediately).
@@ -173,6 +195,7 @@ export component ThemedSlider inherits Rectangle {
 }
 
 export component ThemedCheckBox inherits Rectangle {
+    in property <int> text-module: 0;
     in property <string> text <=> native.text;
     in property <bool> enabled <=> native.enabled;
     in-out property <bool> checked <=> native.checked;
@@ -202,13 +225,14 @@ export component ThemedCheckBox inherits Rectangle {
             }
         }
         if root.text != "": Text {
-            text: root.text; color: Theme.ink; vertical-alignment: center;
+            text: root.text; color: Theme.text(root.text-module, root.enabled ? 0 : 3, Theme.ink); vertical-alignment: center;
             opacity: root.enabled ? 1 : 0.45;
         }
     }
 }
 
 export component ThemedLineEdit inherits Rectangle {
+    in property <int> text-module: 0;
     in property <string> input-label;
     in property <bool> enabled <=> native.enabled;
     in property <string> placeholder-text <=> native.placeholder-text;

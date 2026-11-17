@@ -1239,6 +1239,16 @@ fn view_language_menu_dispatches_quick_switches_in_every_theme() {
                 );
             }
             assert_eq!(&*requests.borrow(), &[!initial_chinese, initial_chinese]);
+            let mode = Rc::new(RefCell::new(-1));
+            let observed = mode.clone();
+            ui.on_language_mode_requested(move |index| *observed.borrow_mut() = index);
+            let (view, language, follow) = if ui.get_chinese() {
+                ("视图", "语言", "跟随系统")
+            } else {
+                ("View", "Language", "Follow system")
+            };
+            click_submenu_item(&ui, view, language, follow);
+            assert_eq!(*mode.borrow(), 0);
             ui.hide().unwrap();
         }
     }

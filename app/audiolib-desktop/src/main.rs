@@ -1,6 +1,9 @@
 // app/audiolib-desktop/src/main.rs
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod album_override_migration;
+mod appearance;
+#[cfg(test)]
+mod appearance_tests;
 mod artwork;
 #[cfg(test)]
 mod close_tests;
@@ -154,7 +157,10 @@ fn report_fatal_error(error: &anyhow::Error) {
     let chinese = std::fs::read(root.join("settings.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .is_some_and(|settings| settings["language"].as_str() == Some("cn"));
+        .map_or_else(
+            || appearance::chinese("system"),
+            |settings| appearance::chinese(settings["language"].as_str().unwrap_or("system")),
+        );
     let diagnostic = match (result, chinese) {
         (Ok(()), true) => format!(
             "启动失败，请查看以下诊断信息。\n{message}\n\n日志：{}",
@@ -323,11 +329,13 @@ fn run() -> Result<()> {
     };
     window_repaint::install(ui.window());
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
-    ui.set_chinese(config.language == "cn");
+    ui.set_chinese(appearance::chinese(&config.language));
+    ui.set_language_index(appearance::language_index(&config.language));
     // Apply the saved workbench before the startup window opens. Opening or
     // upgrading a large library must not temporarily show the default theme.
     theme::apply_theme(&ui, &config.theme);
     theme::apply_font_sizes(&ui, config.ui_font_size, config.list_font_size);
+    appearance::apply(&ui, &config.appearance);
     // Smoke runs keep the design layout so screenshots stay deterministic.
     let restore_layout = !arguments.iter().any(|argument| argument == "--smoke-ui");
     if restore_layout {
@@ -364,6 +372,7 @@ fn run() -> Result<()> {
         playback,
         remote,
     );
+
     let updates = updates::DesktopUpdates::install(&ui, controller.clone(), &arguments);
     let close_control = controller.clone();
     let close_ui = ui.as_weak();
@@ -396,8 +405,7 @@ fn run() -> Result<()> {
             .find(|pair| pair[0] == "--smoke-language")
             .map(|pair| pair[1].as_str())
         {
-            ui.set_chinese(language == "cn");
-            ui.invoke_language_requested(language == "cn");
+            ui.invoke_language_mode_requested(appearance::language_index(language));
         }
         let smoke_view = arguments
             .windows(2)

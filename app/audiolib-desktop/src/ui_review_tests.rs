@@ -383,6 +383,122 @@ fn global_settings_apply_and_close_waits_for_each_independent_save() {
 }
 
 #[test]
+fn global_settings_footer_applies_only_current_page_and_blocks_busy_saves() {
+    use i_slint_backend_testing::ElementHandle;
+
+    i_slint_backend_testing::init_no_event_loop();
+    for chinese in [false, true] {
+        let ui = window();
+        ui.set_chinese(chinese);
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let observed = actions.clone();
+        ui.on_output_apply_requested(move || observed.borrow_mut().push("audio"));
+        let observed = actions.clone();
+        ui.on_shared_sync_save_requested(move || observed.borrow_mut().push("sync"));
+        ui.invoke_open_global_settings(0);
+        ui.set_output_dirty(true);
+        ui.set_shared_sync_dirty(true);
+        let apply = ElementHandle::find_by_element_id(&ui, "AppWindow::settings-footer-apply")
+            .next()
+            .expect("settings footer apply action");
+        assert_eq!(apply.accessible_enabled(), Some(true));
+        apply.invoke_accessible_default_action();
+        assert_eq!(&*actions.borrow(), &["audio"]);
+        assert!(ui.get_settings_visible());
+        assert!(ui.get_shared_sync_dirty(), "another page keeps its draft");
+
+        for busy in 0..3 {
+            ui.set_output_applying(busy == 0);
+            ui.set_shared_sync_busy(busy == 1);
+            ui.set_devices_loading(busy == 2);
+            assert_eq!(apply.accessible_enabled(), Some(false));
+            apply.invoke_accessible_default_action();
+            assert_eq!(&*actions.borrow(), &["audio"]);
+        }
+        ui.set_devices_loading(false);
+        ui.set_output_dirty(false);
+        assert_eq!(apply.accessible_enabled(), Some(false));
+        apply.invoke_accessible_default_action();
+        assert_eq!(&*actions.borrow(), &["audio"]);
+
+        ui.set_output_dirty(true);
+        ui.invoke_open_global_settings(3);
+        assert_eq!(apply.accessible_enabled(), Some(true));
+        apply.invoke_accessible_default_action();
+        assert_eq!(&*actions.borrow(), &["audio", "sync"]);
+        assert!(ui.get_output_dirty(), "sync apply retains the audio draft");
+        assert!(ui.get_settings_visible());
+        ui.set_shared_sync_busy(true);
+        assert_eq!(apply.accessible_enabled(), Some(false));
+        apply.invoke_accessible_default_action();
+        assert_eq!(&*actions.borrow(), &["audio", "sync"]);
+        ui.set_shared_sync_busy(false);
+        ui.set_shared_sync_dirty(false);
+        assert_eq!(apply.accessible_enabled(), Some(false));
+
+        // Immediate-preference pages cannot submit an unrelated pending form.
+        ui.set_shared_sync_dirty(true);
+        for page in [1, 2, 4] {
+            ui.invoke_open_global_settings(page);
+            assert_eq!(apply.accessible_enabled(), Some(false));
+            apply.invoke_accessible_default_action();
+            assert_eq!(&*actions.borrow(), &["audio", "sync"]);
+        }
+        ui.invoke_open_global_settings(0);
+        ui.invoke_request_close_settings();
+        assert_eq!(apply.accessible_enabled(), Some(false));
+        apply.invoke_accessible_default_action();
+        assert_eq!(&*actions.borrow(), &["audio", "sync"]);
+        assert!(ui.get_settings_visible());
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
+fn global_settings_title_close_preserves_pending_drafts_and_busy_operations() {
+    i_slint_backend_testing::init_no_event_loop();
+    for chinese in [false, true] {
+        let ui = window();
+        ui.set_chinese(chinese);
+        ui.invoke_open_global_settings(1);
+        let close = if chinese {
+            "关闭全局设置"
+        } else {
+            "Close global settings"
+        };
+        click_label(&ui, close);
+        assert!(!ui.get_settings_visible());
+
+        ui.invoke_open_global_settings(0);
+        ui.set_output_dirty(true);
+        ui.set_buffer_frames("pending draft".into());
+        ui.set_output_applying(true);
+        click_label(&ui, close);
+        assert!(ui.get_settings_visible());
+        assert!(ui.get_output_dirty());
+        ui.set_output_applying(false);
+        click_label(&ui, close);
+        assert!(ui.get_settings_visible());
+        assert!(ui.get_output_dirty());
+        click_label(&ui, if chinese { "返回" } else { "Keep open" });
+        assert_eq!(ui.get_buffer_frames(), "pending draft");
+        assert!(ui.get_output_dirty());
+        click_label(&ui, close);
+        click_label(
+            &ui,
+            if chinese {
+                "放弃并关闭"
+            } else {
+                "Discard and close"
+            },
+        );
+        assert!(!ui.get_settings_visible());
+        assert!(!ui.get_output_dirty());
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
 fn settings_categories_are_reachable_and_operable_from_the_keyboard() {
     i_slint_backend_testing::init_no_event_loop();
     for chinese in [false, true] {

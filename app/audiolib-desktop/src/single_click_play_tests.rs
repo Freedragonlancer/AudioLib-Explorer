@@ -75,6 +75,11 @@ fn child_contended_preference_shutdown() {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
+    for index in [1, 2, 0, 1, 2, 0] {
+        ui.invoke_language_mode_requested(index);
+    }
+    assert_eq!(ui.get_language_index(), 0);
+    assert_eq!(ui.get_chinese(), crate::appearance::chinese("system"));
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let held = Arc::new(AtomicBool::new(false));
     let writer_held = held.clone();
@@ -97,6 +102,45 @@ fn child_contended_preference_shutdown() {
         ui.set_audition_play_on_single_click(enabled);
         ui.invoke_single_click_play_requested(enabled);
     }
+    ui.invoke_font_family_requested("Microsoft YaHei UI".into());
+    assert_eq!(ui.get_system_font_index(), 1);
+    assert_eq!(
+        ui.get_system_fonts().row_data(1).unwrap(),
+        "Microsoft YaHei UI"
+    );
+    ui.set_text_module(2);
+    ui.set_text_state(12);
+    ui.invoke_text_color_requested("#bada55".into());
+    ui.invoke_recommended_theme_requested(crate::theme::theme_index("ocean"));
+    assert!(controller.appearance.lock().unwrap().text_colors.is_empty());
+    assert_eq!(ui.get_theme_index(), crate::theme::theme_index("ocean"));
+    assert_eq!(ui.get_font_family(), "Microsoft YaHei UI");
+    ui.invoke_recommended_theme_requested(crate::theme::theme_index("default"));
+    assert_eq!(ui.get_theme_index(), crate::theme::theme_index("default"));
+    assert_eq!(ui.get_font_family(), "Microsoft YaHei UI");
+    assert!(controller.appearance.lock().unwrap().text_colors.is_empty());
+    ui.invoke_text_color_requested("#bada55".into());
+    ui.set_appearance_preset_name("Review palette".into());
+    ui.invoke_appearance_preset_requested(1);
+    ui.invoke_text_color_requested("invalid".into());
+    assert!(ui.get_text_color_error());
+    ui.invoke_text_colors_reset();
+    assert!(controller.appearance.lock().unwrap().text_colors.is_empty());
+    ui.invoke_recommended_theme_requested(crate::theme::theme_index("obsidian"));
+    ui.invoke_appearance_preset_requested(0);
+    assert_eq!(ui.get_theme_index(), crate::theme::theme_index("default"));
+    assert_eq!(ui.get_text_color_value(), "#BADA55");
+    ui.invoke_text_color_requested("#abc123".into());
+    ui.invoke_appearance_preset_requested(2);
+    ui.invoke_text_colors_reset();
+    ui.invoke_appearance_preset_requested(0);
+    assert_eq!(ui.get_text_color_value(), "#ABC123");
+    ui.set_appearance_preset_name("Second palette".into());
+    ui.invoke_appearance_preset_requested(1);
+    ui.invoke_appearance_preset_requested(4);
+    ui.set_appearance_preset_index(0);
+    ui.set_appearance_preset_name("Renamed palette".into());
+    ui.invoke_appearance_preset_requested(3);
     let elapsed = started.elapsed();
     let returned_while_locked = held.load(Ordering::Acquire);
     // Closing immediately must persist the last request even if the save worker
@@ -105,7 +149,13 @@ fn child_contended_preference_shutdown() {
     slow_writer.join().unwrap();
     let saved = AppConfig::load_in(root).unwrap();
     assert!(saved.audition_play_on_single_click);
-    assert_eq!(saved.language, "cn");
+    assert_eq!(saved.language, "system");
+    assert_eq!(saved.appearance.font_family, "Microsoft YaHei UI");
+    assert_eq!(saved.appearance.text_colors["results.missing"], "#ABC123");
+    assert_eq!(saved.appearance.presets.len(), 1);
+    assert_eq!(saved.appearance.presets[0].name, "Renamed palette");
+    assert_eq!(saved.theme, "default");
+    assert_eq!(saved.appearance.presets[0].theme, "default");
     assert_eq!(saved.playback["volume"], serde_json::json!(0.25));
     println!("Preference callbacks returned in {elapsed:?}");
     assert!(

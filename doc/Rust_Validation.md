@@ -1,5 +1,135 @@
 # Rust 验证报告
 
+## 1.0.3 beta 审查与发布准备（2026-11-18）
+
+从 beta `bd1225f` 审查外观、字体、AI Skill 与全局设置改动，候选修复为 `b83d834`。发现并修复 Skill 实际写入失败被无关保存成功掩盖的问题：新增 customization 操作按 Skill ID、搜索行为、兼容选择和导入分别记录失败，只有对应重试成功或明确放弃才解除关闭保护。供应商和兼容提示词的既有错误独立保留。真实 Controller 回归使用自有临时目录制造原子保存失败，验证草稿、磁盘内容、关闭屏障及同文件／跨文件无关操作。
+
+Windows Rust 1.97.1 MSVC、Slint 1.17.1、已核验 ASIO SDK 2.3.4。AI 控制器组合为 39 个不同父测试通过，39 个 ignored 子入口由父测试启动；新增保存失败回归通过。首次完整所选运行 `8a354ef9f8264e36a162bf7bc1cb68bf` 为 38 passed／1 failed／39 ignored，原零命中剪枝用例早于目录模型完整发布取值，单独重跑 `76c90114d1a84e95871d71c5c275f055` 通过。最终仅为四个受影响等待增加既有完整发布条件，数量、顺序和超时断言不变；格式、ASIO all-targets strict Clippy 及修正用例通过于 `ce200eae0d2744c1bedcae1d9e8da3fc`。其他 38 项的应用及测试输入未变，复用原通过身份。更早测试访问私有字段的编译失败单独保留，改为通过公开 ProfileStore 查找 Skill 后编译通过。
+
+外观检查保留真实点击和主题／预设断言，将已经失效的整页跳到底部前置条件改为有界真实滚轮寻找控件。Mac arm64 上的中英文 100%／200%、收起／展开共 8 张软件渲染截图及对应测试通过；Windows 同一修正用例通过于 `8ec134c922694c5dad224ffa3b6ef883`，复用上述静态检查。初始 Mac 用例在改版后的滚动位置找不到控件，其失败与中间尝试均保留，不计为成功。
+
+Linux arm64 使用 Rust 1.97.1、server no-default-features，所选配置 44、外观 2、AI customization/storage/relay 17、remote relay 9、server relay 9，共 81 passed／0 ignored；core/AI/remote/server strict Clippy 通过。Linux x64 在 ARM64 OrbStack 上仿真，同一所选依赖闭包 strict Clippy 通过；功能测试按平台无关输入复用 arm64 和 Windows 证据，未声称 x64 执行 81 项。候选与原检查身份的 crates/server/tools/资源 Git 对象一致，Cargo.lock 仅 11 个本地 workspace 包版本变更，外部依赖不变。
+
+复用本报告 2026-11-16／17 的配置持久化、受争用偏好、AI 设置／Skill 文件夹、主题与固定设置导航的原通过身份。数据库、扫描、Metadata、音频引擎、IPC、更新器和查询性能实现未改，相关 `v1.0.2` 数据安全及平台基线继续适用；本轮不执行无关 workspace 或百万条基准。新增 AI 写入错误归类已有专门回归，另选择原生关闭检查。实际包、原生关闭、beta 同步、发布和安装状态在 [1.0.3 发布记录](Rust_Release_1.0.3.md) 按实际完成收据补齐；本节源码检查不替代最终 main/tag payload 验收。
+
+## 全局设置固定标题与操作区（2026-11-17，开发验证）
+
+基于 beta `5bfa04f`，分支 `codex/settings-scroll-layout`。全局设置的标题、右上快捷关闭、分类导航和底部关闭／应用操作固定，右侧设置项独立滚动并预留滚动条间距。切换分类从内容开头显示并保留草稿；底部应用提交当前音频或同步页，保存后保持打开，其他偏好继续即时保存。两处关闭入口共用已有未应用草稿确认。200% 小窗口使用紧凑导航，避免最后一个分类进入底部操作区。
+
+Windows Rust 1.97.1 MSVC、Slint 1.17.1、已核验 ASIO SDK 2.3.4。最终格式、desktop ASIO all-targets strict Clippy 和 8 个不同测试通过，0 ignored：全局设置草稿／应用／关闭 4 项，五个设置页的中英文 200% 滚动及按钮实际点击 1 项，隐藏页焦点 1 项，分类键盘操作 1 项，模态焦点边界 1 项。最终静态检查及缩放测试为 `.rust-validation/local-checks/1f3a057115eb44e190d7ee82b06c4e91/`；其余最终测试依次为 `6ad8f0ac27db48e8a93433ce05cc3863`、`a0f9fe774635466c913209015f4995f7`、`600188768f814ecf9d4fe9b3fd189efd`、`81ab0dc4094e4079aef4d8b55f720b18`。后四次只执行所选测试，复用同一份最终静态检查。
+
+最终 20 张 1080×700 中英文 200% 软件渲染截图在 `.rust-validation/settings-scroll/screenshots/`，已核对代表截图；断言覆盖滚动前后标题／导航／操作区位置不变、内容末端可达、导航完整处于底部操作区上方，以及底部应用和右上关闭的真实坐标点击。另构建 ASIO debug 开发载荷，在隔离 `AUDIOLIB_DATA_DIR` 中实际检查原生 200% 滚动、右上关闭及底部应用同步草稿成功后保持打开，并正常退出；随后只收紧导航尺寸，最终源码由上述软件渲染与完整所选测试核验。原生观察、开发构建日志及清理日志在 `.rust-validation/settings-scroll/`。
+
+范围复用：本报告原始默认／黑曜设置验证及推荐主题重构的配置、数据库、扫描、Metadata、IPC／音频后端基线仍适用。本轮仅调整设置布局和复用既有回调，存储、配置写入排序、关闭排空、依赖及后端实现不变；未重复 workspace、跨进程数据安全全套、性能基准或真实 ASIO 硬件验收。本轮为开发验证，未打包、发布或更新 `local_release/`，工作资料库与偏好保持原状。完成全部检查后统一执行已登记目标的 `Intermediate` 零中间文件预算清理，通过；逻辑空间估计移除 35.79 GiB，保留最终产物约 2.77 GiB，无阻塞维护项。
+
+## Skill 本地文件夹快捷入口（2026-11-17，beta）
+
+基于 beta `3607fce`，分支 `codex/ai-skill-open-folder`。Skill 页新增“打开本地文件夹”，在后台为当前内置／自定义内容准备本地查看副本，并复用已有 Explorer／Finder 文件夹入口。查看副本包含三份编辑文档及完整内置参考文件，位于数据目录 `ai/skill-files/`；按内容复用，后续修订使用不同目录，已有外部编辑不覆盖。草稿不因此保存或启用，外部编辑可显式重新导入；原供应商、密钥和配置格式不变。
+
+Windows Rust 1.97.1 MSVC、已核验 ASIO SDK 2.3.4；格式、desktop ASIO all-targets strict Clippy 与 `--bin AudioLibExplorer skill_` 对应的 4 项测试通过，记录 `.rust-validation/local-checks/157ee8228524441f9e11ea7912b4d8ee/`。两项新增回归覆盖参考文件齐全、重复打开保留外部编辑、修订隔离、导入衔接及未知缓存拒绝；既有 Skill 保存/兼容父测试和界面测试也通过。1 个 ignored 入口由父测试实际启动，不属于缺失覆盖。中英文、100%/150%/200% 组合共 20 张截图位于 `.rust-validation/ai-skill-folder/screenshots/`，已检查代表截图，实际按钮点击正确派发打开操作。
+
+本轮仅改变桌面设置与附属查看文件；配置保存、关闭排空、业务数据、AI 协议及平台文件夹打开实现未改动，复用下面 AI 设置记录的后端、remote/server、原生关闭与兼容验证，未重复无关全包或数据安全全套。Explorer／Finder 由已有原生入口打开，未新增平台 shell 实现；Mac 原生交互本轮未验证。沿用已授权的 beta 和本地交付流程，从最终合并身份运行 `windows-local`，实际包验收、固定安装及统一缓存清理以该次管线收据为准。
+
+## AI 设置与 Skill 文档管理（2026-11-17，开发验证）
+
+基于 beta `8c344c2`，分支 `codex/ai-settings-skill-editor`。AI 设置拆为供应商、Skill 与文件、搜索行为；自定义方案支持复制、改名、三份 Markdown 文档编辑、逐文件启用、合并预览、保存/启用、删除确认及文件夹导入导出。搜索行为可保存分层、自动搜索开关和 1–3 个自动任务数量。说明见 [AI 智能搜索](Rust_AI_Search.md)。
+
+旧 `ai/profiles.json` 的供应商、加密密钥和 2000 字兼容提示词格式不变；新增 `ai/customization.json` 原子保存文档及行为，不改工作库。无新增配置文件时保留当前会话控制值，避免首次加载覆盖旧行为。已保存的启用方案参与生成，草稿不发送；输入校验拒绝不阻止正常关闭，也不会清除先前真正的写入失败状态。实际持久化失败保留原配置和关闭保护，重试后解除。
+
+Windows Rust 1.97.1 MSVC、Slint 1.17.1、已核验 ASIO SDK 2.3.4。最终格式检查、desktop ASIO all-targets strict Clippy、AI/remote/server no-default-features all-targets strict Clippy 均通过。功能验证使用隔离目录、本机 HTTP mock 和现有测试入口：
+
+| 范围 | 结果与证据（`.rust-validation/local-checks/`） |
+| --- | --- |
+| AI 后端 | 59 项通过，初始 `e10248e2b5c54bb98da66ba087d79dfc`；最终存储/兼容补修后重新验证 customization 4 项 `87f26ff6c1674ea19dcd31ee9671ea58`、storage 7 项 `6fbb7d1d2f1b436e8e9b4765014ee1a7`、relay 6 项 `7b465836c52a4fda8c27aa9da6d38007`。未变的参考检索、Jev 和供应商协议测试复用首轮结果，不重复计数 |
+| 桌面 AI 控制器 | 38 个不同父测试通过：37 项 `3b461096740243cea8f905cd930d1207`，转发生成补修 `b691932af45f44fbbe5651205b0da631`；最终 Skill 编辑/保存失败/无效导入回归及 strict Clippy 为 `9e0fc7672b3c4ab2bb476fa26b8ee06e`。父测试实际启动相应隔离子测试，忽略标记仅用于避免直接重复运行子入口 |
+| 远程与服务器直接调用方 | remote AI relay 9 项 `02d59ad3c4a04d65a838337fa6cf2db8`，server `--test ai_relay` 9 项 `b393e5854640478dab2082538cc5b8eb`；三包 strict Clippy `1d6737e26a974427b60072f4153fa1b6` |
+| 界面 | 最终 1 项真实 Slint 软件渲染/按钮点击检查 `983785f58c72416b9193c647e273b88e`。中英文、1080×700/1440×900 与 100%/150%/200% 组合共 20 张截图在 `.rust-validation/ai-settings/screenshots/*-x*.png`；已查看，保存/管理按钮固定底部，高缩放采用单行导航和更高设置面板 |
+| 原生关闭 | 当前开发源码构建 desktop/CLI ASIO debug 载荷，许可证预检通过；`validate-desktop-close.ps1` 的 WM_CLOSE/SC_CLOSE 各 3 次通过，正常排空且空库可重开。构建、验收及二进制哈希证据在 `.rust-validation/ai-settings/native-build.log`、`native-close.log`、`native-close-report.json` |
+
+初轮控制器回归发现首次加载错误覆盖会话中的自动搜索/分层选择，已修复并覆盖旧默认与显式保存两条路径。Windows mock relay 接受的 socket 改为显式阻塞读取配合已有超时，消除非阻塞读竞争；随后端到端检查确认合并的自定义 Skill 实际随转发生成请求发送。两个问题均已重跑相应检查，不将初轮失败当作通过。
+
+稳定范围：数据库、扫描、Metadata、普通配置写入机制、IPC、音频后端及离线参考数据均未改动；复用本文 2026-11-16/17 设置和关闭基线，以及 AI 搜索文档中的既有子系统验收。新增文档写入及关闭错误归类已由上述专门回归和原生关闭覆盖；没有变更跨实例锁或 release CLI 数据保全路径，因此未重跑完整 review-fixes、音库管理、workspace 或百万条基准。实际付费供应商及线上服务器未调用；旧转发服务器使用超过 2000 字的新 Skill 需升级，64 KiB 请求体上限仍保留。
+
+上述开发验证未发布、打包或部署；原生启动和保存检查均使用临时数据，未修改日常音库与设置。随后用户要求合入 beta 并本地交付，沿用 `windows-local` 计划从最终合并身份更新固定 `local_release/`；实际包验收、安装身份/启动和交付后的统一缓存清理以该次管线收据为准，复用上述输入未变的源码验证。
+
+任务结束执行已登记目标的 `Intermediate` / 0 GiB 中间产物清理，通过；按逻辑大小删除约 43.97 GiB，保留约 2.76 GiB 的根级最终产物等受保护内容。无维护阻塞或未核验目标；SDK、dist、安装及音源保留。证据 `.rust-validation/ai-settings/cache-cleanup.log`。
+
+## 原始默认预设与 OLED 纯黑黑曜（2026-11-17，beta）
+
+基于 beta `934f362`，分支 `codex/oled-obsidian-classic-preset`。主题设置新增紧凑的「原始默认」入口，复用既有 `default` 标识、原始 palette 和 Classic 布局，无新增存储格式；通过已有推荐主题回调应用，清除文字覆盖并保留字体。黑曜将窗口、素材导航、结果列表底层、播放器和空波形改为不透明 `#000000`，详情/对话框面板为 `#0C0C0C`，浮层为 `#181818`；柔白文字和选中灰阶独立保留。纯黑工作区标志在切换到其他主题时复位。设计继续使用架构说明链接的 frontend-design 与 Carbon 方法，不改变音频频谱的数据颜色。
+
+Windows Rust 1.97.1 MSVC、Slint 1.17.1、已核验 ASIO SDK 2.3.4。最终格式及 desktop all-targets strict Clippy 通过；11 个不同测试通过、0 ignored：外观 4，主题注册/切换 3，Rust 默认主题与 Slint 默认渲染逐像素一致 1，200% 设置页滚动 1，隐藏设置页键盘焦点 1，受争用偏好保存/关闭 1。控制器回归同时覆盖原始默认的命名预设保存/加载和最终持久化，并保留字体及关闭排空断言。
+
+实际软件渲染截图位于 `.rust-validation/oled-classic/screenshots/`：已检查纯黑工作区、原始默认和五个预设入口，以及中英文 100%/200% 设置布局。1280×800 空工作区断言超过 35% 的像素为不透明黑色，避免仅 token 值正确或被背景贴图抬亮。黑曜主文字/面板对比度 12.68:1，弱化文字/浮层 6.00:1；四套重设计主题保留完整状态文字对比度检查，原始默认 palette 按用户要求保持原样。像素验证针对渲染输出，未测量实体 OLED 面板。
+
+首轮 `.rust-validation/local-checks/beaf347ca35e4ad2acf958be15c69589` 的两个截图测试因执行环境把 PowerShell provider 前缀写入输出路径而失败；改用 `$PWD.ProviderPath` 构造原生 UNC 路径后重跑通过，无应用逻辑补丁。最终日志：外观/静态检查 `f0a70868ef1e4b4889a4cf94c5a39f84`、主题 `5ac2a1baabe740a3be823e9ce56d9454`、默认像素 `83630d9d5aa54d099e0f000251286adf`、缩放 `cb13ea1e1a8346db97a77d8a2729ea96`、焦点 `77c9a6ab38ac4770bedc097f66fd93c9`、保存 `c15dd641d9694b799054bece8493f936`，均在 `.rust-validation/local-checks/`。
+
+范围复用：`934f362` 的 core/CLI、配置规范化和保存机制，以及前两节经典播放器、数据库、扫描、Metadata、IPC/音频后端基线仍适用；本轮只扩展既有 UI 选择入口及配色/布局，没有修改依赖、业务数据或存储边界。未重复 workspace、数据安全全套、性能基准或真实 ASIO 硬件验收。沿用 `windows-local` 计划从最终合并身份交付固定 `local_release/`，实际包验收、安装身份/启动和统一缓存清理以该次管线收据为准。
+
+## 其余三套推荐主题优化（2026-11-16，beta）
+
+在护眼黑曜 PR #323 合并后的 `9741cca` 上，按用户追加要求优化石墨、深海蓝和暖砂琥珀，分支 `codex/recommended-palette-refinement`。沿用 frontend-design 与 Carbon 的设计方法：石墨为冷灰/雾银，深海蓝为低饱和蓝灰，琥珀为暖灰/淡砂金；完整 token 表及参考链接见 [架构说明](Rust_Architecture.md)。主题标识、字体、预设及设置结构不变。石墨也停用旧 Studio 背景贴图，四张推荐卡片与主界面、播放器和空波形共用配色。
+
+Windows Rust 1.97.1 MSVC，Slint 1.17.1，已核验 ASIO SDK 2.3.4。最终 desktop all-targets strict Clippy、格式检查通过。外观 4 passed、主题注册/切换 3 passed、受争用偏好保存/关闭 1 passed，共 8 个不同测试、0 ignored；源码未变化的 core/CLI 检查与前节 46 个配置测试、3 个经典播放器回归沿用 `9741cca` 基线。无新依赖、持久化或播放算法变化，不扩大到 workspace、数据安全脚本或硬件验收。
+
+四套实际主界面和中英文 100%/200% 设置截图已检查，保存在 `.rust-validation/refined-themes/screenshots/`。三套新主文字/面板对比度分别为 11.19、11.41、11.31:1，弱化文字/浮层至少 5.25:1；全部推荐主题的选中、勾选、强调背景和语义状态文字通过 4.5:1 检查，强边框/面板至少 3:1。每套均检查空波形采用深色画布且不显示固定频谱底色。首轮设置交互测试因写死旧 Ocean RGB 失败，改为验证鼠标/辅助功能选中后实际背景匹配卡片预览，保留主题身份及可达性断言；最终回归通过。
+
+日志在 `.rust-validation/local-checks/`：首轮 `0cd1481e9fa04c97b21760df203c5afe`，最终外观/静态检查 `441d486954d84940ac435ef4ebfea7d0`，主题切换 `d18db3b431ad446297a5b09838b96427`，偏好保存 `65320911f8ed44e78f63c54da5bb5110`。黑曜单独交付的 `windows-local-obsidian-9741cca` 构建因用户追加三套配色而主动取消，未打包或安装；保留完成的依赖产物供最终四主题交付复用。最终交付在新的合并身份下使用 `windows-local` 原生计划，仍安装到固定 `local_release/` 并统一清理缓存，结果以最终管线收据为准。
+
+## 护眼黑曜替换静谧森林（2026-11-16，beta）
+
+基于 beta `056621e`，分支 `codex/obsidian-theme`。推荐列表和视图菜单以护眼黑曜 / Obsidian 替换森林；背景、面板、文字、强调与选中态使用中性灰阶，保留低饱和语义状态色。旧 `forest` 配置和命名预设自动规范化为 `obsidian`，保留字体、自定义颜色和其他偏好。设计依据及颜色值见 [架构说明](Rust_Architecture.md)。
+
+Windows Rust 1.97.1 MSVC、Slint 1.17.1；desktop/CLI 检查使用已核验 ASIO SDK 2.3.4。core、desktop、CLI all-targets strict Clippy 通过；最终 UI 补修后重新通过 desktop strict Clippy 与格式检查。core `config::` 46 passed，desktop 外观 4 passed、受争用偏好保存/立即关闭 1 passed、经典播放器 3 passed（共 54 个不同测试，0 ignored）。源码及测试使用隔离数据，无工作库、音频素材或真实音频设备操作。
+
+真实 Slint 软件渲染截图发现经典播放器空波形错误使用固定频谱底色，已对齐现有现代播放器的就绪判断：空白/加载态使用主题普通画布，真实频谱继续使用数据画布。按钮切换动画不再影响配色截图的最终状态。最终截图 `.rust-validation/obsidian/screenshots/theme-3.png` 已人工检查；四套推荐卡片与实际界面颜色一致。黑曜普通文字/面板对比度 12.11:1，弱化文字/浮层 5.03:1，选中行、勾选态、强调背景及语义状态文字均通过相应 4.5:1 检查，强边框/面板至少 3:1。中英文设置及 100%/200% 外观交互截图继续通过。
+
+日志位于 `.rust-validation/local-checks/`：初始三包 Clippy `eb9a5546d1a146f9869d6c187a328ec5`、core `d70ee825ff1842af9bc4a73024c7d34b`、最终 desktop 外观/静态检查 `e0b8e1e0ab6a4cafa57f898b9040dfb4`、偏好保存 `88b6116f037e497fb4dd96d7ef3201b5`、经典播放器 `3a22a6619b2142d9b237654d126cae9f`。末次补修只改变空画布显示与截图测试，不影响此前 core/CLI 或偏好写入证据。
+
+范围复用：`056621e` 的设置结构、缩放、语言、后台写入与关闭排空基线，以及此前数据库、扫描、Metadata、IPC 和音频后端基线仍适用；这些实现、依赖和平台配置没有变化。未重复 workspace、完整数据安全脚本、百万条基准或真实 ASIO 硬件验收。沿用 `windows-local` 计划交付固定 `local_release/`，实际构建、portable 验收、安装身份/启动和统一缓存清理以本次管线收据为准。
+
+## 推荐主题与高级外观设置重构（2026-11-16，beta）
+
+基于 beta `2c5da47`，分支 `codex/appearance-settings-redesign`。设置页先展示石墨、静谧森林、深海蓝、暖砂琥珀四张主题缩略卡片，再按需展开字体与阅读、文字颜色、个人预设。推荐主题现在统一改变界面底色、强调色、选中背景和文字；点击时清除旧的文字覆盖，保留字体与用户预设。原 `default-v2` 标识及配色不变，显示名改为石墨；原默认和工作室主题继续保留。新纯色主题跳过不可见的旧 SVG 背景栅格化，避免首次选择时阻塞界面。
+
+Windows Rust 1.97.1 MSVC、Slint 1.17.1、已核验 ASIO SDK 2.3.4。最终 `cargo fmt --all -- --check`、core/desktop/CLI all-targets strict Clippy 通过，desktop/CLI 选择 ASIO。没有改动依赖或持久化格式。
+
+| 验证范围 | 实际结果 |
+| --- | --- |
+| core `config::` | 45 passed，0 ignored |
+| desktop 外观、主题控件、缩放、设置分类/草稿、受争用偏好保存 | 27 个不同测试通过，0 ignored；最终布局修正重跑相关设置页测试，不重复计数 |
+| 四套主题实际主界面渲染及预览一致性 | 通过；主文字、次要文字、选中行和主题强调背景上的文字对比度均至少 4.5:1 |
+| 中英文、1080×700、100%/200% 设置截图 | 通过；真实鼠标选主题、高级展开、滚动到底、预设操作可达；卡片与分类导航不重叠 |
+| 推荐主题/字体/自定义覆盖/命名预设保存及立即关闭 | 通过；保持已有写锁争用断言，未放宽等待条件 |
+
+证据在 `.rust-validation/appearance-redesign/test-results.json`、`fmt.log`、`screenshots/`；最终 strict Clippy 为 `.rust-validation/local-checks/52c2634ea514463193ca4b8adb4d5565/asio-clippy.log`。设置只使用已有后台写入与关闭排空机制；测试使用隔离数据，没有访问工作库或源音频。
+
+范围复用：此前系统字体与配色任务以及 `2c5da47` 本地交付的数据库、扫描、Metadata 写入、跨进程数据安全和 ASIO 配置基线仍适用，相关存储、租约、音频和 IPC 实现没有变化。本轮配置变化仅扩展既有主题标识，已覆盖配置往返及直接消费者编译；不重跑整个 workspace、百万条性能、真实 ASIO 硬件或其他平台验收。Slint 原生输入/菜单仍使用平台控件配色，应用绘制区域采用所选主题。
+
+本轮沿用 `windows-local` 原生计划交付至固定 `local_release/`；构建、portable 验收、安装身份/启动及统一缓存清理结果以该次管线收据为准，不用源码检查代替实际包验收。
+
+## 系统字体、文字配色预设与跟随系统语言（2026-11-16，beta 开发工作区）
+
+基于 `origin/beta` 的 `ba45837`，功能分支 `codex/appearance-font-presets`。新增系统字体搜索/选择、8 个文字模块及 15 类状态色、恢复当前主题默认文字配色、3 套内置文字配色，以及自定义主题/字体/字号/颜色预设的保存、加载、更新、重命名、删除。语言新增默认 `system`，保留已有显式中英文偏好；启动、设置页、视图菜单与启动错误提示使用一致的系统语言解析。功能范围及原生控件配色边界见 [架构说明](Rust_Architecture.md)。
+
+Windows Rust 1.97.1 MSVC、Slint 1.17.1、已核验 ASIO SDK 2.3.4。`cargo fmt --all -- --check`、core/desktop/CLI 的 all-targets strict Clippy 通过，desktop/CLI 选择 ASIO。新增直接引用的是锁文件已有的 `fontdb 0.23.0`（fs）和 `sys-locale 0.3.2`，没有升级依赖版本。
+
+| 本次实际验证 | 结果 |
+| --- | --- |
+| core lib：`config::`、`appearance::` | 47 passed，0 ignored |
+| desktop ASIO：新增 appearance、`ui_scale_tests`、通用主题控件、语言菜单、受争用的偏好保存/关闭回归 | 24 passed，0 ignored |
+| `validate-review-fixes.ps1 -CleanCheckout`，使用本次源码构建的开发 CLI | 10 checks passed；2000 条隔离扫描夹具，无实际音频输出 |
+| 中英文、小窗口 1080×700、100%/200% 新设置截图检查 | 通过；底部预设操作、关闭按钮可滚动访问 |
+| Windows 字体发现 | 实际发现 257 个已安装字体名称 |
+
+上表 71 个 Rust 测试不重复计算其隔离子进程的 1 passed。配置覆盖默认系统语言、显式语言保留、异常颜色/预设恢复、持久化往返；桌面覆盖模块颜色继承和恢复、底色不受影响、主题切换保留字体/配色、预设增改删与加载、连续语言修改后关闭仍保存 `system`、配置写锁争用时字体/配色回调仍返回且关闭保存最终值。首轮发现原生 ComboBox 的 `current-value` 写入不会改变选中项，已改为 `current-index` 并检查选中字体模型；最终日志无该警告。字体扫描仅在首次进入通用设置时于后台运行，读取字体期间不持有界面筛选锁。
+
+最终证据：`.rust-validation/appearance/fmt-final.log`、`clippy-verified.log`、`core-tests.log`、`desktop-verified.log`、`review-regression.json` 与 `screenshots/`。旧 `doc/Rust_Review_Regression.json` 已保持原内容，本次隔离报告单独保存。配置安全脚本跳过真实旧库只读拒绝/整库哈希检查；没有打开工作库、修改源音频或发起服务器请求。
+
+范围选择：core 设置契约及桌面/CLI 消费者本次重新检查。`e19f4d0` / `b8b3e22` 与下节 1.0.2 记录中的数据库、扫描、Metadata 写入、音频后端和 IPC 基线对本次未变化的存储/租约/播放实现仍适用；本次只复用其机制，没有重跑整个 workspace、百万条基准、真实 ASIO 硬件或 Mac/Linux 原生验收。桌面偏好采用现有后台写入及关闭保存，并新增针对性争用回归；没有删除任何正式测试。
+
+本次没有打包、部署 beta、发布或更新 `local_release/`。缓存清理通过，移除 **31.33 GiB 逻辑大小**的已核验归属编译中间文件；目标中保留 2.72 GiB 最终产物/元数据。结果记录于 `.rust-validation/appearance/cleanup.json`，最终二进制、截图及日志保留。
+
 ## 1.0.2 发布前 IPC／OpenAI 补修（2026-11-16）
 
 对 beta `944bdf3` 相对 main 的独立审查发现：显式 IPC Load 当前选中素材会取消在途 Waveform，而状态观察因素材仍被选中跳过替代渲染。补修保留过期任务取消，并按新的音频 generation 补发渲染；真实解码、Slint 排队发布回归同时检查同素材重载和异素材旧结果拒绝。

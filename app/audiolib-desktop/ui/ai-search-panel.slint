@@ -1,6 +1,7 @@
 // app/audiolib-desktop/ui/ai-search-panel.slint
 import { Button, ComboBox, ProgressIndicator, ScrollView, SpinBox, TextEdit } from "std-widgets.slint";
 import { Theme, ThemedLineEdit as LineEdit, ThemedCheckBox as CheckBox } from "theme.slint";
+import { AiSkillEditor } from "ai-skill-editor.slint";
 import { AiSidebarToggle } from "ai-sidebar-toggle.slint";
 
 // Compact, checkable mode switch embedded in the application's search bar.
@@ -26,7 +27,7 @@ export component AiSearchToggle inherits Rectangle {
     accessible-checked: root.active;
     accessible-action-default => { if root.enabled { root.toggled(); } }
     forward-focus: switch-focus;
-    Text { x: 4px * Theme.ui-scale; width: 23px * Theme.ui-scale; height: 100%; text: "AI"; color: root.active ? Theme.accent : Theme.dim; font-size: Theme.font(12); font-weight: 700; vertical-alignment: center; }
+    Text { x: 4px * Theme.ui-scale; width: 23px * Theme.ui-scale; height: 100%; text: "AI"; color: root.active ? Theme.text(6, 6, Theme.accent) : Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); font-weight: 700; vertical-alignment: center; }
     Rectangle { x: 31px * Theme.ui-scale; y: (parent.height - self.height) / 2; width: 30px * Theme.ui-scale; height: 17px * Theme.ui-scale; border-radius: self.height / 2; background: root.active ? Theme.accent : Theme.strong-border;
         Rectangle { x: (root.active ? 15px : 2px) * Theme.ui-scale; y: 2px * Theme.ui-scale; width: 13px * Theme.ui-scale; height: self.width; border-radius: self.height / 2; background: root.active ? Theme.on-accent : Theme.ink; }
     }
@@ -67,7 +68,7 @@ export component AiSearchAction inherits Rectangle {
             accessible-label: root.active ? (root.chinese ? "生成 AI 查询建议" : "Generate AI query suggestions") : (root.chinese ? "执行搜索" : "Run search");
             accessible-enabled: self.available;
             accessible-action-default => { if self.available { root.submitted(); } }
-            Text { x: 2px; y: 0px; width: parent.width - 4px; height: parent.height; text: root.active ? (root.generating ? (root.chinese ? "Tag生成中…" : "Generating tags…") : root.chinese ? "Tag生成" : "Generate Tags") : (root.searching ? "…" : root.chinese ? "搜索" : "Search"); color: Theme.on-accent; font-size: Theme.font(12); font-weight: 600; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+            Text { x: 2px; y: 0px; width: parent.width - 4px; height: parent.height; text: root.active ? (root.generating ? (root.chinese ? "Tag生成中…" : "Generating tags…") : root.chinese ? "Tag生成" : "Generate Tags") : (root.searching ? "…" : root.chinese ? "搜索" : "Search"); color: Theme.text(6, 10, Theme.on-accent); font-size: Theme.font(12); font-weight: 600; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
             if root.active && root.generating: ProgressIndicator { x: 2px; y: parent.height - 3px * Theme.ui-scale; width: parent.width - 4px; height: 2px * Theme.ui-scale; indeterminate: true; accessible-label: root.chinese ? "主搜索生成进度" : "Search bar generation progress"; }
             submit-focus := FocusScope { enabled: submit.available; focus-on-click: false;
                 key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.submitted(); return accept; } reject }
@@ -207,9 +208,9 @@ export component AiQuickSearch inherits Rectangle {
                         x: 5px * Theme.ui-scale; y: (parent.height - self.height) / 2;
                         width: 18px * Theme.ui-scale; height: 18px * Theme.ui-scale;
                         border-radius: 5px * Theme.ui-scale; background: tag-body.role-color.with-alpha(0.18);
-                        Text { width: parent.width; height: parent.height; text: root.rows[index].is-layer ? (root.chinese ? "层" : "L") : (root.chinese ? "主" : "M"); color: tag-body.role-color; font-size: Theme.font(10); font-weight: 700; vertical-alignment: center; horizontal-alignment: center; accessible-role: none; }
+                        Text { width: parent.width; height: parent.height; text: root.rows[index].is-layer ? (root.chinese ? "层" : "L") : (root.chinese ? "主" : "M"); color: Theme.text(6, 6, tag-body.role-color); font-size: Theme.font(10); font-weight: 700; vertical-alignment: center; horizontal-alignment: center; accessible-role: none; }
                     }
-                    tag-text := Text { x: 28px * Theme.ui-scale; y: 0px; width: max(0px, parent.width - 34px * Theme.ui-scale); height: parent.height; text: root.rows[index].text; color: Theme.ink; font-size: Theme.font(11); vertical-alignment: center; overflow: elide; accessible-role: none; }
+                    tag-text := Text { x: 28px * Theme.ui-scale; y: 0px; width: max(0px, parent.width - 34px * Theme.ui-scale); height: parent.height; text: root.rows[index].text; color: Theme.text(6, 0, Theme.ink); font-size: Theme.font(11); vertical-alignment: center; overflow: elide; accessible-role: none; }
                     body-focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.search(index); return accept; } reject } }
                     body-hit := TouchArea { x: 0px; y: 0px; width: parent.width; height: parent.height; enabled: root.enabled; mouse-cursor: pointer; clicked => { root.search(index); } }
                     Tooltip {
@@ -218,7 +219,7 @@ export component AiQuickSearch inherits Rectangle {
                             background: Theme.tooltip; border-radius: 5px * Theme.ui-scale;
                             border-width: 1px; border-color: Theme.strong-border;
                             VerticalLayout { padding: 8px * Theme.ui-scale;
-                                Text { text: tag-body.role-label + " · " + root.rows[index].text + (root.rows[index].detail != "" ? "\n" + root.rows[index].detail : ""); color: Theme.ink; font-size: Theme.font(11); wrap: word-wrap; }
+                                Text { text: tag-body.role-label + " · " + root.rows[index].text + (root.rows[index].detail != "" ? "\n" + root.rows[index].detail : ""); color: Theme.text(6, 0, Theme.ink); font-size: Theme.font(11); wrap: word-wrap; }
                             }
                         }
                     }
@@ -256,7 +257,7 @@ export component AiQuickSearch inherits Rectangle {
                             background: Theme.tooltip; border-radius: 5px * Theme.ui-scale;
                             border-width: 1px; border-color: Theme.strong-border;
                             VerticalLayout { padding: 8px * Theme.ui-scale;
-                                Text { text: tag-body.role-label + "\n" + (root.chinese ? "新建任务搜索：" : "Search in a new task: ") + root.rows[index].text + (root.chinese ? "\n沿用当前目录和筛选条件" : "\nUses the current directory and filters"); color: Theme.ink; font-size: Theme.font(11); wrap: word-wrap; }
+                                Text { text: tag-body.role-label + "\n" + (root.chinese ? "新建任务搜索：" : "Search in a new task: ") + root.rows[index].text + (root.chinese ? "\n沿用当前目录和筛选条件" : "\nUses the current directory and filters"); color: Theme.text(6, 0, Theme.ink); font-size: Theme.font(11); wrap: word-wrap; }
                             }
                         }
                     }
@@ -281,6 +282,25 @@ export component AiSearchPanel inherits Rectangle {
     in-out property <string> instruction: "作为资深声音设计师，请根据输入内容，合理匹配声音设计需要用的专业Keyword";
     in-out property <bool> prompt-expanded: false;
     in-out property <bool> auto-search: false;
+    in-out property <int> auto-search-count: 3;
+    in-out property <[string]> skills;
+    in-out property <int> skill-index;
+    in-out property <string> skill-id;
+    in-out property <string> skill-name;
+    in-out property <string> skill-body;
+    in-out property <string> skill-prompt;
+    in-out property <string> skill-techniques;
+    in-out property <bool> skill-body-enabled: true;
+    in-out property <bool> skill-prompt-enabled: true;
+    in-out property <bool> skill-techniques-enabled: true;
+    in-out property <bool> skill-dirty;
+    in-out property <int> skill-file;
+    in-out property <string> skill-folder;
+    in-out property <string> skill-preview;
+    in-out property <string> skill-validation;
+    in-out property <string> active-skill-name;
+    in-out property <bool> custom-skill-active;
+
     in-out property <bool> layers: true;
     in-out property <int> provider-index: 0;
     in property <[string]> providers: ["Local reference"];
@@ -332,41 +352,42 @@ export component AiSearchPanel inherits Rectangle {
     VerticalLayout {
         padding: 14px * Theme.ui-scale; spacing: 9px * Theme.ui-scale;
         HorizontalLayout { height: 32px * Theme.ui-scale;
-            Text { horizontal-stretch: 1; min-width: 0px; text: root.chinese ? "AI 智能搜索" : "AI Search"; color: Theme.ink; font-size: Theme.font(18); font-weight: 700; overflow: elide; vertical-alignment: center; }
+            Text { horizontal-stretch: 1; min-width: 0px; text: root.chinese ? "AI 智能搜索" : "AI Search"; color: Theme.text(6, 0, Theme.ink); font-size: Theme.font(18); font-weight: 700; overflow: elide; vertical-alignment: center; }
             Button { horizontal-stretch: 0; max-width: 100px * Theme.ui-scale; text: root.settings ? (root.chinese ? "返回搜索" : "Search") : (root.chinese ? "设置" : "Settings"); accessible-label: root.settings ? (root.chinese ? "返回 AI 搜索" : "Return to AI search") : (root.chinese ? "AI 搜索设置" : "AI search settings"); clicked => { root.settings = !root.settings; } }
             AiSidebarToggle { chinese: root.chinese; clicked => { root.collapse(); } }
         }
         if !root.settings: ScrollView {
             vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
             VerticalLayout { spacing: 9px * Theme.ui-scale;
-            Text { text: root.chinese ? "在主搜索框描述声音，回车生成查询建议" : "Describe a sound in the search bar; press Enter for suggestions"; color: Theme.dim; font-size: Theme.font(12); wrap: word-wrap; }
-            Text { text: root.prompt == "" ? (root.chinese ? "例如：我要设计科幻爆炸声" : "e.g. design a sci-fi explosion") : root.prompt; color: root.prompt == "" ? Theme.muted : Theme.ink; font-size: Theme.font(13); wrap: word-wrap; height: min(56px * Theme.ui-scale, self.preferred-height); vertical-stretch: 0; overflow: elide; }
+            Text { text: root.chinese ? "在主搜索框描述声音，回车生成查询建议" : "Describe a sound in the search bar; press Enter for suggestions"; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); wrap: word-wrap; }
+            Text { text: root.prompt == "" ? (root.chinese ? "例如：我要设计科幻爆炸声" : "e.g. design a sci-fi explosion") : root.prompt; color: root.prompt == "" ? Theme.text(6, 2, Theme.muted) : Theme.text(6, 0, Theme.ink); font-size: Theme.font(13); wrap: word-wrap; height: min(56px * Theme.ui-scale, self.preferred-height); vertical-stretch: 0; overflow: elide; }
             HorizontalLayout {
                 ComboBox { min-width: 0px; horizontal-stretch: 1; model: root.providers; current-index <=> root.provider-index; enabled: !root.busy; selected(value) => { root.action(4,self.current-index); } }
                 CheckBox { min-width: 92px * Theme.ui-scale; horizontal-stretch: 0; text: root.chinese ? "允许分层" : "Allow layers"; checked <=> root.layers; toggled => { root.action(3,0); } }
             }
-            Text { text: root.chinese ? "允许 AI 按声音需求判断是否推荐分层，不强制拆层。无分层时最多 6 项，有明确分层时共最多 8 项。" : "Allow AI to assess whether layers help; layers are optional. Up to 6 suggestions without layers, or 8 total when useful layers are identified."; color: Theme.dim; font-size: Theme.font(11); wrap: word-wrap; }
-            Text { text: root.provider-index == 0 ? (root.chinese ? "离线：个人词表 + UCS + 素材配方" : "Offline: personal terms + UCS + recipes") : (root.chinese ? "发送描述和参考词条；不发送音频、文件路径或库 Metadata" : "Sends your description and reference terms; no audio, paths or library Metadata"); color: Theme.muted; font-size: Theme.font(11); wrap: word-wrap; }
-            HorizontalLayout {
+            Text { text: root.chinese ? "允许 AI 按声音需求判断是否推荐分层，不强制拆层。无分层时最多 6 项，有明确分层时共最多 8 项。" : "Allow AI to assess whether layers help; layers are optional. Up to 6 suggestions without layers, or 8 total when useful layers are identified."; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(11); wrap: word-wrap; }
+            Text { text: root.provider-index == 0 ? (root.chinese ? "离线：个人词表 + UCS + 素材配方" : "Offline: personal terms + UCS + recipes") : (root.chinese ? "发送描述和参考词条；不发送音频、文件路径或库 Metadata" : "Sends your description and reference terms; no audio, paths or library Metadata"); color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
+            if !root.custom-skill-active: HorizontalLayout {
                 ComboBox { min-width: 0px; horizontal-stretch: 1; model: root.chinese ? ["预设：资深声音设计师", "预设：自定义"] : ["Preset: Senior sound designer", "Preset: Custom"]; current-index <=> root.preset-index; enabled: !root.busy; selected(value) => { root.action(14,self.current-index); } }
                 Button { text: root.prompt-expanded ? (root.chinese ? "收起" : "Collapse") : (root.chinese ? "编辑提示词" : "Edit prompt"); clicked => { root.prompt-expanded = !root.prompt-expanded; } }
             }
-            if root.prompt-expanded: VerticalLayout {
+            if root.prompt-expanded && !root.custom-skill-active: VerticalLayout {
                 spacing: 5px * Theme.ui-scale;
                 TextEdit { text <=> root.instruction; height: 78px * Theme.ui-scale; accessible-label: root.chinese ? "预设提示词" : "Preset instruction"; enabled: !root.busy; edited => { root.preset-index = 1; root.action(3,0); } }
                 HorizontalLayout { height: 32px * Theme.ui-scale;
-                    Text { text: root.chinese ? "最多 2000 字；仅用于远程 AI。保存后重启保留。" : "Up to 2000 characters; remote AI only. Save to retain across restarts."; color: Theme.muted; font-size: Theme.font(11); wrap: word-wrap; }
+                    Text { text: root.chinese ? "最多 2000 字；仅用于远程 AI。保存后重启保留。" : "Up to 2000 characters; remote AI only. Save to retain across restarts."; color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
                     Button { text: root.chinese ? "保存提示词" : "Save prompt"; enabled: !root.busy; clicked => { root.action(15,0); } }
                 }
             }
-            CheckBox { text: root.chinese ? "生成后自动搜索 3 个任务" : "Auto-search 3 tasks after generation"; checked <=> root.auto-search; enabled: !root.busy; }
+            if root.custom-skill-active: Text { text: (root.chinese ? "Skill：" : "Skill: ") + root.active-skill-name; color: Theme.text(6, 6, Theme.accent); font-size: Theme.font(12); }
+            CheckBox { text: root.chinese ? "生成后自动搜索 " + root.auto-search-count + " 个任务" : "Auto-search " + root.auto-search-count + " tasks after generation"; checked <=> root.auto-search; enabled: !root.busy; }
             HorizontalLayout {
                 Button { text: root.generating ? (root.chinese ? "生成中…" : "Generating…") : (root.chinese ? "生成查询建议" : "Suggest queries"); accessible-label: root.chinese ? "生成查询建议" : "Suggest queries"; enabled: !root.busy && root.prompt != ""; clicked => { root.action(2,0); } }
                 Button { text: root.chinese ? "取消" : "Cancel"; enabled: root.busy || root.batch-searching; clicked => { root.action(3,0); } }
             }
-            Text { text: root.chinese ? "每项 1–2 个词，含一个最强单词推荐。“主”表示主体音效，“层”表示分层素材。手动“查询全部”搜索所有推荐；自动搜索仅查询前 3 项。" : "Each suggestion uses 1–2 words, including the strongest single-word option. M marks main sounds; L marks layers. Search all opens every suggestion; auto-search runs only the first 3."; color: Theme.dim; font-size: Theme.font(12); wrap: word-wrap; }
+            Text { text: root.chinese ? "每项 1–2 个词，含一个最强单词推荐。“主”表示主体音效，“层”表示分层素材。手动“查询全部”搜索所有推荐；自动搜索按设置查询前 1–3 项。" : "Each suggestion uses 1–2 words, including the strongest single-word option. M marks main sounds; L marks layers. Search all opens every suggestion; auto-search runs the first 1–3 according to settings."; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); wrap: word-wrap; }
             Rectangle { vertical-stretch: 1; min-height: 16px * Theme.ui-scale; }
-            Text { text: root.detail; color: Theme.dim; font-size: Theme.font(11); wrap: word-wrap; height: root.detail == "" ? 0px : min(78px * Theme.ui-scale, self.preferred-height); vertical-stretch: 0; overflow: elide; }
+            Text { text: root.detail; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(11); wrap: word-wrap; height: root.detail == "" ? 0px : min(78px * Theme.ui-scale, self.preferred-height); vertical-stretch: 0; overflow: elide; }
             }
         }
         if !root.settings: VerticalLayout {
@@ -387,7 +408,8 @@ export component AiSearchPanel inherits Rectangle {
         }
         if root.settings: HorizontalLayout { spacing: 8px * Theme.ui-scale;
             Button { text: root.chinese ? "供应商" : "Providers"; enabled: root.settings-page != 0; clicked => { root.settings-page = 0; } }
-            Button { text: root.chinese ? "Skill 与预设" : "Skill and presets"; enabled: root.settings-page != 1; clicked => { root.settings-page = 1; } }
+            Button { text: root.chinese ? "Skill 与文件" : "Skills & files"; accessible-label: "AI skills settings"; enabled: root.settings-page != 1; clicked => { root.settings-page = 1; } }
+            Button { text: root.chinese ? "搜索行为" : "Search behavior"; enabled: root.settings-page != 2; clicked => { root.settings-page = 2; } }
         }
         if root.settings && root.settings-page == 0: ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
             VerticalLayout { spacing: 8px * Theme.ui-scale;
@@ -395,62 +417,77 @@ export component AiSearchPanel inherits Rectangle {
                     ComboBox { model: root.providers; current-index <=> root.provider-index; accessible-label: root.chinese ? "AI 供应商预设" : "AI provider preset"; enabled: !root.busy; selected(value) => { root.action(4,self.current-index); } }
                     Button { text: root.chinese ? "新增" : "New"; accessible-label: root.chinese ? "新增供应商预设" : "New provider preset"; enabled: !root.busy; clicked => { root.action(9,0); } }
                 }
-                Text { text: root.chinese ? "配置名称" : "Profile name"; color: Theme.dim; font-size: Theme.font(12); }
+                Text { text: root.chinese ? "配置名称" : "Profile name"; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); }
                 LineEdit { input-label: "AI profile name"; text <=> root.profile-name; enabled: !root.busy; placeholder-text: (root.chinese ? "留空自动命名：" : "Automatic name: ") + root.auto-name; edited => { root.profile-edited(); } }
-                Text { text: root.chinese ? "1 · 供应商与地址" : "1 · Provider and endpoint"; color: Theme.accent; font-size: Theme.font(12); font-weight: 600; }
+                Text { text: root.chinese ? "1 · 供应商与地址" : "1 · Provider and endpoint"; color: Theme.text(6, 6, Theme.accent); font-size: Theme.font(12); font-weight: 600; }
                 ComboBox { model: ["OpenAI compatible / Chat", "OpenAI Responses", "Anthropic Messages", "Google Gemini", "Jev TypeSafe", "OpenCode Go", root.chinese ? "DeepSeek 官方" : "DeepSeek Official", "Magpie"];
                     current-index <=> root.protocol; enabled: !root.busy; selected(value) => { root.action(12,self.current-index); }
                 }
-                Text { text: "Base URL"; color: Theme.dim; font-size: Theme.font(12); }
+                Text { text: "Base URL"; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); }
                 LineEdit { input-label: "AI Base URL"; text <=> root.endpoint; enabled: !root.busy; edited => { root.models = []; root.profile-edited(); } }
-                Text { text: root.chinese ? "2 · API Key" : "2 · API key"; color: Theme.accent; font-size: Theme.font(12); font-weight: 600; }
-                Text { text: root.clear-key ? (root.chinese ? "保存后将移除密钥" : "Key will be removed when saved") : root.key != "" ? (root.chinese ? "新密钥尚未保存" : "New key has not been saved") : root.key-reusable ? (root.chinese ? "密钥已保存（隐藏显示），留空即可复用" : "Key saved (hidden); leave blank to reuse") : root.saved-key ? (root.chinese ? "地址或协议已更改，请重新填写密钥" : "Endpoint or protocol changed; re-enter the key") : (root.chinese ? "尚未保存密钥" : "No saved key"); color: root.key-reusable && !root.clear-key ? Theme.accent : Theme.dim; font-size: Theme.font(11); wrap: word-wrap; }
+                Text { text: root.chinese ? "2 · API Key" : "2 · API key"; color: Theme.text(6, 6, Theme.accent); font-size: Theme.font(12); font-weight: 600; }
+                Text { text: root.clear-key ? (root.chinese ? "保存后将移除密钥" : "Key will be removed when saved") : root.key != "" ? (root.chinese ? "新密钥尚未保存" : "New key has not been saved") : root.key-reusable ? (root.chinese ? "密钥已保存（隐藏显示），留空即可复用" : "Key saved (hidden); leave blank to reuse") : root.saved-key ? (root.chinese ? "地址或协议已更改，请重新填写密钥" : "Endpoint or protocol changed; re-enter the key") : (root.chinese ? "尚未保存密钥" : "No saved key"); color: root.key-reusable && !root.clear-key ? Theme.text(6, 6, Theme.accent) : Theme.text(6, 1, Theme.dim); font-size: Theme.font(11); wrap: word-wrap; }
                 LineEdit { input-label: "AI API Key"; text <=> root.key; input-type: password; enabled: !root.busy; placeholder-text: root.key-reusable ? (root.chinese ? "已保存；填写可替换" : "Saved; enter a replacement") : (root.chinese ? "粘贴供应商 API Key" : "Paste the provider API key"); edited => { root.models = []; root.profile-edited(); } }
-                if root.protocol == 7: Text { text: root.chinese ? "先启动 Magpie；端口可在地址中修改。本机网关通常可留空密钥；共享或启用认证的网关需填写 Gateway Key。" : "Start Magpie first; change the port in Base URL if needed. Local gateways usually accept a blank key; shared or authenticated gateways need a gateway key."; color: Theme.dim; font-size: Theme.font(11); wrap: word-wrap; }
+                if root.protocol == 7: Text { text: root.chinese ? "先启动 Magpie；端口可在地址中修改。本机网关通常可留空密钥；共享或启用认证的网关需填写 Gateway Key。" : "Start Magpie first; change the port in Base URL if needed. Local gateways usually accept a blank key; shared or authenticated gateways need a gateway key."; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(11); wrap: word-wrap; }
                 CheckBox { text: root.chinese ? "清除已保存密钥" : "Remove saved key"; checked <=> root.clear-key; enabled: !root.busy; toggled => { root.profile-edited(); } }
-                Text { text: root.chinese ? "3 · 模型与测试" : "3 · Model and test"; color: Theme.accent; font-size: Theme.font(12); font-weight: 600; }
+                Text { text: root.chinese ? "3 · 模型与测试" : "3 · Model and test"; color: Theme.text(6, 6, Theme.accent); font-size: Theme.font(12); font-weight: 600; }
                 LineEdit { input-label: "AI Model ID"; text <=> root.model; enabled: !root.busy; placeholder-text: root.chinese ? "从列表选择或直接填写模型 ID" : "Select or enter a model ID"; edited => { root.profile-edited(); } }
                 HorizontalLayout {
                     Button { text: root.chinese ? "获取模型列表" : "Get models"; enabled: !root.busy; clicked => { root.action(11,0); } }
                     Button { text: root.chinese ? "测试模型调用" : "Test model call"; enabled: !root.busy && root.model != ""; clicked => { root.action(17,0); } }
                 }
                 if root.models.length > 0: ComboBox { model: root.models; enabled: !root.busy; selected(value) => { root.model = value; root.profile-edited(); } }
-                Text { text: root.chinese ? "无需先保存或填写模型 ID；获取后选择模型，再保存配置。" : "No saved profile or model ID needed. Fetch, select a model, then save."; color: Theme.muted; font-size: Theme.font(11); wrap: word-wrap; }
-                Text { text: root.chinese ? "测试调用会发送固定示例并消耗供应商额度。" : "Model testing sends a fixed example and uses provider quota."; color: Theme.muted; font-size: Theme.font(11); wrap: word-wrap; }
+                Text { text: root.chinese ? "无需先保存或填写模型 ID；获取后选择模型，再保存配置。" : "No saved profile or model ID needed. Fetch, select a model, then save."; color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
+                Text { text: root.chinese ? "测试调用会发送固定示例并消耗供应商额度。" : "Model testing sends a fixed example and uses provider quota."; color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
                 Button { text: root.advanced ? (root.chinese ? "收起高级选项" : "Hide advanced options") : (root.chinese ? "高级选项" : "Advanced options"); clicked => { root.advanced = !root.advanced; } }
                 if root.advanced: HorizontalLayout {
-                    Text { text: root.chinese ? "超时 / 秒" : "Timeout / s"; color: Theme.dim; font-size: Theme.font(12); }
+                    Text { text: root.chinese ? "超时 / 秒" : "Timeout / s"; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); }
                     SpinBox { value <=> root.timeout; minimum: 2; maximum: 600; accessible-label: root.chinese ? "AI 超时秒数" : "AI timeout seconds"; enabled: !root.busy; edited(value) => { root.profile-edited(); } }
                 }
-                if root.advanced: Text { text: root.chinese ? "默认 180 秒，最多 600 秒；修改后保存配置" : "Default 180 seconds, maximum 600; save the profile after changes."; color: Theme.muted; font-size: Theme.font(11); wrap: word-wrap; }
+                if root.advanced: Text { text: root.chinese ? "默认 180 秒，最多 600 秒；修改后保存配置" : "Default 180 seconds, maximum 600; save the profile after changes."; color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
                 if root.advanced: HorizontalLayout {
-                    Text { text: root.chinese ? "AI 请求模式" : "AI request mode"; color: Theme.dim; font-size: Theme.font(12); }
+                    Text { text: root.chinese ? "AI 请求模式" : "AI request mode"; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); }
                     ComboBox { min-width: 0px; horizontal-stretch: 1; model: root.chinese ? ["客户端", "服务器"] : ["Client", "Server"]; current-index <=> root.request-mode; accessible-label: root.chinese ? "AI 请求模式" : "AI request mode"; enabled: !root.busy; selected(value) => { root.profile-edited(); } }
                 }
-                if root.advanced: Text { text: root.request-mode == 1 ? (root.chinese ? "复用当前或最近使用的音库服务器，转发模型列表、测试和生成；供应商密钥随请求发送给该服务器。需服务器允许此供应商地址。" : "Uses the current or most recent library server for models, tests and generation. The provider key is sent with each request. The server must allow this provider endpoint.") : (root.chinese ? "由本机直接请求 AI 供应商。" : "This device calls the AI provider directly."); color: Theme.muted; font-size: Theme.font(11); wrap: word-wrap; }
-                if root.protocol == 5: Text { text: root.chinese ? "Go：使用 Console 中已订阅工作区的个人 API Key。官方定位为编码 Agent 服务，是否接受音效检索请求由供应商决定。公开模型列表不验证订阅。" : "Go: use a personal API key from a subscribed Console workspace. Go is intended for coding agents; acceptance of sound-search requests is up to the provider. Its public catalogue does not verify subscriptions."; color: Theme.dim; font-size: Theme.font(11); wrap: word-wrap; }
-                if root.protocol == 4: Text { text: root.chinese ? "Jev：Choice 选配方、Score 评估匹配、Noul 判断是否需澄清。低置信度不自动采用。" : "Jev: Choice selects recipes, Score rates fit, Noul estimates clarification. Uncertain decisions are not applied."; color: Theme.dim; wrap: word-wrap; font-size: Theme.font(11); }
-                Text { text: root.usage; color: Theme.muted; font-size: Theme.font(11); wrap: word-wrap; }
-                Text { text: root.chinese ? "Windows 密钥在本机加密保存；其他平台仅保留当前会话。" : "Windows keys are encrypted locally; other platforms keep keys for this session."; color: Theme.muted; font-size: Theme.font(11); wrap: word-wrap; }
+                if root.advanced: Text { text: root.request-mode == 1 ? (root.chinese ? "复用当前或最近使用的音库服务器，转发模型列表、测试和生成；供应商密钥随请求发送给该服务器。需服务器允许此供应商地址。" : "Uses the current or most recent library server for models, tests and generation. The provider key is sent with each request. The server must allow this provider endpoint.") : (root.chinese ? "由本机直接请求 AI 供应商。" : "This device calls the AI provider directly."); color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
+                if root.protocol == 5: Text { text: root.chinese ? "Go：使用 Console 中已订阅工作区的个人 API Key。官方定位为编码 Agent 服务，是否接受音效检索请求由供应商决定。公开模型列表不验证订阅。" : "Go: use a personal API key from a subscribed Console workspace. Go is intended for coding agents; acceptance of sound-search requests is up to the provider. Its public catalogue does not verify subscriptions."; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(11); wrap: word-wrap; }
+                if root.protocol == 4: Text { text: root.chinese ? "Jev：Choice 选配方、Score 评估匹配、Noul 判断是否需澄清。低置信度不自动采用。" : "Jev: Choice selects recipes, Score rates fit, Noul estimates clarification. Uncertain decisions are not applied."; color: Theme.text(6, 1, Theme.dim); wrap: word-wrap; font-size: Theme.font(11); }
+                Text { text: root.usage; color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
+                Text { text: root.chinese ? "Windows 密钥在本机加密保存；其他平台仅保留当前会话。" : "Windows keys are encrypted locally; other platforms keep keys for this session."; color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
             }
         }
-        if root.settings && root.settings-page == 1: ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
-            VerticalLayout { spacing: 9px * Theme.ui-scale;
-                Text { text: root.chinese ? "Skill 选择" : "Select skill"; color: Theme.accent; font-size: Theme.font(12); font-weight: 600; }
-                ComboBox { model: root.chinese ? ["音效关键词 · audio-keyword-search（内置）"] : ["Sound keywords · audio-keyword-search (built in)"]; current-index: 0; accessible-label: "AI Skill"; enabled: !root.busy; }
-                Text { text: root.chinese ? "当前提供内置音效关键词 Skill，使用个人词表、UCS 分类和素材配方。" : "The built-in sound keyword skill uses personal terms, UCS categories and material recipes."; color: Theme.dim; font-size: Theme.font(11); wrap: word-wrap; }
+        if root.settings && root.settings-page == 1: AiSkillEditor {
+            vertical-stretch: 1;
+            chinese: root.chinese; busy: root.busy;
+            skills: root.skills; index <=> root.skill-index;
+            skill-id <=> root.skill-id; skill-name <=> root.skill-name;
+            body <=> root.skill-body; prompt <=> root.skill-prompt; techniques <=> root.skill-techniques;
+            body-enabled <=> root.skill-body-enabled; prompt-enabled <=> root.skill-prompt-enabled; techniques-enabled <=> root.skill-techniques-enabled;
+            dirty <=> root.skill-dirty; file <=> root.skill-file; folder <=> root.skill-folder;
+            preview: root.skill-preview; validation: root.skill-validation; active-name: root.active-skill-name;
+            action(kind, index) => { root.action(kind,index); }
+        }
+        if root.settings && root.settings-page == 2: ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
+            VerticalLayout { spacing: 10px * Theme.ui-scale;
+                Text { text: root.chinese ? "搜索行为" : "Search behavior"; color: Theme.text(6, 6, Theme.accent); font-size: Theme.font(14); font-weight: 600; }
                 CheckBox { text: root.chinese ? "允许分层" : "Allow layers"; checked <=> root.layers; enabled: !root.busy; toggled => { root.action(3,0); } }
-                Text { text: root.chinese ? "由 AI 判断当前声音是否适合分层。关闭时最多 6 项主体推荐；开启后仅在有明确分层时共最多 8 项。" : "AI decides whether the sound benefits from layers. Off: up to 6 main suggestions. On: up to 8 total only when useful layers are identified."; color: Theme.dim; font-size: Theme.font(11); wrap: word-wrap; }
-                CheckBox { text: root.chinese ? "生成后自动搜索 3 个任务" : "Auto-search 3 tasks after generation"; checked <=> root.auto-search; enabled: !root.busy; }
-                Text { text: root.chinese ? "提示词预设" : "Prompt preset"; color: Theme.accent; font-size: Theme.font(12); font-weight: 600; }
+                Text { text: root.chinese ? "AI 按需求判断分层。无分层时最多 6 项，有明确分层时共最多 8 项。" : "AI assesses whether layers help. Up to 6 main suggestions, or 8 total with useful layers."; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); wrap: word-wrap; }
+                CheckBox { text: root.chinese ? "生成后自动创建搜索任务" : "Create search tasks after generation"; checked <=> root.auto-search; enabled: !root.busy; }
+                HorizontalLayout {
+                    Text { text: root.chinese ? "自动搜索数量" : "Automatic task count"; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); vertical-alignment: center; }
+                    SpinBox { value <=> root.auto-search-count; minimum: 1; maximum: 3; enabled: !root.busy; accessible-label: "AI automatic task count"; }
+                }
+                Button { text: root.chinese ? "保存搜索行为" : "Save search behavior"; enabled: !root.busy; clicked => { root.action(39,0); } }
+                Text { text: root.chinese ? "兼容提示词预设" : "Legacy prompt preset"; color: Theme.text(6, 6, Theme.accent); font-size: Theme.font(14); font-weight: 600; }
+                Text { text: root.custom-skill-active ? (root.chinese ? "当前使用自定义 Skill。以下保留原提示词，切回兼容预设后生效。" : "A custom skill is active. Your original prompt below is retained for legacy mode.") : (root.chinese ? "继续使用原有配置；切回默认不会删除自定义提示词。" : "Uses your original configuration; switching to the default retains your custom prompt."); color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); wrap: word-wrap; }
                 ComboBox { model: root.chinese ? ["预设：资深声音设计师", "预设：自定义"] : ["Preset: Senior sound designer", "Preset: Custom"]; current-index <=> root.preset-index; accessible-label: root.chinese ? "AI 提示词预设" : "AI prompt preset"; enabled: !root.busy; selected(value) => { root.action(14,self.current-index); } }
-                TextEdit { text <=> root.instruction; height: 120px * Theme.ui-scale; accessible-label: root.chinese ? "设置预设提示词" : "Settings preset instruction"; enabled: !root.busy; edited => { root.preset-index = 1; root.action(3,0); } }
-                Text { text: root.chinese ? "最多 2000 字；远程 AI 使用所选预设。离线词表使用内置 Skill。" : "Up to 2000 characters. Remote AI uses the selected preset; offline search uses the built-in skill."; color: Theme.muted; font-size: Theme.font(11); wrap: word-wrap; }
+                TextEdit { text <=> root.instruction; height: 150px * Theme.ui-scale; accessible-label: root.chinese ? "设置预设提示词" : "Settings preset instruction"; enabled: !root.busy; edited => { root.preset-index = 1; root.action(3,0); } }
+                Text { text: root.chinese ? "兼容预设最多 2000 字；离线词表不执行自由文本提示词。" : "Legacy preset: up to 2000 characters. Offline reference does not execute text instructions."; color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
                 Button { text: root.chinese ? "保存提示词" : "Save prompt"; enabled: !root.busy; clicked => { root.action(15,0); } }
             }
         }
         if root.settings && root.settings-page == 0: VerticalLayout { spacing: 5px * Theme.ui-scale;
-            Text { text: root.profile-id == "" ? (root.chinese ? "新配置 · 保存后可用于搜索" : "New profile · save to use for search") : root.dirty || root.key != "" || root.clear-key ? (root.chinese ? "有未保存的更改 · 关闭面板会保留草稿" : "Unsaved changes · closing keeps this draft") : (root.chinese ? "配置已保存" : "Profile saved"); color: root.dirty ? Theme.warning : Theme.accent; font-size: Theme.font(11); wrap: word-wrap; }
+            Text { text: root.profile-id == "" ? (root.chinese ? "新配置 · 保存后可用于搜索" : "New profile · save to use for search") : root.dirty || root.key != "" || root.clear-key ? (root.chinese ? "有未保存的更改 · 关闭面板会保留草稿" : "Unsaved changes · closing keeps this draft") : (root.chinese ? "配置已保存" : "Profile saved"); color: root.dirty ? Theme.text(6, 8, Theme.warning) : Theme.text(6, 6, Theme.accent); font-size: Theme.font(11); wrap: word-wrap; }
             HorizontalLayout {
                 Button { text: root.chinese ? "保存配置" : "Save profile"; enabled: !root.busy; clicked => { root.action(8,0); } }
                 Button { text: root.chinese ? "重置草稿" : "Reset draft"; enabled: !root.busy && (root.dirty || root.key != "" || root.clear-key); clicked => { root.action(18,0); } }
@@ -462,7 +499,7 @@ export component AiSearchPanel inherits Rectangle {
                 horizontal-stretch: 1; min-width: 0px;
                 height: !root.generating && root.status == "" ? 0px : min(62px * Theme.ui-scale, status-text.preferred-height) + (root.generating ? 6px * Theme.ui-scale : 0px);
                 vertical-stretch: 0; clip: true;
-                status-text := Text { x: 0px; y: 0px; width: parent.width; height: max(0px, parent.height - (root.generating ? 6px * Theme.ui-scale : 0px)); text: root.generating ? (root.chinese ? "生成中… 正在生成关键词并检查音效库。" : "Generating… Checking query suggestions against the library.") : root.status; color: root.error ? Theme.warning : Theme.accent; font-size: Theme.font(12); wrap: word-wrap; overflow: elide; vertical-alignment: top; }
+                status-text := Text { x: 0px; y: 0px; width: parent.width; height: max(0px, parent.height - (root.generating ? 6px * Theme.ui-scale : 0px)); text: root.generating ? (root.chinese ? "生成中… 正在生成关键词并检查音效库。" : "Generating… Checking query suggestions against the library.") : root.status; color: root.error ? Theme.text(6, 9, Theme.warning) : Theme.text(6, 6, Theme.accent); font-size: Theme.font(12); wrap: word-wrap; overflow: elide; vertical-alignment: top; }
                 if root.generating: ProgressIndicator { x: 0px; y: parent.height - 3px * Theme.ui-scale; width: parent.width; height: 3px * Theme.ui-scale; indeterminate: true; accessible-label: root.chinese ? "AI 生成进度" : "AI generation progress"; }
             }
             Button { width: 84px * Theme.ui-scale; height: 32px * Theme.ui-scale; horizontal-stretch: 0; text: root.chinese ? "退出" : "Exit AI"; accessible-label: root.chinese ? "退出 AI 搜索" : "Exit AI"; clicked => { root.action(1,0); } }

@@ -163,6 +163,81 @@ fn save_snapshot(ui: &AppWindow, file: &str) {
     }
 }
 
+#[test]
+fn ai_skill_settings_render_in_both_languages_and_compact_windows() {
+    init_software_backend();
+    for chinese in [false, true] {
+        for (width, height, scale) in [
+            (1080.0, 700.0, 1.0),
+            (1440.0, 900.0, 1.0),
+            (1440.0, 900.0, 1.5),
+            (1440.0, 900.0, 2.0),
+            (1080.0, 700.0, 2.0),
+        ] {
+            let ui = AppWindow::new().unwrap();
+            ui.window().set_size(slint::LogicalSize::new(width, height));
+            ui.global::<crate::Theme>().set_ui_scale(scale);
+            ui.set_chinese(chinese);
+            ui.set_ai_visible(true);
+            ui.set_ai_collapsed(false);
+            ui.set_ai_settings(true);
+            ui.set_ai_settings_page(1);
+            ui.set_ai_skills(ModelRc::new(VecModel::from(vec![
+                "Built-in / legacy preset".into(),
+                "机械音效 / Mechanical sounds".into(),
+            ])));
+            ui.set_ai_skill_index(1);
+            ui.set_ai_skill_id("owned-fixture".into());
+            ui.set_ai_skill_name("机械音效 / Mechanical sounds".into());
+            ui.set_ai_active_skill_name("机械音效 / Mechanical sounds".into());
+            ui.set_ai_skill_body(audiolib_ai::customization::BUILTIN_SKILL.into());
+            ui.set_ai_skill_prompt(audiolib_ai::config::DEFAULT_PROMPT.into());
+            ui.set_ai_skill_techniques(audiolib_ai::customization::BUILTIN_TECHNIQUES.into());
+            ui.set_ai_skill_validation("4500 / 16000 characters".into());
+            let action = std::rc::Rc::new(std::cell::Cell::new(-1));
+            let observed = action.clone();
+            ui.on_ai_action(move |kind, _| observed.set(kind));
+            ui.show().unwrap();
+            save_snapshot(
+                &ui,
+                &format!(
+                    "ai-skills-{}-{width}-x{scale}.png",
+                    if chinese { "cn" } else { "en" }
+                ),
+            );
+            let save = i_slint_backend_testing::ElementHandle::find_by_accessible_label(
+                &ui,
+                if chinese {
+                    "保存并启用"
+                } else {
+                    "Save and activate"
+                },
+            )
+            .next()
+            .unwrap();
+            save.mock_single_click(slint::platform::PointerEventButton::Left);
+            assert_eq!(action.get(), 33);
+            let folder = i_slint_backend_testing::ElementHandle::find_by_accessible_label(
+                &ui,
+                "Open AI skill folder",
+            )
+            .next()
+            .unwrap();
+            folder.mock_single_click(slint::platform::PointerEventButton::Left);
+            assert_eq!(action.get(), 43);
+            ui.set_ai_settings_page(2);
+            save_snapshot(
+                &ui,
+                &format!(
+                    "ai-behavior-{}-{width}-x{scale}.png",
+                    if chinese { "cn" } else { "en" }
+                ),
+            );
+            ui.hide().unwrap();
+        }
+    }
+}
+
 fn long_remote_source_label(chinese: bool) -> &'static str {
     if chinese {
         "服务器模式 · 影视制作音效资料库 — 当前项目使用的远端扩展拟音合集 · 音效库：木门、机械装置与室内环境素材 · 同步状态：已更新完整资料与目录，可继续检索与试听 · 较长的无空格服务器标识：sound-archive-production-foley-current-project.example.test:8791"
@@ -428,13 +503,101 @@ fn settings_pages_at_2_0_in_1080x700_scroll_to_their_last_controls() {
                 top >= 0.0 && panel_bottom <= 700.0,
                 "panel {top}..{panel_bottom}"
             );
+            let fixed_positions = [
+                ui.get_settings_title_top(),
+                ui.get_settings_navigation_top(),
+                ui.get_settings_content_top(),
+                ui.get_settings_content_bottom(),
+                ui.get_settings_footer_top(),
+                ui.get_settings_last_bottom(),
+            ];
+            assert!(fixed_positions[0] >= top);
+            assert!(fixed_positions[2] > fixed_positions[0]);
+            assert!(fixed_positions[3] > fixed_positions[2]);
+            assert!(
+                ui.get_settings_navigation_bottom() <= ui.get_settings_content_bottom(),
+                "{name}: category navigation must fit above the footer"
+            );
+            assert!(fixed_positions[4] >= fixed_positions[3]);
+            assert!(fixed_positions[5] <= panel_bottom);
+            let initial_page_bottom = ui.get_settings_page_bottom();
             ui.invoke_scroll_main_to_end();
             save_snapshot(&ui, &format!("{name}-{language}-x2-1080x700-scrollmax.png"));
+            let scrolled_positions = [
+                ui.get_settings_title_top(),
+                ui.get_settings_navigation_top(),
+                ui.get_settings_content_top(),
+                ui.get_settings_content_bottom(),
+                ui.get_settings_footer_top(),
+                ui.get_settings_last_bottom(),
+            ];
+            assert_eq!(
+                fixed_positions, scrolled_positions,
+                "{name}: scrolling must keep the title, navigation and footer fixed"
+            );
+            let page_bottom = ui.get_settings_page_bottom();
+            assert!(
+                page_bottom <= ui.get_settings_content_bottom() + 1.0,
+                "{name}: page bottom {page_bottom} must fit the content viewport"
+            );
+            if initial_page_bottom > ui.get_settings_content_bottom() + 1.0 {
+                assert!(
+                    page_bottom < initial_page_bottom,
+                    "{name}: overflowing settings content must actually scroll"
+                );
+            }
             let last = ui.get_settings_last_bottom();
             assert!(
                 last <= panel_bottom && last > top,
                 "{name}: last {last}, panel {top}..{panel_bottom}"
             );
+            if page == 0 || page == 3 {
+                use i_slint_backend_testing::ElementHandle;
+                use slint::platform::{PointerEventButton, WindowEvent};
+
+                let applied = std::rc::Rc::new(std::cell::Cell::new(0));
+                let observed = applied.clone();
+                ui.on_output_apply_requested(move || observed.set(observed.get() + 1));
+                let observed = applied.clone();
+                ui.on_shared_sync_save_requested(move || observed.set(observed.get() + 1));
+                ui.set_output_dirty(page == 0);
+                ui.set_shared_sync_dirty(page == 3);
+                let apply =
+                    ElementHandle::find_by_element_id(&ui, "AppWindow::settings-footer-apply")
+                        .next()
+                        .expect("fixed footer apply action");
+                let origin = apply.absolute_position();
+                let size = apply.size();
+                let position = slint::LogicalPosition::new(
+                    origin.x + size.width / 2.0,
+                    origin.y + size.height / 2.0,
+                );
+                ui.window()
+                    .dispatch_event(WindowEvent::PointerMoved { position });
+                ui.window().dispatch_event(WindowEvent::PointerPressed {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+                ui.window().dispatch_event(WindowEvent::PointerReleased {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+                assert_eq!(applied.get(), 1, "{name}: scrolled footer stays clickable");
+                assert!(ui.get_settings_visible());
+                ui.set_output_dirty(false);
+                ui.set_shared_sync_dirty(false);
+            }
+            // The title close action remains physically clickable after the
+            // settings content reaches its end at the highest supported scale.
+            crate::ui_tests::click_label(
+                &ui,
+                if chinese {
+                    "关闭全局设置"
+                } else {
+                    "Close global settings"
+                },
+            );
+            assert!(!ui.get_settings_visible());
             ui.hide().unwrap();
         }
     }

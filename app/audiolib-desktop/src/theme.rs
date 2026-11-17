@@ -103,37 +103,195 @@ pub(crate) const STUDIO_PALETTE: Palette = Palette {
     overlay: 0xa800_0000,
 };
 
-/// Neutral graphite workbench with soft sage actions, joining the Studio shell
-/// to the original player without the Studio theme's saturated cyan accents.
+/// Cool graphite layers and mist-silver actions, with the original player layout.
 pub(crate) const DEFAULT_V2_PALETTE: Palette = Palette {
-    bg: 0xff1c_2024,
-    panel: 0xff23_282d,
-    raised: 0xff2e_353c,
-    hover: 0xff3a_444c,
-    border: 0xff38_4149,
-    strong_border: 0xff6a_7881,
-    ink: 0xffdf_e5e7,
-    dim: 0xffaf_bbc1,
-    muted: 0xff96_a5ad,
-    accent: 0xff94_b5ad,
-    accent_hover: 0xffb0_cbc3,
-    mint: 0xffa0_c2b8,
-    apricot: 0xffce_bd9d,
-    coral: 0xffce_a39b,
-    on_accent: 0xff20_2c29,
-    selected: 0xff30_4442,
-    checked: 0xff39_504b,
-    alternate: 0xff26_2d33,
-    warning: 0xffce_bd9d,
-    trough: 0xff19_1e22,
-    segment: 0xff3c_484f,
-    danger: 0xffd2_a3a1,
-    danger_surface: 0xff3d_2e32,
-    player: DEFAULT_PALETTE.player,
-    player_border: DEFAULT_PALETTE.player_border,
-    tooltip: 0xff16_1b1f,
+    bg: 0xff20_2327,
+    panel: 0xff29_2d31,
+    raised: 0xff34_393e,
+    hover: 0xff41_474d,
+    border: 0xff45_4e56,
+    strong_border: 0xff81_8b94,
+    ink: 0xffe5_e7e9,
+    dim: 0xffbe_c5cc,
+    muted: 0xffab_b5bf,
+    accent: 0xffb2_bdc5,
+    accent_hover: 0xffd0_d8de,
+    mint: 0xffb2_c8bc,
+    apricot: 0xffd6_c39f,
+    coral: 0xffd8_acaa,
+    on_accent: 0xff22_2a30,
+    selected: 0xff3d_4851,
+    checked: 0xff48_5660,
+    alternate: 0xff2c_3136,
+    warning: 0xffd6_c39f,
+    trough: 0xff1b_1e22,
+    segment: 0xff47_525c,
+    danger: 0xffd8_acaa,
+    danger_surface: 0xff3c_2d30,
+    player: 0xff24_282d,
+    player_border: 0xff52_5e68,
+    tooltip: 0xff18_1b1f,
     overlay: 0xa800_0000,
 };
+
+/// OLED-oriented black workspace with restrained charcoal elevation and silver actions.
+/// Only semantic status colors use hue; no backdrop lifts the pure-black surfaces.
+const OBSIDIAN_PALETTE: Palette = Palette {
+    bg: 0xff00_0000,
+    panel: 0xff0c_0c0c,
+    raised: 0xff18_1818,
+    hover: 0xff24_2424,
+    border: 0xff28_2828,
+    strong_border: 0xff6e_6e6e,
+    ink: 0xffd0_d0d0,
+    dim: 0xffa8_a8a8,
+    muted: 0xff96_9696,
+    accent: 0xffb8_b8b8,
+    accent_hover: 0xffd0_d0d0,
+    on_accent: 0xff12_1212,
+    selected: 0xff28_2828,
+    checked: 0xff36_3636,
+    alternate: 0xff08_0808,
+    mint: 0xffa9_b7ad,
+    apricot: 0xffc6_b48f,
+    warning: 0xffc6_b48f,
+    coral: 0xffd4_9a9a,
+    danger: 0xffd4_9a9a,
+    danger_surface: 0xff26_1a1a,
+    trough: 0xff00_0000,
+    segment: 0xff33_3333,
+    player: 0xff00_0000,
+    player_border: 0xff30_3030,
+    tooltip: 0xff12_1212,
+    overlay: 0xa800_0000,
+};
+const OCEAN_PALETTE: Palette = Palette {
+    bg: 0xff17_202b,
+    panel: 0xff20_2b38,
+    raised: 0xff2b_3949,
+    hover: 0xff37_495c,
+    border: 0xff3e_5063,
+    strong_border: 0xff7f_93a7,
+    ink: 0xffe0_e6ed,
+    dim: 0xffb6_c3d1,
+    muted: 0xffa3_b2c2,
+    accent: 0xff9f_bcd5,
+    accent_hover: 0xffc2_d5e5,
+    mint: 0xffb2_c8bc,
+    apricot: 0xffd6_c39f,
+    coral: 0xffd8_acaa,
+    on_accent: 0xff1d_2b39,
+    selected: 0xff34_485b,
+    checked: 0xff40_586d,
+    alternate: 0xff24_303e,
+    warning: 0xffd6_c39f,
+    trough: 0xff13_1b25,
+    segment: 0xff40_546a,
+    danger: 0xffd8_acaa,
+    danger_surface: 0xff3c_2c37,
+    player: 0xff1c_2632,
+    player_border: 0xff50_677d,
+    tooltip: 0xff10_1822,
+    overlay: 0xa800_0000,
+};
+const AMBER_PALETTE: Palette = Palette {
+    bg: 0xff24_211e,
+    panel: 0xff2d_2925,
+    raised: 0xff3a_342e,
+    hover: 0xff49_4036,
+    border: 0xff51_473c,
+    strong_border: 0xff9b_8b78,
+    ink: 0xffe9_e3d9,
+    dim: 0xffc5_baaa,
+    muted: 0xffb4_a897,
+    accent: 0xffcc_b994,
+    accent_hover: 0xffe4_d5b9,
+    mint: 0xffb2_c8bc,
+    apricot: 0xffd6_c39f,
+    coral: 0xffd8_acaa,
+    on_accent: 0xff30_281e,
+    selected: 0xff4b_4031,
+    checked: 0xff5b_4c39,
+    alternate: 0xff30_2c27,
+    warning: 0xffd6_c39f,
+    trough: 0xff1d_1a17,
+    segment: 0xff53_483c,
+    danger: 0xffd8_acaa,
+    danger_surface: 0xff40_2d2b,
+    player: 0xff27_231f,
+    player_border: 0xff63_5545,
+    tooltip: 0xff19_1613,
+    overlay: 0xa800_0000,
+};
+
+fn palette_for(id: &str) -> &'static Palette {
+    match id {
+        DEFAULT_V2_THEME => &DEFAULT_V2_PALETTE,
+        "studio" => &STUDIO_PALETTE,
+        "obsidian" => &OBSIDIAN_PALETTE,
+        "ocean" => &OCEAN_PALETTE,
+        "amber" => &AMBER_PALETTE,
+        _ => &DEFAULT_PALETTE,
+    }
+}
+
+fn recommended_themes() -> ModelRc<crate::ThemePreview> {
+    let cards = [
+        (
+            DEFAULT_V2_THEME,
+            "Graphite",
+            "石墨",
+            "Cool graphite, mist silver",
+            "冷灰层次，雾银点缀",
+        ),
+        (
+            "obsidian",
+            "Obsidian",
+            "护眼黑曜",
+            "OLED black, soft white",
+            "OLED 纯黑，柔白文字",
+        ),
+        (
+            "ocean",
+            "Ocean",
+            "深海蓝",
+            "Slate blue, quiet focus",
+            "低饱和蓝灰，清晰沉静",
+        ),
+        (
+            "amber",
+            "Warm amber",
+            "暖砂琥珀",
+            "Warm grays, soft sand",
+            "暖灰底色，淡砂金点缀",
+        ),
+        (
+            DEFAULT_THEME,
+            "Original default",
+            "原始默认",
+            "Original colors and layout",
+            "保留最初的配色与布局",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, name, name_cn, description, description_cn)| {
+        let p = palette_for(id);
+        crate::ThemePreview {
+            index: theme_index(id),
+            name: name.into(),
+            name_cn: name_cn.into(),
+            description: description.into(),
+            description_cn: description_cn.into(),
+            bg: Color::from_argb_encoded(p.bg),
+            panel: Color::from_argb_encoded(p.panel),
+            ink: Color::from_argb_encoded(p.ink),
+            accent: Color::from_argb_encoded(p.accent),
+            selected: Color::from_argb_encoded(p.selected),
+        }
+    })
+    .collect::<Vec<_>>();
+    ModelRc::new(VecModel::from(cards))
+}
 
 /// Appearance combo index for a theme identifier; unknown themes select the default.
 pub(crate) fn theme_index(id: &str) -> i32 {
@@ -163,20 +321,18 @@ pub(crate) fn apply_theme(ui: &AppWindow, id: &str) {
     };
     ui.set_theme_names(names(false));
     ui.set_theme_names_cn(names(true));
+    ui.set_recommended_themes(recommended_themes());
     let id = normalize_theme(id);
     let index = theme_index(&id);
     ui.set_theme_index(index);
     let entry = &BUILTIN_THEMES[index as usize];
     // A new design gets its own palette and presentation. Preserve the original
     // default, while spectral frequency colors remain independent audio data.
-    let palette = match entry.id {
-        DEFAULT_V2_THEME => &DEFAULT_V2_PALETTE,
-        _ if entry.player_style == PlayerStyle::Studio => &STUDIO_PALETTE,
-        _ => &DEFAULT_PALETTE,
-    };
+    let palette = palette_for(entry.id);
     let theme = ui.global::<crate::Theme>();
     let modern_style = entry.workbench_style == WorkbenchStyle::Studio;
     let modern_player = entry.player_style == PlayerStyle::Studio;
+    let tinted_surfaces = matches!(entry.id, DEFAULT_V2_THEME | "obsidian" | "ocean" | "amber");
     let presentation_changed =
         theme.get_modern_style() != modern_style || theme.get_modern_player() != modern_player;
     if presentation_changed {
@@ -185,11 +341,15 @@ pub(crate) fn apply_theme(ui: &AppWindow, id: &str) {
         // its change trackers. Clearing on a deferred style-changed handler is late.
         ui.invoke_clear_audition_input_feedback();
     }
-    if modern_style {
+    // Solid-color themes never display the legacy SVG backdrops. Avoid a large
+    // synchronous rasterization on their first selection, especially during saves.
+    if modern_style && !tinted_surfaces {
         install_studio_surfaces(&theme);
     }
     theme.set_modern_style(modern_style);
     theme.set_modern_player(modern_player);
+    theme.set_tinted_surfaces(tinted_surfaces);
+    theme.set_pure_black_workspace(entry.id == "obsidian");
     let color = Color::from_argb_encoded;
     theme.set_bg(color(palette.bg));
     theme.set_panel(color(palette.panel));

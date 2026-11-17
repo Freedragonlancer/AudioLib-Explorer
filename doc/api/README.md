@@ -1623,7 +1623,7 @@ base_url = "https://api.openai.com/v1"
 
 请求为 `audiolib_ai::relay::RelayRequest`：`profile` 只含 `protocol`、`base_url`、`model`、`timeout_seconds`；`api_key` 为临时供应商密钥；`operation.type` 为 `models` 或 `generate`，必须与路由一致。生成另含 `intent`、`layers`、`guidance` 和有界 `session`。不发送本地配置 ID、凭据引用、音频、文件路径或音库 Metadata。密钥不写配置、错误或日志。
 
-请求体最多 64 KiB，供应商完整响应最多 512 KiB。供应商期限 2–600 秒；AI 路由独立期限 620 秒，客户端保留配置期限加 5 秒转发余量，均不继承普通 API 的短超时。并发默认 4，允许配置 1–64；槽位由实际阻塞网络 worker 持有到结束，断开客户端不会提前腾出槽位。调用不自动重试。
+请求体最多 64 KiB，供应商完整响应最多 512 KiB。生成 `guidance` 支持 1–16000 个 Unicode 字符，用于客户端合并的 Skill 文档；整个请求仍受 64 KiB 上限约束。原兼容预设编辑器继续限制 2000 字符，旧客户端请求保持兼容。旧服务器若仍限制 2000 字符，需要升级才能使用较长的自定义 Skill；客户端不会自动回退直连。供应商期限 2–600 秒；AI 路由独立期限 620 秒，客户端保留配置期限加 5 秒转发余量，均不继承普通 API 的短超时。并发默认 4，允许配置 1–64；槽位由实际阻塞网络 worker 持有到结束，断开客户端不会提前腾出槽位。调用不自动重试。
 
 成功返回 tagged JSON：`type=models` 含 `models`；`type=generated` 含 `plan`、`input_tokens`、`output_tokens`、可选 `decision`。上游失败返回 HTTP 200 的 `type=error` 与有界 `error.type`（如 `timeout`／`http`），与 AudioLib 自身的 HTTP 状态区分。客户端再次验证模型 ID、查询结构、出处及模式，然后在当前音库核验命中。
 

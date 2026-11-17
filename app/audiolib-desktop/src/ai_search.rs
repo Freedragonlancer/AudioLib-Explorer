@@ -13,6 +13,10 @@ use audiolib_core::ai_search::{
     validate_ai_query,
 };
 
+#[path = "ai_settings.rs"]
+mod settings;
+use settings::SettingsJob;
+
 // The admitted plan determines whether six main queries or eight mixed queries
 // are available; task admission still needs the largest supported batch bound.
 pub(super) const MAX_AI_RECOMMENDATIONS: usize = MAX_AI_LAYERED_RECOMMENDATIONS;
@@ -127,6 +131,14 @@ struct PendingApply {
     query: slint::SharedString,
 }
 
+#[derive(PartialEq, Eq, Hash)]
+enum SettingsSaveTarget {
+    Skill(String),
+    SearchBehavior,
+    LegacySelection,
+    Import,
+}
+
 #[derive(Default)]
 pub(super) struct Runtime {
     store: Mutex<Option<ProfileStore>>,
@@ -138,11 +150,16 @@ pub(super) struct Runtime {
     saves: Mutex<bool>,
     save_wake: Condvar,
     save_error: Mutex<Option<String>>,
+    // A successful behavior/provider save does not persist a failed Skill draft,
+    // even when both operations replace the same customization.json file.
+    settings_save_errors: Mutex<std::collections::HashMap<SettingsSaveTarget, String>>,
     draft_protocol: std::sync::atomic::AtomicI32,
     // ComboBox updates its bound index before invoking selected; retain the
     // owner of the still-displayed form until that callback switches profiles.
     editor_selection: std::sync::atomic::AtomicI32,
     drafts: Mutex<std::collections::HashMap<String, FormDraft>>,
+    skill_drafts: Mutex<std::collections::HashMap<String, audiolib_ai::customization::Skill>>,
+    skill_ids: Mutex<Vec<String>>,
     batch_revision: AtomicU64,
     verified_search: Mutex<Option<VerifiedSearch>>,
 }
@@ -160,7 +177,15 @@ impl Runtime {
         // Close has set Controller::closing before this barrier. In-flight usage
         // writes drain here; later network completions recheck closing under this lock.
         let _store = self.store.lock().unwrap();
-        self.save_error.lock().unwrap().clone().map_or(Ok(()), Err)
+        let error = self.save_error.lock().unwrap().clone().or_else(|| {
+            self.settings_save_errors
+                .lock()
+                .unwrap()
+                .values()
+                .next()
+                .cloned()
+        });
+        error.map_or(Ok(()), Err)
     }
 }
 
@@ -173,6 +198,7 @@ enum Job {
     Save(Profile, Option<ApiKey>),
     Remove(String),
     SavePrompt(bool, String),
+    Settings(SettingsJob),
 }
 enum Reply {
     Loaded,
@@ -183,6 +209,11 @@ enum Reply {
     Removed,
     PromptSaved,
     SearchFailed,
+    SettingsSaved(Option<String>, bool),
+    SkillFolder(Option<PathBuf>),
+    SkillExported(PathBuf),
+    SkillLocalFolder(PathBuf),
+    SettingsRejected(AiError),
 }
 
 impl Controller {
@@ -476,6 +507,7 @@ impl Controller {
                     }
                 }
                 26 => c.activate_ai_unsaved_profile(&ui),
+                30..=43 => c.ai_settings_action(&ui, kind, index),
                 18 => {
                     c.ai.drafts
                         .lock()
@@ -1289,6 +1321,7 @@ impl Controller {
         ui.set_ai_providers(ModelRc::new(VecModel::from(names)));
         drop(store);
         self.refresh_ai_name_hint(ui);
+        self.publish_ai_customization(ui, false);
     }
     fn ai_failure(&self, ui: &AppWindow, message: slint::SharedString) {
         ui.set_ai_error(true);
@@ -1367,7 +1400,25 @@ impl Controller {
         let probe_provider = self.provider();
         let probe_request = self.request.lock().unwrap().clone();
         let probe_controls = SearchControls::capture(ui);
-        let saving = matches!(job, Job::Save(..) | Job::Remove(..) | Job::SavePrompt(..));
+        let saving = matches!(
+            job,
+            Job::Save(..)
+                | Job::Remove(..)
+                | Job::SavePrompt(..)
+                | Job::Settings(SettingsJob::Save(..) | SettingsJob::Import(..))
+        );
+        // Capture the admitted editor identity, never the later current page.
+        // A matching successful save/delete or an explicit discard resolves it.
+        let settings_save_target = match &job {
+            Job::Settings(SettingsJob::Save(_, true)) => Some(if ui.get_ai_skill_id().is_empty() {
+                SettingsSaveTarget::LegacySelection
+            } else {
+                SettingsSaveTarget::Skill(ui.get_ai_skill_id().to_string())
+            }),
+            Job::Settings(SettingsJob::Save(_, false)) => Some(SettingsSaveTarget::SearchBehavior),
+            Job::Settings(SettingsJob::Import(_)) => Some(SettingsSaveTarget::Import),
+            _ => None,
+        };
         // One submission owns its automatic-search choice. Profile operations
         // and model probes never create tasks, even if the option is enabled.
         let generating = matches!(&job, Job::Local(..) | Job::Generate(..));
@@ -1376,9 +1427,10 @@ impl Controller {
             _ => false,
         };
         let auto_search = generating && ui.get_ai_auto_search();
+        let auto_search_count =
+            (ui.get_ai_auto_search_count() as usize).clamp(1, MAX_AI_AUTO_TASKS);
         if saving {
             *self.ai.saves.lock().unwrap() = true;
-            *self.ai.save_error.lock().unwrap() = None;
         }
         ui.set_ai_busy(true);
         ui.set_ai_error(false);
@@ -1413,6 +1465,7 @@ impl Controller {
                 }
                 let reply = match job {
                     Job::Load => Ok(Reply::Loaded),
+                    Job::Settings(job) => c.run_ai_settings(job),
                     Job::Local(intent, layers) => Ok(Reply::Plan(
                         ReferenceIndex::embedded().local_plan(&intent, layers)?,
                         String::new(),
@@ -1498,11 +1551,18 @@ impl Controller {
                         Ok(Reply::Probed)
                     }
                     Job::Generate(profile, intent, layers, guidance) => {
+                        let guidance =
+                            c.ai.store
+                                .lock()
+                                .unwrap()
+                                .as_ref()
+                                .ok_or(AiError::Storage)?
+                                .generation_guidance(&guidance)?;
                         profile.validate_request()?;
                         let transport = c.ai_transport(&profile, &root, &relay_settings)?;
                         audiolib_core::ai_search::validate_intent(&intent)
                             .map_err(|_| AiError::Invalid)?;
-                        validate_instruction(&guidance)?;
+                        audiolib_ai::config::validate_guidance(&guidance)?;
                         // Validate the finite request before recording an attempt.
                         if profile.protocol == Protocol::Jev {
                             audiolib_ai::jev::request(&profile.model, &intent, layers, &guidance)?;
@@ -1579,7 +1639,21 @@ impl Controller {
                 }
             })();
             if saving {
-                *c.ai.save_error.lock().unwrap() = result.as_ref().err().map(|e| e.to_string());
+                // Rejected input has not attempted a write: do not turn a bad import
+                // into a close blocker, or hide an earlier real persistence failure.
+                if !matches!(&result, Ok(Reply::SettingsRejected(_))) {
+                    if let Some(target) = settings_save_target {
+                        let mut errors = c.ai.settings_save_errors.lock().unwrap();
+                        if let Err(error) = &result {
+                            errors.insert(target, error.to_string());
+                        } else {
+                            errors.remove(&target);
+                        }
+                    } else {
+                        *c.ai.save_error.lock().unwrap() =
+                            result.as_ref().err().map(|e| e.to_string());
+                    }
+                }
                 *c.ai.saves.lock().unwrap() = false;
                 c.ai.save_wake.notify_all();
             }
@@ -1599,7 +1673,11 @@ impl Controller {
                     || (generating && SearchControls::capture(&ui) != probe_controls))
                     && !matches!(
                         &result,
-                        Ok(Reply::Loaded | Reply::Saved | Reply::Removed | Reply::PromptSaved)
+                        Ok(Reply::Loaded
+                            | Reply::Saved
+                            | Reply::Removed
+                            | Reply::PromptSaved
+                            | Reply::SettingsSaved(..))
                     )
                 {
                     ui.set_ai_status(c.localized(
@@ -1664,7 +1742,7 @@ impl Controller {
                         });
                         ui.set_ai_status(status);
                         if auto_search {
-                            c.search_ai_recommendations(&ui, MAX_AI_AUTO_TASKS);
+                            c.search_ai_recommendations(&ui, auto_search_count);
                         }
                     }
                     Ok(Reply::Models(models)) => {
@@ -1722,6 +1800,7 @@ impl Controller {
                         } else { 0 };
                         ui.set_ai_provider_index(index);
                         c.select_ai_profile(&ui, index);
+                        c.publish_ai_customization(&ui, true);
                         c.apply_ai_sidebar_default(&ui);
                         ui.set_ai_status(if index == 0 { c.localized(
                             "本地词表已就绪，无需 API Key",
@@ -1730,6 +1809,23 @@ impl Controller {
                     }
                     Ok(Reply::PromptSaved) => {
                         ui.set_ai_status(c.localized("提示词已保存", "Prompt saved"));
+                    }
+                    Ok(Reply::SettingsSaved(imported, editor_saved)) => c.finish_ai_settings(&ui, imported, editor_saved),
+                    Ok(Reply::SettingsRejected(error)) => c.ai_error(&ui, error),
+                    Ok(Reply::SkillFolder(path)) => {
+                        if let Some(path) = path { ui.set_ai_skill_folder(path.to_string_lossy().into_owned().into()); }
+                        ui.set_ai_status("".into());
+                    }
+                    Ok(Reply::SkillExported(path)) => ui.set_ai_status(c.localized(
+                        &format!("已导出到 {}", path.display()), &format!("Exported to {}", path.display()),
+                    )),
+                    Ok(Reply::SkillLocalFolder(path)) => {
+                        ui.set_ai_skill_folder(path.to_string_lossy().into_owned().into());
+                        ui.set_ai_status(c.localized(
+                            "已准备本地查看副本；外部编辑后可从“导入 / 导出”重新导入",
+                            "Local viewing copy ready; use Import / export to import external edits",
+                        ));
+                        c.open_explorer(path.to_string_lossy().into_owned(), false);
                     }
                     Ok(Reply::SearchFailed) => {
                         c.clear_ai_suggestions(&ui);
