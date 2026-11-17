@@ -1518,8 +1518,15 @@ export component AppWindow inherits Window {
     out property <length> settings-panel-top: settings-panel.absolute-position.y;
     out property <length> settings-panel-bottom: settings-panel.absolute-position.y + settings-panel.height;
     out property <length> settings-last-bottom: settings-footer.absolute-position.y + settings-footer.height;
+    out property <length> settings-footer-top: settings-footer.absolute-position.y;
+    out property <length> settings-title-top: settings-title.absolute-position.y;
+    out property <length> settings-navigation-top: settings-navigation.absolute-position.y;
+    out property <length> settings-navigation-bottom: settings-navigation.absolute-position.y + settings-navigation.height;
+    out property <length> settings-content-top: settings-scroll.absolute-position.y;
+    out property <length> settings-content-bottom: settings-scroll.absolute-position.y + settings-scroll.height;
+    out property <length> settings-page-bottom: root.settings-page == 0 ? audio-page.absolute-position.y + audio-page.height : root.settings-page == 1 ? appearance-page.absolute-position.y + appearance-page.height : root.settings-page == 2 ? search-settings-page.absolute-position.y + search-settings-page.height : root.settings-page == 3 ? sync-settings-page.absolute-position.y + sync-settings-page.height : cache-settings-page.absolute-position.y + cache-settings-page.height;
     out property <bool> settings-hidden-page-focused: (root.settings-page != 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page != 1 && (appearance-first.has-focus || appearance-scale.has-focus || appearance-language.has-focus)) || (root.settings-page != 2 && (search-settings-first.has-focus || pagination-check.has-focus || pagination-size.has-focus)) || (root.settings-page != 3 && sync-settings-first.has-focus) || (root.settings-page != 4 && cache-settings-first.has-focus);
-    out property <bool> settings-visible-page-focused: (root.settings-page == 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page == 1 && (appearance-first.has-focus || appearance-scale.has-focus || appearance-language.has-focus)) || (root.settings-page == 2 && (search-settings-first.has-focus || pagination-check.has-focus || pagination-size.has-focus)) || (root.settings-page == 3 && sync-settings-first.has-focus) || (root.settings-page == 4 && cache-settings-first.has-focus) || settings-nav-general.has-focus || settings-nav-search.has-focus || settings-nav-audio.has-focus || settings-nav-sync.has-focus || settings-nav-cache.has-focus || appearance-close.has-focus || settings-close-return.has-focus;
+    out property <bool> settings-visible-page-focused: (root.settings-page == 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page == 1 && (appearance-first.has-focus || appearance-scale.has-focus || appearance-language.has-focus)) || (root.settings-page == 2 && (search-settings-first.has-focus || pagination-check.has-focus || pagination-size.has-focus)) || (root.settings-page == 3 && sync-settings-first.has-focus) || (root.settings-page == 4 && cache-settings-first.has-focus) || settings-nav-general.has-focus || settings-nav-search.has-focus || settings-nav-audio.has-focus || settings-nav-sync.has-focus || settings-nav-cache.has-focus || settings-title-close.has-focus || appearance-close.has-focus || settings-footer-apply.has-focus || settings-close-return.has-focus;
     // Test-only: scroll the main view and the settings dialog to their bottom-right corner.
     public function scroll-main-to-end() {
         if Theme.modern-style { studio-main-scroll.viewport-y = min(0px, (Theme.modern-style ? studio-main-scroll.visible-height : main-scroll.visible-height) - (Theme.modern-style ? studio-main-scroll.viewport-height : main-scroll.viewport-height)); } else { main-scroll.viewport-y = min(0px, (Theme.modern-style ? studio-main-scroll.visible-height : main-scroll.visible-height) - (Theme.modern-style ? studio-main-scroll.viewport-height : main-scroll.viewport-height)); }
@@ -2307,6 +2314,10 @@ export component AppWindow inherits Window {
             root.settings-cover-cache-confirm = false;
             root.output-settings-requested();
             root.global-settings-opened();
+        }
+        if root.settings-page != clamp(page, 0, 4) || !root.settings-visible {
+            settings-scroll.viewport-y = 0px;
+            settings-scroll.viewport-x = 0px;
         }
         root.settings-page = clamp(page, 0, 4);
         root.settings-visible = true;
@@ -4899,7 +4910,7 @@ main-scroll := ScrollView {
         property <bool> reverse-wrap: false;
         capture-key-pressed(event) => {
             if event.text == Key.Escape { root.dismiss-modal(); return accept; }
-            if (event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) && settings-nav-general.has-focus {
+            if (event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) && settings-title-close.has-focus {
                 self.reverse-wrap = true; settings-dialog-end.focus(); self.reverse-wrap = false; return reject;
             }
             reject
@@ -4910,24 +4921,29 @@ main-scroll := ScrollView {
         background: Theme.overlay;
         TouchArea { }
         settings-panel := Rectangle { width: min(860px * Theme.ui-scale, parent.width - 24px); height: min(650px * Theme.ui-scale, parent.height - 24px); x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.panel; border-radius: 12px * Theme.ui-scale; border-width: 1px; border-color: Theme.strong-border;
-          // Scrolls when the scaled dialog is larger than the window.
-          settings-scroll := ScrollView { width: parent.width; height: parent.height;
-          viewport-width: max(self.visible-width, settings-layout.min-width);
-          viewport-height: max(self.visible-height, settings-layout.min-height);
-          settings-layout := VerticalLayout { width: settings-scroll.viewport-width; height: settings-scroll.viewport-height; padding: 20px * Theme.ui-scale; spacing: 13px * Theme.ui-scale;
-            Text { text: root.chinese ? "全局设置" : "Global settings"; color: Theme.text(5, 0, Theme.ink); font-size: Theme.font(23); font-weight: 600; }
-            Label { text-module: 5; text: root.chinese ? "应用于本机所有音效库；音效库数据和服务器配置在音效库管理中调整。" : "Applies to all libraries on this device. Manage library data and server connections in Library."; wrap: word-wrap; }
-            HorizontalLayout { vertical-stretch: 1; spacing: 20px * Theme.ui-scale;
-            VerticalLayout { width: 160px * Theme.ui-scale; alignment: start; spacing: 6px * Theme.ui-scale;
-                settings-nav-general := Action { text-module: 5; height: 34px * Theme.ui-scale; label: root.chinese ? "通用与界面" : "General / interface"; active: root.settings-page == 1; enabled: !root.settings-busy && !root.settings-close-confirm; clicked => { root.open-global-settings(1); } }
-                settings-nav-search := Action { text-module: 5; height: 34px * Theme.ui-scale; label: root.chinese ? "搜索与任务" : "Search / tasks"; active: root.settings-page == 2; enabled: !root.settings-busy && !root.settings-close-confirm; clicked => { root.open-global-settings(2); } }
-                settings-nav-audio := Action { text-module: 5; height: 34px * Theme.ui-scale; label: root.chinese ? "播放与音频" : "Audio / playback"; active: root.settings-page == 0; enabled: !root.settings-busy && !root.settings-close-confirm; clicked => { root.open-global-settings(0); } }
-                settings-nav-sync := Action { text-module: 5; height: 34px * Theme.ui-scale; label: root.chinese ? "服务器与同步" : "Server / sync"; active: root.settings-page == 3; enabled: !root.settings-busy && !root.settings-close-confirm; clicked => { root.open-global-settings(3); } }
-                settings-nav-cache := Action { text-module: 5; height: 34px * Theme.ui-scale; label: root.chinese ? "本机缓存" : "Local caches"; active: root.settings-page == 4; enabled: !root.settings-busy && !root.settings-close-confirm; clicked => { root.open-global-settings(4); } }
+          // Keep the title, categories and actions outside the settings viewport.
+          VerticalLayout { padding: 20px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
+            HorizontalLayout { height: 34px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
+                settings-title := Text { horizontal-stretch: 1; text: root.chinese ? "全局设置" : "Global settings"; color: Theme.text(5, 0, Theme.ink); font-size: Theme.font(23); font-weight: 600; }
+                settings-title-close := Action { text-module: 5; width: 36px * Theme.ui-scale; subtle: true; label: "×"; action-label: root.chinese ? "关闭全局设置" : "Close global settings"; enabled: !root.settings-busy && !root.settings-close-confirm; clicked => { root.request-close-settings(); } }
             }
+            Rectangle { height: 1px; background: Theme.border; }
+            HorizontalLayout { vertical-stretch: 1; min-height: 0px; spacing: 20px * Theme.ui-scale;
+            settings-navigation := VerticalLayout { width: 160px * Theme.ui-scale; alignment: start; spacing: 4px * Theme.ui-scale;
+                settings-nav-general := Action { text-module: 5; height: 30px * Theme.ui-scale; label: root.chinese ? "通用与界面" : "General / interface"; active: root.settings-page == 1; enabled: !root.settings-busy && !root.settings-close-confirm; clicked => { root.open-global-settings(1); } }
+                settings-nav-search := Action { text-module: 5; height: 30px * Theme.ui-scale; label: root.chinese ? "搜索与任务" : "Search / tasks"; active: root.settings-page == 2; enabled: !root.settings-busy && !root.settings-close-confirm; clicked => { root.open-global-settings(2); } }
+                settings-nav-audio := Action { text-module: 5; height: 30px * Theme.ui-scale; label: root.chinese ? "播放与音频" : "Audio / playback"; active: root.settings-page == 0; enabled: !root.settings-busy && !root.settings-close-confirm; clicked => { root.open-global-settings(0); } }
+                settings-nav-sync := Action { text-module: 5; height: 30px * Theme.ui-scale; label: root.chinese ? "服务器与同步" : "Server / sync"; active: root.settings-page == 3; enabled: !root.settings-busy && !root.settings-close-confirm; clicked => { root.open-global-settings(3); } }
+                settings-nav-cache := Action { text-module: 5; height: 30px * Theme.ui-scale; label: root.chinese ? "本机缓存" : "Local caches"; active: root.settings-page == 4; enabled: !root.settings-busy && !root.settings-close-confirm; clicked => { root.open-global-settings(4); } }
+            }
+            settings-scroll := ScrollView { horizontal-stretch: 1; vertical-stretch: 1; min-width: 0px; min-height: 0px;
+                viewport-width: max(self.visible-width, settings-layout.min-width, 402px * Theme.ui-scale);
+                viewport-height: max(self.visible-height, settings-layout.min-height);
+            settings-layout := VerticalLayout { width: settings-scroll.viewport-width; height: settings-scroll.viewport-height; padding-right: 12px * Theme.ui-scale; spacing: 14px * Theme.ui-scale;
+            Label { text-module: 5; text: root.chinese ? "应用于本机所有音效库；音效库数据和服务器配置在音效库管理中调整。" : "Applies to all libraries on this device. Manage library data and server connections in Library."; wrap: word-wrap; }
             Rectangle { horizontal-stretch: 1; vertical-stretch: 1;
                 min-height: root.settings-page == 0 ? audio-page.min-height : root.settings-page == 1 ? appearance-page.min-height : root.settings-page == 2 ? search-settings-page.min-height : root.settings-page == 3 ? sync-settings-page.min-height : cache-settings-page.min-height;
-                width: max(settings-panel.width - 220px * Theme.ui-scale, 390px * Theme.ui-scale, root.settings-page == 0 ? audio-page.min-width : root.settings-page == 1 ? appearance-page.min-width : root.settings-page == 2 ? search-settings-page.min-width : root.settings-page == 3 ? sync-settings-page.min-width : cache-settings-page.min-width);
+                min-width: root.settings-page == 0 ? audio-page.min-width : root.settings-page == 1 ? appearance-page.min-width : root.settings-page == 2 ? search-settings-page.min-width : root.settings-page == 3 ? sync-settings-page.min-width : cache-settings-page.min-width;
             appearance-page := VerticalLayout { width: parent.width; visible: root.settings-page == 1; spacing: 14px * Theme.ui-scale;
                 Text { text: root.chinese ? "外观与个性化" : "Appearance and personalization"; color: Theme.text(5, 0, Theme.ink); font-size: Theme.font(19); font-weight: 600; }
                 appearance-first := AppearanceEditor {
@@ -5078,13 +5094,16 @@ main-scroll := ScrollView {
             }
             }
             }
+            }
+            }
+            Rectangle { height: 1px; background: Theme.border; }
             settings-footer := HorizontalLayout { height: 34px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
-                Label { text-module: 5; horizontal-stretch: 1; text: root.output-dirty || root.shared-sync-dirty ? (root.chinese ? "有尚未应用的设置" : "Some changes have not been applied") : (root.chinese ? "即时偏好已自动保存" : "Immediate preferences are saved automatically"); }
-                appearance-close := Action { text-module: 5; width: 84px * Theme.ui-scale; primary: true; enabled: !root.settings-busy && !root.settings-close-confirm; label: root.chinese ? "关闭" : "Close"; clicked => { root.request-close-settings(); } }
+                Label { text-module: 5; horizontal-stretch: 1; wrap: word-wrap; text: root.output-dirty || root.shared-sync-dirty ? (root.chinese ? "音频或同步有未应用设置，请在对应页面应用" : "Apply pending audio or sync changes on their page") : (root.chinese ? "即时偏好已自动保存" : "Immediate preferences are saved automatically"); }
+                appearance-close := Action { text-module: 5; width: 84px * Theme.ui-scale; enabled: !root.settings-busy && !root.settings-close-confirm; label: root.chinese ? "关闭" : "Close"; clicked => { root.request-close-settings(); } }
+                settings-footer-apply := Action { text-module: 5; width: 84px * Theme.ui-scale; primary: true; enabled: !root.settings-busy && !root.settings-close-confirm && ((root.settings-page == 0 && root.output-dirty && !root.devices-loading) || (root.settings-page == 3 && root.shared-sync-dirty)); label: root.settings-busy ? (root.chinese ? "应用中…" : "Applying…") : (root.chinese ? "应用" : "Apply"); clicked => { if root.settings-page == 0 { root.output-apply-requested(); } else if root.settings-page == 3 { root.shared-sync-save-requested(); } } }
             }
           }
         }
-    }
         settings-close-layer := FocusScope {
             visible: root.settings-close-confirm;
             enabled: root.settings-close-confirm;
@@ -5105,7 +5124,7 @@ main-scroll := ScrollView {
         }
         }
         }
-        settings-dialog-end := FocusScope { width: 0px; height: 0px; focus-on-click: false; focus-gained(reason) => { if !settings-dialog.reverse-wrap { if root.settings-close-confirm { settings-close-return.focus(); } else { settings-nav-general.focus(); } } } }
+        settings-dialog-end := FocusScope { width: 0px; height: 0px; focus-on-click: false; focus-gained(reason) => { if !settings-dialog.reverse-wrap { if root.settings-close-confirm { settings-close-return.focus(); } else { settings-title-close.focus(); } } } }
     }
     debug-dialog := FocusScope {
         visible: root.debug-visible;
