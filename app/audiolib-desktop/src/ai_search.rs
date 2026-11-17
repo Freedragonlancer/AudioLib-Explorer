@@ -131,6 +131,14 @@ struct PendingApply {
     query: slint::SharedString,
 }
 
+#[derive(PartialEq, Eq, Hash)]
+enum SettingsSaveTarget {
+    Skill(String),
+    SearchBehavior,
+    LegacySelection,
+    Import,
+}
+
 #[derive(Default)]
 pub(super) struct Runtime {
     store: Mutex<Option<ProfileStore>>,
@@ -142,6 +150,9 @@ pub(super) struct Runtime {
     saves: Mutex<bool>,
     save_wake: Condvar,
     save_error: Mutex<Option<String>>,
+    // A successful behavior/provider save does not persist a failed Skill draft,
+    // even when both operations replace the same customization.json file.
+    settings_save_errors: Mutex<std::collections::HashMap<SettingsSaveTarget, String>>,
     draft_protocol: std::sync::atomic::AtomicI32,
     // ComboBox updates its bound index before invoking selected; retain the
     // owner of the still-displayed form until that callback switches profiles.
@@ -166,7 +177,15 @@ impl Runtime {
         // Close has set Controller::closing before this barrier. In-flight usage
         // writes drain here; later network completions recheck closing under this lock.
         let _store = self.store.lock().unwrap();
-        self.save_error.lock().unwrap().clone().map_or(Ok(()), Err)
+        let error = self.save_error.lock().unwrap().clone().or_else(|| {
+            self.settings_save_errors
+                .lock()
+                .unwrap()
+                .values()
+                .next()
+                .cloned()
+        });
+        error.map_or(Ok(()), Err)
     }
 }
 
@@ -1388,6 +1407,18 @@ impl Controller {
                 | Job::SavePrompt(..)
                 | Job::Settings(SettingsJob::Save(..) | SettingsJob::Import(..))
         );
+        // Capture the admitted editor identity, never the later current page.
+        // A matching successful save/delete or an explicit discard resolves it.
+        let settings_save_target = match &job {
+            Job::Settings(SettingsJob::Save(_, true)) => Some(if ui.get_ai_skill_id().is_empty() {
+                SettingsSaveTarget::LegacySelection
+            } else {
+                SettingsSaveTarget::Skill(ui.get_ai_skill_id().to_string())
+            }),
+            Job::Settings(SettingsJob::Save(_, false)) => Some(SettingsSaveTarget::SearchBehavior),
+            Job::Settings(SettingsJob::Import(_)) => Some(SettingsSaveTarget::Import),
+            _ => None,
+        };
         // One submission owns its automatic-search choice. Profile operations
         // and model probes never create tasks, even if the option is enabled.
         let generating = matches!(&job, Job::Local(..) | Job::Generate(..));
@@ -1398,11 +1429,6 @@ impl Controller {
         let auto_search = generating && ui.get_ai_auto_search();
         let auto_search_count =
             (ui.get_ai_auto_search_count() as usize).clamp(1, MAX_AI_AUTO_TASKS);
-        let previous_save_error = if saving {
-            self.ai.save_error.lock().unwrap().take()
-        } else {
-            None
-        };
         if saving {
             *self.ai.saves.lock().unwrap() = true;
         }
@@ -1615,12 +1641,19 @@ impl Controller {
             if saving {
                 // Rejected input has not attempted a write: do not turn a bad import
                 // into a close blocker, or hide an earlier real persistence failure.
-                *c.ai.save_error.lock().unwrap() =
-                    if matches!(&result, Ok(Reply::SettingsRejected(_))) {
-                        previous_save_error
+                if !matches!(&result, Ok(Reply::SettingsRejected(_))) {
+                    if let Some(target) = settings_save_target {
+                        let mut errors = c.ai.settings_save_errors.lock().unwrap();
+                        if let Err(error) = &result {
+                            errors.insert(target, error.to_string());
+                        } else {
+                            errors.remove(&target);
+                        }
                     } else {
-                        result.as_ref().err().map(|e| e.to_string())
-                    };
+                        *c.ai.save_error.lock().unwrap() =
+                            result.as_ref().err().map(|e| e.to_string());
+                    }
+                }
                 *c.ai.saves.lock().unwrap() = false;
                 c.ai.save_wake.notify_all();
             }

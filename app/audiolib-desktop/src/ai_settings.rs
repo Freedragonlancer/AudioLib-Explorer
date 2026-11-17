@@ -277,12 +277,22 @@ impl Controller {
                     self.ai_job(ui, Job::Settings(SettingsJob::Save(settings, true)));
                 } else {
                     self.ai.skill_drafts.lock().unwrap().remove(&id);
+                    self.ai
+                        .settings_save_errors
+                        .lock()
+                        .unwrap()
+                        .remove(&SettingsSaveTarget::Skill(id.clone()));
                     ui.set_ai_skill_id("".into());
                     self.publish_ai_customization(ui, false);
                     self.select_skill(ui, 0);
                 }
             }
             35 => {
+                self.ai
+                    .settings_save_errors
+                    .lock()
+                    .unwrap()
+                    .remove(&SettingsSaveTarget::Skill(ui.get_ai_skill_id().to_string()));
                 self.ai
                     .skill_drafts
                     .lock()
