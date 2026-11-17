@@ -22,6 +22,14 @@ pub fn validate_instruction(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Combined skill documents are bounded separately from the legacy 2000-character preset.
+pub fn validate_guidance(value: &str) -> Result<()> {
+    if value.trim().is_empty() || value.chars().count() > 16000 || value.contains('\0') {
+        return Err(AiError::Invalid);
+    }
+    Ok(())
+}
+
 /// Global prompt choice. The last custom draft survives switching back to the default.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

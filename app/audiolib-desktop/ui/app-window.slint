@@ -1008,6 +1008,24 @@ export component AppWindow inherits Window {
     in-out property <string> ai-instruction <=> ai-panel.instruction;
     in-out property <bool> ai-layers <=> ai-panel.layers;
     in-out property <bool> ai-auto-search <=> ai-panel.auto-search;
+    in-out property <int> ai-auto-search-count <=> ai-panel.auto-search-count;
+    in-out property <int> ai-skill-index <=> ai-panel.skill-index;
+    in-out property <[string]> ai-skills <=> ai-panel.skills;
+    in-out property <string> ai-skill-id <=> ai-panel.skill-id;
+    in-out property <string> ai-skill-name <=> ai-panel.skill-name;
+    in-out property <string> ai-skill-body <=> ai-panel.skill-body;
+    in-out property <string> ai-skill-prompt <=> ai-panel.skill-prompt;
+    in-out property <string> ai-skill-techniques <=> ai-panel.skill-techniques;
+    in-out property <bool> ai-skill-body-enabled <=> ai-panel.skill-body-enabled;
+    in-out property <bool> ai-skill-prompt-enabled <=> ai-panel.skill-prompt-enabled;
+    in-out property <bool> ai-skill-techniques-enabled <=> ai-panel.skill-techniques-enabled;
+    in-out property <bool> ai-skill-dirty <=> ai-panel.skill-dirty;
+    in-out property <int> ai-skill-file <=> ai-panel.skill-file;
+    in-out property <string> ai-skill-folder <=> ai-panel.skill-folder;
+    in-out property <string> ai-skill-preview <=> ai-panel.skill-preview;
+    in-out property <string> ai-skill-validation <=> ai-panel.skill-validation;
+    in-out property <string> ai-active-skill-name <=> ai-panel.active-skill-name;
+    in-out property <bool> ai-custom-skill-active <=> ai-panel.custom-skill-active;
     in-out property <bool> ai-batch-searching: false;
     in-out property <int> ai-batch-completed: 0;
     in-out property <int> ai-batch-total: 0;
@@ -6198,10 +6216,10 @@ main-scroll := ScrollView {
     }
     ai-panel := AiSearchPanel {
         visible: root.ai-sidebar-expanded;
-        width: min(clamp(parent.width * 0.28, 440px * Theme.ui-scale, 520px * Theme.ui-scale), parent.width - 32px * Theme.ui-scale);
-        height: min((root.ai-settings || self.prompt-expanded ? 740px : 500px) * Theme.ui-scale, parent.height - self.y - root.application-footer-height - 4px * Theme.ui-scale);
+        width: min(root.ai-settings ? 680px * Theme.ui-scale : clamp(parent.width * 0.28, 440px * Theme.ui-scale, 520px * Theme.ui-scale), parent.width - 32px * Theme.ui-scale);
+        height: min((root.ai-settings ? 840px : self.prompt-expanded ? 740px : 500px) * Theme.ui-scale, parent.height - self.y - root.application-footer-height - 4px * Theme.ui-scale);
         x: parent.width - self.width - 16px * Theme.ui-scale;
-        y: 64px * Theme.ui-scale;
+        y: (root.ai-settings ? 8px : 64px) * Theme.ui-scale;
         chinese: root.chinese;
         batch-searching: root.ai-batch-searching;
         batch-completed: root.ai-batch-completed;

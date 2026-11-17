@@ -2,7 +2,7 @@
 //! Bounded AudioLib server relay contract. Credentials are transient request data.
 use crate::{
     AiError, Result,
-    config::{ApiKey, Profile, Protocol, valid_model_id, validate_instruction},
+    config::{ApiKey, Profile, Protocol, valid_model_id, validate_guidance},
     jev,
     provider::{self, Output},
 };
@@ -154,7 +154,7 @@ impl RelayRequest {
             } => {
                 profile.validate_request()?;
                 validate_intent(intent).map_err(|_| AiError::Invalid)?;
-                validate_instruction(guidance)?;
+                validate_guidance(guidance)?;
                 if session.is_empty()
                     || session.len() > 80
                     || !session
@@ -404,6 +404,15 @@ mod tests {
     fn requests_bound_strings_keys_timeouts_and_operation_fields() {
         let mut p = profile();
         let key = ApiKey::default();
+        let guidance = crate::customization::Skill::from_legacy(DEFAULT_PROMPT)
+            .guidance()
+            .unwrap();
+        assert!(guidance.chars().count() > 2000);
+        let request =
+            RelayRequest::generate(&p, &key, "wind", false, &guidance, "session").unwrap();
+        let decoded: RelayRequest =
+            serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
+        decoded.validate().unwrap();
         assert!(RelayRequest::models(&p, &key).is_ok());
         for (intent, guidance, session) in [
             ("", DEFAULT_PROMPT, "session"),

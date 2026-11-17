@@ -163,6 +163,73 @@ fn save_snapshot(ui: &AppWindow, file: &str) {
     }
 }
 
+#[test]
+fn ai_skill_settings_render_in_both_languages_and_compact_windows() {
+    init_software_backend();
+    for chinese in [false, true] {
+        for (width, height, scale) in [
+            (1080.0, 700.0, 1.0),
+            (1440.0, 900.0, 1.0),
+            (1440.0, 900.0, 1.5),
+            (1440.0, 900.0, 2.0),
+            (1080.0, 700.0, 2.0),
+        ] {
+            let ui = AppWindow::new().unwrap();
+            ui.window().set_size(slint::LogicalSize::new(width, height));
+            ui.global::<crate::Theme>().set_ui_scale(scale);
+            ui.set_chinese(chinese);
+            ui.set_ai_visible(true);
+            ui.set_ai_collapsed(false);
+            ui.set_ai_settings(true);
+            ui.set_ai_settings_page(1);
+            ui.set_ai_skills(ModelRc::new(VecModel::from(vec![
+                "Built-in / legacy preset".into(),
+                "机械音效 / Mechanical sounds".into(),
+            ])));
+            ui.set_ai_skill_index(1);
+            ui.set_ai_skill_id("owned-fixture".into());
+            ui.set_ai_skill_name("机械音效 / Mechanical sounds".into());
+            ui.set_ai_active_skill_name("机械音效 / Mechanical sounds".into());
+            ui.set_ai_skill_body(audiolib_ai::customization::BUILTIN_SKILL.into());
+            ui.set_ai_skill_prompt(audiolib_ai::config::DEFAULT_PROMPT.into());
+            ui.set_ai_skill_techniques(audiolib_ai::customization::BUILTIN_TECHNIQUES.into());
+            ui.set_ai_skill_validation("4500 / 16000 characters".into());
+            let action = std::rc::Rc::new(std::cell::Cell::new(-1));
+            let observed = action.clone();
+            ui.on_ai_action(move |kind, _| observed.set(kind));
+            ui.show().unwrap();
+            save_snapshot(
+                &ui,
+                &format!(
+                    "ai-skills-{}-{width}-x{scale}.png",
+                    if chinese { "cn" } else { "en" }
+                ),
+            );
+            let save = i_slint_backend_testing::ElementHandle::find_by_accessible_label(
+                &ui,
+                if chinese {
+                    "保存并启用"
+                } else {
+                    "Save and activate"
+                },
+            )
+            .next()
+            .unwrap();
+            save.mock_single_click(slint::platform::PointerEventButton::Left);
+            assert_eq!(action.get(), 33);
+            ui.set_ai_settings_page(2);
+            save_snapshot(
+                &ui,
+                &format!(
+                    "ai-behavior-{}-{width}-x{scale}.png",
+                    if chinese { "cn" } else { "en" }
+                ),
+            );
+            ui.hide().unwrap();
+        }
+    }
+}
+
 fn long_remote_source_label(chinese: bool) -> &'static str {
     if chinese {
         "服务器模式 · 影视制作音效资料库 — 当前项目使用的远端扩展拟音合集 · 音效库：木门、机械装置与室内环境素材 · 同步状态：已更新完整资料与目录，可继续检索与试听 · 较长的无空格服务器标识：sound-archive-production-foley-current-project.example.test:8791"

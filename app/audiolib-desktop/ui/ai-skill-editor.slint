@@ -1,0 +1,83 @@
+// app/audiolib-desktop/ui/ai-skill-editor.slint
+import { Button, ComboBox, ScrollView, TextEdit } from "std-widgets.slint";
+import { Theme, ThemedLineEdit as LineEdit, ThemedCheckBox as CheckBox } from "theme.slint";
+
+export component AiSkillEditor inherits VerticalLayout {
+    in property <bool> chinese;
+    in property <bool> busy;
+    in property <[string]> skills;
+    in-out property <int> index;
+    in-out property <string> skill-id;
+    in-out property <string> skill-name;
+    in-out property <string> body;
+    in-out property <string> prompt;
+    in-out property <string> techniques;
+    in-out property <bool> body-enabled: true;
+    in-out property <bool> prompt-enabled: true;
+    in-out property <bool> techniques-enabled: true;
+    in-out property <bool> dirty;
+    in-out property <int> file;
+    in-out property <string> folder;
+    in property <string> preview;
+    in property <string> validation;
+    in property <string> active-name;
+    private property <bool> preview-visible;
+    private property <bool> transfer-visible;
+    private property <bool> confirm-delete;
+    changed skill-id => { root.confirm-delete = false; }
+    callback action(int, int);
+    function edited() { root.dirty = true; root.action(40,0); }
+    spacing: 8px * Theme.ui-scale;
+    editor-scroll := ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
+        VerticalLayout { spacing: 8px * Theme.ui-scale;
+            if root.confirm-delete: HorizontalLayout {
+                Text { text: root.chinese ? "删除此 Skill？启用中的配置将回到兼容预设。" : "Delete this skill? An active skill returns to legacy mode."; horizontal-stretch: 1; wrap: word-wrap; color: Theme.text(6, 8, Theme.warning); font-size: Theme.font(11); }
+                Button { text: root.chinese ? "确认删除" : "Confirm delete"; enabled: !root.busy; clicked => { root.action(34,0); root.confirm-delete = false; } }
+                Button { text: root.chinese ? "取消" : "Cancel"; clicked => { root.confirm-delete = false; } }
+            }
+            if root.transfer-visible: VerticalLayout { spacing: 6px * Theme.ui-scale;
+                Text { text: root.chinese ? "选择含上述三个文件的文件夹导入；导出会创建新文件夹，不包含账号或密钥。" : "Import a folder containing these three files. Export creates a new folder without accounts or keys."; color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
+                HorizontalLayout {
+                    LineEdit { horizontal-stretch: 1; min-width: 0px; input-label: root.chinese ? "Skill 文件夹" : "Skill folder"; text <=> root.folder; enabled: !root.busy; }
+                    Button { text: root.chinese ? "浏览…" : "Browse…"; enabled: !root.busy; clicked => { root.action(37,0); } }
+                    Button { text: root.chinese ? "导入" : "Import"; enabled: !root.busy && root.folder != ""; clicked => { root.action(41,0); } }
+                    Button { text: root.chinese ? "导出" : "Export"; enabled: !root.busy && root.folder != ""; clicked => { root.action(42,0); } }
+                }
+            }
+            Text { text: (root.chinese ? "正在使用：" : "Active: ") + root.active-name; color: Theme.text(6, 6, Theme.accent); font-size: Theme.font(12); wrap: word-wrap; }
+            HorizontalLayout {
+                ComboBox { horizontal-stretch: 1; min-width: 0px; model: root.skills; current-index <=> root.index; enabled: !root.busy; accessible-label: "AI skill selection"; selected(value) => { root.action(30,self.current-index); } }
+                Button { text: root.chinese ? "复制为新 Skill" : "Duplicate"; enabled: !root.busy; accessible-label: "Duplicate AI skill"; clicked => { root.action(31,0); } }
+            }
+            if root.skill-id == "": Text { text: root.chinese ? "内置文件只读。复制后可编辑；兼容预设继续使用原有提示词，以下参考文档不会自动发送。" : "Built-in files are read-only. Duplicate to edit. Legacy mode uses your original prompt; these reference documents are not sent automatically."; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); wrap: word-wrap; }
+            if root.skill-id != "": LineEdit { input-label: root.chinese ? "Skill 名称" : "Skill name"; text <=> root.skill-name; enabled: !root.busy; edited => { root.edited(); } }
+            HorizontalLayout {
+                ComboBox { horizontal-stretch: 1; min-width: 0px; model: ["SKILL.md", "prompts/search.md", "references/search-techniques.md"]; current-index <=> root.file; accessible-label: "AI skill document"; }
+                Button { text: root.preview-visible ? (root.chinese ? "编辑文件" : "Edit files") : (root.chinese ? "预览合并" : "Preview"); clicked => { root.preview-visible = !root.preview-visible; } }
+            }
+            if !root.preview-visible && root.skill-id != "": HorizontalLayout {
+                if root.file == 0: CheckBox { text: root.chinese ? "将此文件加入提示词" : "Include this file"; checked <=> root.body-enabled; enabled: !root.busy; toggled => { root.edited(); } }
+                if root.file == 1: CheckBox { text: root.chinese ? "将此文件加入提示词" : "Include this file"; checked <=> root.prompt-enabled; enabled: !root.busy; toggled => { root.edited(); } }
+                if root.file == 2: CheckBox { text: root.chinese ? "将此文件加入提示词" : "Include this file"; checked <=> root.techniques-enabled; enabled: !root.busy; toggled => { root.edited(); } }
+                Button { text: root.chinese ? "恢复内置文本" : "Use built-in text"; enabled: !root.busy; clicked => { root.action(36,0); } }
+            }
+            if root.preview-visible: TextEdit { text: root.preview; read-only: true; height: 220px * Theme.ui-scale; accessible-label: "AI combined guidance"; }
+            if !root.preview-visible && root.file == 0: TextEdit { text <=> root.body; read-only: root.skill-id == ""; enabled: !root.busy; height: 220px * Theme.ui-scale; accessible-label: "AI SKILL.md editor"; edited => { root.edited(); } }
+            if !root.preview-visible && root.file == 1: TextEdit { text <=> root.prompt; read-only: root.skill-id == ""; enabled: !root.busy; height: 220px * Theme.ui-scale; accessible-label: "AI prompt file editor"; edited => { root.edited(); } }
+            if !root.preview-visible && root.file == 2: TextEdit { text <=> root.techniques; read-only: root.skill-id == ""; enabled: !root.busy; height: 220px * Theme.ui-scale; accessible-label: "AI search techniques editor"; edited => { root.edited(); } }
+            Text { text: root.validation; color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
+            Text { text: root.chinese ? "仅用于在线 AI；固定查询契约始终生效。文件按纯文本读取，不执行脚本。超过 2000 字的合并提示词需要新版转发服务器。" : "Online AI only; the fixed query contract always applies. Files are plain text, never scripts. Relay servers must support guidance longer than 2000 characters."; color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
+        }
+    }
+    HorizontalLayout {
+        Button { text: root.skill-id == "" ? (root.chinese ? "使用兼容预设" : "Use legacy preset") : (root.chinese ? "保存并启用" : "Save and activate"); enabled: !root.busy; clicked => { root.action(33,0); } }
+        if root.skill-id != "": Button { text: root.chinese ? "保存" : "Save"; enabled: !root.busy && root.dirty; clicked => { root.action(32,0); } }
+        if root.skill-id != "": Button { text: root.chinese ? "放弃更改" : "Discard edits"; enabled: !root.busy && root.dirty; clicked => { root.action(35,0); } }
+    }
+    HorizontalLayout {
+        Text { horizontal-stretch: 1; min-width: 0px; overflow: elide; text: root.dirty ? (root.chinese ? "未保存 · 切换时保留草稿" : "Unsaved · switching retains drafts") : (root.chinese ? "已保存 / 内置" : "Saved / built-in"); color: root.dirty ? Theme.text(6, 8, Theme.warning) : Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); }
+        Button { text: root.chinese ? "导入 / 导出" : "Import / export"; clicked => { root.transfer-visible = !root.transfer-visible; editor-scroll.viewport-y = 0px; } }
+        if root.skill-id != "": Button { text: root.chinese ? "删除…" : "Delete…"; enabled: !root.busy; clicked => { root.confirm-delete = !root.confirm-delete; editor-scroll.viewport-y = 0px; } }
+    }
+
+}

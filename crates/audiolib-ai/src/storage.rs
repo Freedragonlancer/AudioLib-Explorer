@@ -39,6 +39,8 @@ pub struct ProfileStore {
     path: PathBuf,
     document: Document,
     session_keys: BTreeMap<String, ApiKey>,
+    customization: crate::customization::Customization,
+    customization_saved: bool,
 }
 
 impl ProfileStore {
@@ -73,7 +75,45 @@ impl ProfileStore {
             path,
             document,
             session_keys: BTreeMap::new(),
+            customization: crate::customization::Customization::load(root)?,
+            customization_saved: root
+                .join("ai/customization.json")
+                .try_exists()
+                .map_err(|_| AiError::Storage)?,
         })
+    }
+
+    /// Saved skill documents and search behavior, separate from legacy provider storage.
+    pub fn customization(&self) -> &crate::customization::Customization {
+        &self.customization
+    }
+
+    /// Whether explicit user settings exist; missing settings must not reset live controls.
+    pub fn has_customization(&self) -> bool {
+        self.customization_saved
+    }
+
+    /// Persist all customization changes atomically; retain the previous state on failure.
+    pub fn save_customization(&mut self, next: crate::customization::Customization) -> Result<()> {
+        let root = self
+            .path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or(AiError::Storage)?;
+        next.save(root)?;
+        self.customization = next;
+        self.customization_saved = true;
+        Ok(())
+    }
+
+    /// Resolve only the saved active skill. Legacy drafts remain effective in compatibility mode.
+    pub fn generation_guidance(&self, legacy: &str) -> Result<String> {
+        if let Some(skill) = self.customization.active() {
+            skill.guidance()
+        } else {
+            validate_instruction(legacy)?;
+            Ok(legacy.into())
+        }
     }
     /// Saved profiles, without credentials.
     pub fn profiles(&self) -> &[Profile] {

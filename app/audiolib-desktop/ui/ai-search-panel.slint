@@ -1,6 +1,7 @@
 // app/audiolib-desktop/ui/ai-search-panel.slint
 import { Button, ComboBox, ProgressIndicator, ScrollView, SpinBox, TextEdit } from "std-widgets.slint";
 import { Theme, ThemedLineEdit as LineEdit, ThemedCheckBox as CheckBox } from "theme.slint";
+import { AiSkillEditor } from "ai-skill-editor.slint";
 import { AiSidebarToggle } from "ai-sidebar-toggle.slint";
 
 // Compact, checkable mode switch embedded in the application's search bar.
@@ -281,6 +282,25 @@ export component AiSearchPanel inherits Rectangle {
     in-out property <string> instruction: "作为资深声音设计师，请根据输入内容，合理匹配声音设计需要用的专业Keyword";
     in-out property <bool> prompt-expanded: false;
     in-out property <bool> auto-search: false;
+    in-out property <int> auto-search-count: 3;
+    in-out property <[string]> skills;
+    in-out property <int> skill-index;
+    in-out property <string> skill-id;
+    in-out property <string> skill-name;
+    in-out property <string> skill-body;
+    in-out property <string> skill-prompt;
+    in-out property <string> skill-techniques;
+    in-out property <bool> skill-body-enabled: true;
+    in-out property <bool> skill-prompt-enabled: true;
+    in-out property <bool> skill-techniques-enabled: true;
+    in-out property <bool> skill-dirty;
+    in-out property <int> skill-file;
+    in-out property <string> skill-folder;
+    in-out property <string> skill-preview;
+    in-out property <string> skill-validation;
+    in-out property <string> active-skill-name;
+    in-out property <bool> custom-skill-active;
+
     in-out property <bool> layers: true;
     in-out property <int> provider-index: 0;
     in property <[string]> providers: ["Local reference"];
@@ -347,11 +367,11 @@ export component AiSearchPanel inherits Rectangle {
             }
             Text { text: root.chinese ? "允许 AI 按声音需求判断是否推荐分层，不强制拆层。无分层时最多 6 项，有明确分层时共最多 8 项。" : "Allow AI to assess whether layers help; layers are optional. Up to 6 suggestions without layers, or 8 total when useful layers are identified."; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(11); wrap: word-wrap; }
             Text { text: root.provider-index == 0 ? (root.chinese ? "离线：个人词表 + UCS + 素材配方" : "Offline: personal terms + UCS + recipes") : (root.chinese ? "发送描述和参考词条；不发送音频、文件路径或库 Metadata" : "Sends your description and reference terms; no audio, paths or library Metadata"); color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
-            HorizontalLayout {
+            if !root.custom-skill-active: HorizontalLayout {
                 ComboBox { min-width: 0px; horizontal-stretch: 1; model: root.chinese ? ["预设：资深声音设计师", "预设：自定义"] : ["Preset: Senior sound designer", "Preset: Custom"]; current-index <=> root.preset-index; enabled: !root.busy; selected(value) => { root.action(14,self.current-index); } }
                 Button { text: root.prompt-expanded ? (root.chinese ? "收起" : "Collapse") : (root.chinese ? "编辑提示词" : "Edit prompt"); clicked => { root.prompt-expanded = !root.prompt-expanded; } }
             }
-            if root.prompt-expanded: VerticalLayout {
+            if root.prompt-expanded && !root.custom-skill-active: VerticalLayout {
                 spacing: 5px * Theme.ui-scale;
                 TextEdit { text <=> root.instruction; height: 78px * Theme.ui-scale; accessible-label: root.chinese ? "预设提示词" : "Preset instruction"; enabled: !root.busy; edited => { root.preset-index = 1; root.action(3,0); } }
                 HorizontalLayout { height: 32px * Theme.ui-scale;
@@ -359,12 +379,13 @@ export component AiSearchPanel inherits Rectangle {
                     Button { text: root.chinese ? "保存提示词" : "Save prompt"; enabled: !root.busy; clicked => { root.action(15,0); } }
                 }
             }
-            CheckBox { text: root.chinese ? "生成后自动搜索 3 个任务" : "Auto-search 3 tasks after generation"; checked <=> root.auto-search; enabled: !root.busy; }
+            if root.custom-skill-active: Text { text: (root.chinese ? "Skill：" : "Skill: ") + root.active-skill-name; color: Theme.text(6, 6, Theme.accent); font-size: Theme.font(12); }
+            CheckBox { text: root.chinese ? "生成后自动搜索 " + root.auto-search-count + " 个任务" : "Auto-search " + root.auto-search-count + " tasks after generation"; checked <=> root.auto-search; enabled: !root.busy; }
             HorizontalLayout {
                 Button { text: root.generating ? (root.chinese ? "生成中…" : "Generating…") : (root.chinese ? "生成查询建议" : "Suggest queries"); accessible-label: root.chinese ? "生成查询建议" : "Suggest queries"; enabled: !root.busy && root.prompt != ""; clicked => { root.action(2,0); } }
                 Button { text: root.chinese ? "取消" : "Cancel"; enabled: root.busy || root.batch-searching; clicked => { root.action(3,0); } }
             }
-            Text { text: root.chinese ? "每项 1–2 个词，含一个最强单词推荐。“主”表示主体音效，“层”表示分层素材。手动“查询全部”搜索所有推荐；自动搜索仅查询前 3 项。" : "Each suggestion uses 1–2 words, including the strongest single-word option. M marks main sounds; L marks layers. Search all opens every suggestion; auto-search runs only the first 3."; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); wrap: word-wrap; }
+            Text { text: root.chinese ? "每项 1–2 个词，含一个最强单词推荐。“主”表示主体音效，“层”表示分层素材。手动“查询全部”搜索所有推荐；自动搜索按设置查询前 1–3 项。" : "Each suggestion uses 1–2 words, including the strongest single-word option. M marks main sounds; L marks layers. Search all opens every suggestion; auto-search runs the first 1–3 according to settings."; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); wrap: word-wrap; }
             Rectangle { vertical-stretch: 1; min-height: 16px * Theme.ui-scale; }
             Text { text: root.detail; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(11); wrap: word-wrap; height: root.detail == "" ? 0px : min(78px * Theme.ui-scale, self.preferred-height); vertical-stretch: 0; overflow: elide; }
             }
@@ -387,7 +408,8 @@ export component AiSearchPanel inherits Rectangle {
         }
         if root.settings: HorizontalLayout { spacing: 8px * Theme.ui-scale;
             Button { text: root.chinese ? "供应商" : "Providers"; enabled: root.settings-page != 0; clicked => { root.settings-page = 0; } }
-            Button { text: root.chinese ? "Skill 与预设" : "Skill and presets"; enabled: root.settings-page != 1; clicked => { root.settings-page = 1; } }
+            Button { text: root.chinese ? "Skill 与文件" : "Skills & files"; accessible-label: "AI skills settings"; enabled: root.settings-page != 1; clicked => { root.settings-page = 1; } }
+            Button { text: root.chinese ? "搜索行为" : "Search behavior"; enabled: root.settings-page != 2; clicked => { root.settings-page = 2; } }
         }
         if root.settings && root.settings-page == 0: ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
             VerticalLayout { spacing: 8px * Theme.ui-scale;
@@ -434,18 +456,33 @@ export component AiSearchPanel inherits Rectangle {
                 Text { text: root.chinese ? "Windows 密钥在本机加密保存；其他平台仅保留当前会话。" : "Windows keys are encrypted locally; other platforms keep keys for this session."; color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
             }
         }
-        if root.settings && root.settings-page == 1: ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
-            VerticalLayout { spacing: 9px * Theme.ui-scale;
-                Text { text: root.chinese ? "Skill 选择" : "Select skill"; color: Theme.text(6, 6, Theme.accent); font-size: Theme.font(12); font-weight: 600; }
-                ComboBox { model: root.chinese ? ["音效关键词 · audio-keyword-search（内置）"] : ["Sound keywords · audio-keyword-search (built in)"]; current-index: 0; accessible-label: "AI Skill"; enabled: !root.busy; }
-                Text { text: root.chinese ? "当前提供内置音效关键词 Skill，使用个人词表、UCS 分类和素材配方。" : "The built-in sound keyword skill uses personal terms, UCS categories and material recipes."; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(11); wrap: word-wrap; }
+        if root.settings && root.settings-page == 1: AiSkillEditor {
+            vertical-stretch: 1;
+            chinese: root.chinese; busy: root.busy;
+            skills: root.skills; index <=> root.skill-index;
+            skill-id <=> root.skill-id; skill-name <=> root.skill-name;
+            body <=> root.skill-body; prompt <=> root.skill-prompt; techniques <=> root.skill-techniques;
+            body-enabled <=> root.skill-body-enabled; prompt-enabled <=> root.skill-prompt-enabled; techniques-enabled <=> root.skill-techniques-enabled;
+            dirty <=> root.skill-dirty; file <=> root.skill-file; folder <=> root.skill-folder;
+            preview: root.skill-preview; validation: root.skill-validation; active-name: root.active-skill-name;
+            action(kind, index) => { root.action(kind,index); }
+        }
+        if root.settings && root.settings-page == 2: ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
+            VerticalLayout { spacing: 10px * Theme.ui-scale;
+                Text { text: root.chinese ? "搜索行为" : "Search behavior"; color: Theme.text(6, 6, Theme.accent); font-size: Theme.font(14); font-weight: 600; }
                 CheckBox { text: root.chinese ? "允许分层" : "Allow layers"; checked <=> root.layers; enabled: !root.busy; toggled => { root.action(3,0); } }
-                Text { text: root.chinese ? "由 AI 判断当前声音是否适合分层。关闭时最多 6 项主体推荐；开启后仅在有明确分层时共最多 8 项。" : "AI decides whether the sound benefits from layers. Off: up to 6 main suggestions. On: up to 8 total only when useful layers are identified."; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(11); wrap: word-wrap; }
-                CheckBox { text: root.chinese ? "生成后自动搜索 3 个任务" : "Auto-search 3 tasks after generation"; checked <=> root.auto-search; enabled: !root.busy; }
-                Text { text: root.chinese ? "提示词预设" : "Prompt preset"; color: Theme.text(6, 6, Theme.accent); font-size: Theme.font(12); font-weight: 600; }
+                Text { text: root.chinese ? "AI 按需求判断分层。无分层时最多 6 项，有明确分层时共最多 8 项。" : "AI assesses whether layers help. Up to 6 main suggestions, or 8 total with useful layers."; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); wrap: word-wrap; }
+                CheckBox { text: root.chinese ? "生成后自动创建搜索任务" : "Create search tasks after generation"; checked <=> root.auto-search; enabled: !root.busy; }
+                HorizontalLayout {
+                    Text { text: root.chinese ? "自动搜索数量" : "Automatic task count"; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); vertical-alignment: center; }
+                    SpinBox { value <=> root.auto-search-count; minimum: 1; maximum: 3; enabled: !root.busy; accessible-label: "AI automatic task count"; }
+                }
+                Button { text: root.chinese ? "保存搜索行为" : "Save search behavior"; enabled: !root.busy; clicked => { root.action(39,0); } }
+                Text { text: root.chinese ? "兼容提示词预设" : "Legacy prompt preset"; color: Theme.text(6, 6, Theme.accent); font-size: Theme.font(14); font-weight: 600; }
+                Text { text: root.custom-skill-active ? (root.chinese ? "当前使用自定义 Skill。以下保留原提示词，切回兼容预设后生效。" : "A custom skill is active. Your original prompt below is retained for legacy mode.") : (root.chinese ? "继续使用原有配置；切回默认不会删除自定义提示词。" : "Uses your original configuration; switching to the default retains your custom prompt."); color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); wrap: word-wrap; }
                 ComboBox { model: root.chinese ? ["预设：资深声音设计师", "预设：自定义"] : ["Preset: Senior sound designer", "Preset: Custom"]; current-index <=> root.preset-index; accessible-label: root.chinese ? "AI 提示词预设" : "AI prompt preset"; enabled: !root.busy; selected(value) => { root.action(14,self.current-index); } }
-                TextEdit { text <=> root.instruction; height: 120px * Theme.ui-scale; accessible-label: root.chinese ? "设置预设提示词" : "Settings preset instruction"; enabled: !root.busy; edited => { root.preset-index = 1; root.action(3,0); } }
-                Text { text: root.chinese ? "最多 2000 字；远程 AI 使用所选预设。离线词表使用内置 Skill。" : "Up to 2000 characters. Remote AI uses the selected preset; offline search uses the built-in skill."; color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
+                TextEdit { text <=> root.instruction; height: 150px * Theme.ui-scale; accessible-label: root.chinese ? "设置预设提示词" : "Settings preset instruction"; enabled: !root.busy; edited => { root.preset-index = 1; root.action(3,0); } }
+                Text { text: root.chinese ? "兼容预设最多 2000 字；离线词表不执行自由文本提示词。" : "Legacy preset: up to 2000 characters. Offline reference does not execute text instructions."; color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
                 Button { text: root.chinese ? "保存提示词" : "Save prompt"; enabled: !root.busy; clicked => { root.action(15,0); } }
             }
         }
