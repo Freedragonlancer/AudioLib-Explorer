@@ -217,6 +217,14 @@ fn ai_skill_settings_render_in_both_languages_and_compact_windows() {
             .unwrap();
             save.mock_single_click(slint::platform::PointerEventButton::Left);
             assert_eq!(action.get(), 33);
+            let folder = i_slint_backend_testing::ElementHandle::find_by_accessible_label(
+                &ui,
+                "Open AI skill folder",
+            )
+            .next()
+            .unwrap();
+            folder.mock_single_click(slint::platform::PointerEventButton::Left);
+            assert_eq!(action.get(), 43);
             ui.set_ai_settings_page(2);
             save_snapshot(
                 &ui,

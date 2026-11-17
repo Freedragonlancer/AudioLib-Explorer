@@ -3,11 +3,15 @@
 use super::*;
 use audiolib_ai::customization::{Customization, Skill};
 
+#[path = "ai_skill_files.rs"]
+mod skill_files;
+
 pub(super) enum SettingsJob {
     Save(Customization, bool),
     Import(PathBuf),
     Export(Skill, PathBuf),
     Browse(bool, usize),
+    OpenFolder(Skill),
 }
 
 impl Controller {
@@ -183,6 +187,13 @@ impl Controller {
             );
             return;
         }
+        if kind == 43 {
+            self.ai_job(
+                ui,
+                Job::Settings(SettingsJob::OpenFolder(self.skill_from_ui(ui))),
+            );
+            return;
+        }
         let Some(mut settings) = self
             .ai
             .store
@@ -332,6 +343,10 @@ impl Controller {
                 crate::dialogs::choose_folder(chinese, owner).map_err(|_| AiError::Storage)?,
             )),
             SettingsJob::Export(skill, path) => Ok(Reply::SkillExported(skill.export(&path)?)),
+            SettingsJob::OpenFolder(skill) => {
+                let root = self.config.lock().unwrap().data_root();
+                Ok(Reply::SkillLocalFolder(skill_files::prepare(&root, skill)?))
+            }
             SettingsJob::Save(settings, editor_saved) => {
                 let mut guard = self.ai.store.lock().unwrap();
                 persist_settings(
