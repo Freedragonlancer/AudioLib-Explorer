@@ -13,9 +13,10 @@ component ThemeCard inherits Rectangle {
     in property <bool> chinese;
     in property <bool> selected;
     in property <bool> enabled: true;
+    in property <bool> compact: false;
     callback chosen;
     out property <bool> has-focus: action.has-focus;
-    min-width: 180px * Theme.ui-scale; min-height: 134px * Theme.ui-scale;
+    min-width: 180px * Theme.ui-scale; min-height: (root.compact ? 76px : 134px) * Theme.ui-scale;
     horizontal-stretch: 1;
     forward-focus: action;
     action := Button {
@@ -28,7 +29,22 @@ component ThemeCard inherits Rectangle {
         background: Theme.panel; border-radius: 8px * Theme.ui-scale;
         border-width: root.selected || action.has-focus ? 2px : 1px;
         border-color: root.selected || action.has-focus ? Theme.accent : Theme.border;
-        VerticalLayout {
+        if root.compact: HorizontalLayout {
+            padding: 10px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
+            Rectangle { width: 72px * Theme.ui-scale; min-height: 40px * Theme.ui-scale; background: root.preview.bg; border-radius: 4px * Theme.ui-scale;
+                Rectangle { x: 5px * Theme.ui-scale; y: 5px * Theme.ui-scale; width: 16px * Theme.ui-scale; height: parent.height - 10px * Theme.ui-scale; background: root.preview.panel; }
+                Rectangle { x: 27px * Theme.ui-scale; y: 10px * Theme.ui-scale; width: 37px * Theme.ui-scale; height: 3px * Theme.ui-scale; background: root.preview.ink; }
+                Rectangle { x: 26px * Theme.ui-scale; y: 21px * Theme.ui-scale; width: 39px * Theme.ui-scale; height: 11px * Theme.ui-scale; background: root.preview.selected;
+                    Rectangle { x: 3px; y: 4px; width: parent.width - 6px; height: 3px; background: root.preview.accent; }
+                }
+            }
+            VerticalLayout { alignment: center; spacing: 3px * Theme.ui-scale;
+                Text { text: root.chinese ? root.preview.name-cn : root.preview.name; color: Theme.text(5, 0, Theme.ink); font-size: Theme.font(13); font-weight: 600; }
+                Text { text: root.chinese ? root.preview.description-cn : root.preview.description; color: Theme.text(5, 1, Theme.dim); font-size: Theme.font(11); wrap: word-wrap; }
+            }
+            if root.selected: Image { source: @image-url("icons/check.svg"); colorize: Theme.accent; width: 14px * Theme.ui-scale; height: 14px * Theme.ui-scale; }
+        }
+        if !root.compact: VerticalLayout {
             padding: 10px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
             Rectangle {
                 min-height: 62px * Theme.ui-scale; background: root.preview.bg; border-radius: 4px * Theme.ui-scale;
@@ -78,7 +94,7 @@ export component AppearanceEditor inherits Rectangle {
     in property <string> message;
     in-out property <bool> advanced-open: false;
     private property <bool> manage-open: false;
-    out property <bool> has-focus: first-theme.has-focus || advanced-toggle.has-focus;
+    out property <bool> has-focus: first-theme.has-focus || original-theme.has-focus || advanced-toggle.has-focus;
     forward-focus: first-theme;
     callback theme-selected(int);
     callback font-selected(string);
@@ -94,7 +110,7 @@ export component AppearanceEditor inherits Rectangle {
     min-height: content.min-height;
     content := VerticalLayout {
     spacing: 12px * Theme.ui-scale;
-    SectionTitle { text: root.chinese ? "推荐主题" : "Recommended themes"; }
+    SectionTitle { text: root.chinese ? "主题预设" : "Theme presets"; }
     Hint { text: (root.chinese ? "当前：" : "Current: ") + root.current-theme-name + (root.chinese ? " · 点击主题即可应用，自动保存。" : " · Click a theme to apply and save."); }
     HorizontalLayout {
         spacing: 10px * Theme.ui-scale;
@@ -106,6 +122,7 @@ export component AppearanceEditor inherits Rectangle {
         ThemeCard { preview: root.recommendations[2]; chinese: root.chinese; enabled: root.enabled; selected: root.theme-index == self.preview.index; chosen => { root.theme-selected(self.preview.index); } }
         ThemeCard { preview: root.recommendations[3]; chinese: root.chinese; enabled: root.enabled; selected: root.theme-index == self.preview.index; chosen => { root.theme-selected(self.preview.index); } }
     }
+    original-theme := ThemeCard { compact: true; preview: root.recommendations[4]; chinese: root.chinese; enabled: root.enabled; selected: root.theme-index == self.preview.index; chosen => { root.theme-selected(self.preview.index); } }
     if root.customized: Hint { text: root.chinese ? "当前含自定义文字颜色。选择推荐主题可恢复整套配色，字体保留。" : "Custom text colors are active. A recommended theme restores its palette and keeps your font."; }
     advanced-toggle := Button {
         enabled: root.enabled;
