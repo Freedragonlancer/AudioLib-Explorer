@@ -87,6 +87,26 @@ fn appearance_editor_renders_both_languages_and_reaches_preset_controls() {
                 appearance::apply(&ui, &AppearancePreferences::default());
             });
             use slint::Model;
+            let original = ElementHandle::find_by_accessible_label(
+                &ui,
+                if chinese {
+                    "原始默认"
+                } else {
+                    "Original default"
+                },
+            )
+            .next()
+            .expect("original default preset is reachable without advanced options");
+            assert_eq!(original.accessible_enabled(), Some(true));
+            original.invoke_accessible_default_action();
+            assert_eq!(crate::theme::theme_id(ui.get_theme_index()), "default");
+            assert_eq!(
+                ui.global::<Theme>().get_bg(),
+                Color::from_argb_encoded(crate::theme::DEFAULT_PALETTE.bg)
+            );
+            assert!(!ui.global::<Theme>().get_modern_style());
+            assert!(!ui.get_appearance_advanced_open());
+            ui.window().take_snapshot().unwrap();
             let expected_background = ui
                 .get_recommended_themes()
                 .iter()
@@ -224,13 +244,30 @@ fn recommended_theme_previews_match_distinct_readable_workbench_palettes() {
         assert!(contrast(theme.get_dim(), theme.get_hover()) >= 4.5);
         assert!(contrast(theme.get_ink(), theme.get_checked()) >= 4.5);
         assert!(contrast(theme.get_strong_border(), theme.get_panel()) >= 3.0);
-        for status in [theme.get_mint(), theme.get_warning(), theme.get_danger()] {
-            assert!(contrast(status, theme.get_hover()) >= 4.5);
+        if crate::theme::theme_id(card.index) != "default" {
+            // Preserve the original palette exactly; enhanced status contrast belongs
+            // to the four redesigned themes, not a silent change to that baseline.
+            for status in [theme.get_mint(), theme.get_warning(), theme.get_danger()] {
+                assert!(contrast(status, theme.get_hover()) >= 4.5);
+            }
+            assert_eq!(theme.get_workbench_backdrop_opacity(), 0.0);
+            assert_eq!(theme.get_normal_canvas(), theme.get_trough());
         }
-        assert_eq!(theme.get_workbench_backdrop_opacity(), 0.0);
-        assert_eq!(theme.get_normal_canvas(), theme.get_trough());
         assert!(contrast(theme.get_dim(), theme.get_normal_canvas()) >= 4.5);
+        assert_eq!(
+            theme.get_pure_black_workspace(),
+            crate::theme::theme_id(card.index) == "obsidian"
+        );
         if crate::theme::theme_id(card.index) == "obsidian" {
+            for surface in [
+                theme.get_bg(),
+                theme.get_library_surface(),
+                theme.get_table_surface(),
+                theme.get_player(),
+                theme.get_normal_canvas(),
+            ] {
+                assert_eq!(surface, Color::from_rgb_u8(0, 0, 0));
+            }
             // Neutral chrome must not inherit the retired green surfaces or accents.
             for color in [
                 theme.get_bg(),
@@ -255,6 +292,18 @@ fn recommended_theme_previews_match_distinct_readable_workbench_palettes() {
             assert_eq!(theme.get_bg(), card.bg);
         }
         let pixels = ui.window().take_snapshot().unwrap();
+        if crate::theme::theme_id(card.index) == "obsidian" {
+            let black_pixels = pixels
+                .as_bytes()
+                .chunks_exact(4)
+                .filter(|p| *p == [0, 0, 0, 255])
+                .count();
+            let black_fraction = black_pixels as f64 / (pixels.width() * pixels.height()) as f64;
+            assert!(
+                black_fraction > 0.35,
+                "OLED theme must paint large opaque black work areas, got {black_fraction:.2}"
+            );
+        }
         {
             let canvas = theme.get_normal_canvas().to_argb_u8();
             assert!(
@@ -294,7 +343,7 @@ fn recommended_theme_previews_match_distinct_readable_workbench_palettes() {
             .unwrap();
         }
     }
-    assert_eq!(surfaces.len(), 4);
+    assert_eq!(surfaces.len(), 5);
     ui.hide().unwrap();
 }
 

@@ -117,7 +117,7 @@ impl Controller {
         ui.on_text_colors_reset(move || c.reset_text_colors());
         let c = self.clone();
         ui.on_recommended_theme_requested(move |index| {
-            if !c.available() || ![2, 3, 4, 5].contains(&index) {
+            if !c.available() || ![0, 2, 3, 4, 5].contains(&index) {
                 return;
             }
             if let Some(ui) = c.ui.upgrade() {

@@ -115,6 +115,10 @@ fn child_contended_preference_shutdown() {
     assert!(controller.appearance.lock().unwrap().text_colors.is_empty());
     assert_eq!(ui.get_theme_index(), crate::theme::theme_index("ocean"));
     assert_eq!(ui.get_font_family(), "Microsoft YaHei UI");
+    ui.invoke_recommended_theme_requested(crate::theme::theme_index("default"));
+    assert_eq!(ui.get_theme_index(), crate::theme::theme_index("default"));
+    assert_eq!(ui.get_font_family(), "Microsoft YaHei UI");
+    assert!(controller.appearance.lock().unwrap().text_colors.is_empty());
     ui.invoke_text_color_requested("#bada55".into());
     ui.set_appearance_preset_name("Review palette".into());
     ui.invoke_appearance_preset_requested(1);
@@ -124,7 +128,7 @@ fn child_contended_preference_shutdown() {
     assert!(controller.appearance.lock().unwrap().text_colors.is_empty());
     ui.invoke_recommended_theme_requested(crate::theme::theme_index("obsidian"));
     ui.invoke_appearance_preset_requested(0);
-    assert_eq!(ui.get_theme_index(), crate::theme::theme_index("ocean"));
+    assert_eq!(ui.get_theme_index(), crate::theme::theme_index("default"));
     assert_eq!(ui.get_text_color_value(), "#BADA55");
     ui.invoke_text_color_requested("#abc123".into());
     ui.invoke_appearance_preset_requested(2);
@@ -150,8 +154,8 @@ fn child_contended_preference_shutdown() {
     assert_eq!(saved.appearance.text_colors["results.missing"], "#ABC123");
     assert_eq!(saved.appearance.presets.len(), 1);
     assert_eq!(saved.appearance.presets[0].name, "Renamed palette");
-    assert_eq!(saved.theme, "ocean");
-    assert_eq!(saved.appearance.presets[0].theme, "ocean");
+    assert_eq!(saved.theme, "default");
+    assert_eq!(saved.appearance.presets[0].theme, "default");
     assert_eq!(saved.playback["volume"], serde_json::json!(0.25));
     println!("Preference callbacks returned in {elapsed:?}");
     assert!(

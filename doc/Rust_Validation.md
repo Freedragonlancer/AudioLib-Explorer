@@ -1,5 +1,17 @@
 # Rust 验证报告
 
+## 原始默认预设与 OLED 纯黑黑曜（2026-11-17，beta）
+
+基于 beta `934f362`，分支 `codex/oled-obsidian-classic-preset`。主题设置新增紧凑的「原始默认」入口，复用既有 `default` 标识、原始 palette 和 Classic 布局，无新增存储格式；通过已有推荐主题回调应用，清除文字覆盖并保留字体。黑曜将窗口、素材导航、结果列表底层、播放器和空波形改为不透明 `#000000`，详情/对话框面板为 `#0C0C0C`，浮层为 `#181818`；柔白文字和选中灰阶独立保留。纯黑工作区标志在切换到其他主题时复位。设计继续使用架构说明链接的 frontend-design 与 Carbon 方法，不改变音频频谱的数据颜色。
+
+Windows Rust 1.97.1 MSVC、Slint 1.17.1、已核验 ASIO SDK 2.3.4。最终格式及 desktop all-targets strict Clippy 通过；11 个不同测试通过、0 ignored：外观 4，主题注册/切换 3，Rust 默认主题与 Slint 默认渲染逐像素一致 1，200% 设置页滚动 1，隐藏设置页键盘焦点 1，受争用偏好保存/关闭 1。控制器回归同时覆盖原始默认的命名预设保存/加载和最终持久化，并保留字体及关闭排空断言。
+
+实际软件渲染截图位于 `.rust-validation/oled-classic/screenshots/`：已检查纯黑工作区、原始默认和五个预设入口，以及中英文 100%/200% 设置布局。1280×800 空工作区断言超过 35% 的像素为不透明黑色，避免仅 token 值正确或被背景贴图抬亮。黑曜主文字/面板对比度 12.68:1，弱化文字/浮层 6.00:1；四套重设计主题保留完整状态文字对比度检查，原始默认 palette 按用户要求保持原样。像素验证针对渲染输出，未测量实体 OLED 面板。
+
+首轮 `.rust-validation/local-checks/beaf347ca35e4ad2acf958be15c69589` 的两个截图测试因执行环境把 PowerShell provider 前缀写入输出路径而失败；改用 `$PWD.ProviderPath` 构造原生 UNC 路径后重跑通过，无应用逻辑补丁。最终日志：外观/静态检查 `f0a70868ef1e4b4889a4cf94c5a39f84`、主题 `5ac2a1baabe740a3be823e9ce56d9454`、默认像素 `83630d9d5aa54d099e0f000251286adf`、缩放 `cb13ea1e1a8346db97a77d8a2729ea96`、焦点 `77c9a6ab38ac4770bedc097f66fd93c9`、保存 `c15dd641d9694b799054bece8493f936`，均在 `.rust-validation/local-checks/`。
+
+范围复用：`934f362` 的 core/CLI、配置规范化和保存机制，以及前两节经典播放器、数据库、扫描、Metadata、IPC/音频后端基线仍适用；本轮只扩展既有 UI 选择入口及配色/布局，没有修改依赖、业务数据或存储边界。未重复 workspace、数据安全全套、性能基准或真实 ASIO 硬件验收。沿用 `windows-local` 计划从最终合并身份交付固定 `local_release/`，实际包验收、安装身份/启动和统一缓存清理以该次管线收据为准。
+
 ## 其余三套推荐主题优化（2026-11-16，beta）
 
 在护眼黑曜 PR #323 合并后的 `9741cca` 上，按用户追加要求优化石墨、深海蓝和暖砂琥珀，分支 `codex/recommended-palette-refinement`。沿用 frontend-design 与 Carbon 的设计方法：石墨为冷灰/雾银，深海蓝为低饱和蓝灰，琥珀为暖灰/淡砂金；完整 token 表及参考链接见 [架构说明](Rust_Architecture.md)。主题标识、字体、预设及设置结构不变。石墨也停用旧 Studio 背景贴图，四张推荐卡片与主界面、播放器和空波形共用配色。
