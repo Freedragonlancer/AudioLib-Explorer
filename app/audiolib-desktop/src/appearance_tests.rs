@@ -75,10 +75,6 @@ fn appearance_editor_renders_both_languages_and_reaches_preset_controls() {
             ui.set_settings_visible(true);
             ui.show().unwrap();
             ui.window().take_snapshot().unwrap();
-            if scale > 1.0 {
-                ui.invoke_scroll_main_to_end();
-                ui.window().take_snapshot().unwrap();
-            }
             assert!(!ui.get_appearance_advanced_open());
             let weak = ui.as_weak();
             ui.on_recommended_theme_requested(move |index| {
@@ -87,6 +83,14 @@ fn appearance_editor_renders_both_languages_and_reaches_preset_controls() {
                 appearance::apply(&ui, &AppearancePreferences::default());
             });
             use slint::Model;
+            reveal_settings_control(
+                &ui,
+                if chinese {
+                    "原始默认"
+                } else {
+                    "Original default"
+                },
+            );
             let original = ElementHandle::find_by_accessible_label(
                 &ui,
                 if chinese {
@@ -113,6 +117,7 @@ fn appearance_editor_renders_both_languages_and_reaches_preset_controls() {
                 .find(|card| crate::theme::theme_id(card.index) == "ocean")
                 .unwrap()
                 .bg;
+            reveal_settings_control(&ui, if chinese { "深海蓝" } else { "Ocean" });
             let ocean = ElementHandle::find_by_accessible_label(
                 &ui,
                 if chinese { "深海蓝" } else { "Ocean" },
@@ -159,6 +164,16 @@ fn appearance_editor_renders_both_languages_and_reaches_preset_controls() {
             assert_eq!(ui.global::<Theme>().get_bg(), expected_background);
             for bottom in [false, true] {
                 if bottom {
+                    ui.invoke_scroll_main_to_end();
+                    ui.window().take_snapshot().unwrap();
+                    reveal_settings_control(
+                        &ui,
+                        if chinese {
+                            "高级选项 · 字体、文字颜色与预设"
+                        } else {
+                            "Advanced · Fonts, text colors and presets"
+                        },
+                    );
                     let toggle = ElementHandle::find_by_accessible_label(
                         &ui,
                         if chinese {
@@ -345,6 +360,43 @@ fn recommended_theme_previews_match_distinct_readable_workbench_palettes() {
     }
     assert_eq!(surfaces.len(), 5);
     ui.hide().unwrap();
+}
+
+fn reveal_settings_control(ui: &AppWindow, label: &str) {
+    use i_slint_backend_testing::ElementHandle;
+    use slint::platform::WindowEvent;
+    let scroll = ElementHandle::find_by_element_id(ui, "AppWindow::settings-scroll")
+        .next()
+        .expect("settings content viewport");
+    let visible = || {
+        ElementHandle::find_by_accessible_label(ui, label).any(|item| {
+            let top = item.absolute_position().y;
+            top >= ui.get_settings_content_top()
+                && top + item.size().height <= ui.get_settings_content_bottom() + 1.0
+        })
+    };
+    if visible() {
+        return;
+    }
+    let origin = scroll.absolute_position();
+    let position =
+        slint::LogicalPosition::new(origin.x + 8.0, origin.y + scroll.size().height / 2.0);
+    let wheel = |delta_y| {
+        ui.window().dispatch_event(WindowEvent::PointerScrolled {
+            position,
+            delta_x: 0.0,
+            delta_y,
+        });
+        ui.window().take_snapshot().unwrap();
+    };
+    wheel(100_000.0);
+    for _ in 0..80 {
+        if visible() {
+            return;
+        }
+        wheel(-32.0 * ui.global::<Theme>().get_ui_scale());
+    }
+    panic!("Settings control {label:?} must be reachable by scrolling");
 }
 
 fn contrast(a: Color, b: Color) -> f64 {

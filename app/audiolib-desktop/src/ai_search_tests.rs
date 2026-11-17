@@ -1635,7 +1635,8 @@ fn child_zero_hit_tag_pruning() {
         .unwrap();
     ui.invoke_ai_action(16, index as i32);
     ui.set_ai_query("user custom draft".into());
-    wait_for(ui, |ui| !ui.get_searching());
+    let ready = fixture.controller.clone();
+    wait_for(ui, move |ui| !ui.get_searching() && fully_published(&ready));
     assert_eq!(ui.get_rows().row_count(), 0);
     assert_eq!(ui.get_query(), "energy burst");
     assert_eq!(ui.get_ai_query(), "user custom draft");
@@ -1649,7 +1650,8 @@ fn child_zero_hit_tag_pruning() {
     // If the only single keyword also loses its hit, regenerate rather than
     // retaining a pair-only plan under the old verified-hit claim.
     ui.invoke_ai_action(16, 0);
-    wait_for(ui, |ui| !ui.get_searching());
+    let ready = fixture.controller.clone();
+    wait_for(ui, move |ui| !ui.get_searching() && fully_published(&ready));
     assert_eq!(ui.get_query(), "explosion");
     assert_eq!(ui.get_ai_quick_rows().row_count(), 0);
     assert_eq!(ui.get_ai_rows().row_count(), 0);
@@ -1709,7 +1711,8 @@ fn child_zero_hit_tag_pruning() {
     seed_owned_ai_terms(&fixture, &layer_terms);
     ui.invoke_ai_action(16, 0);
     ui.set_ai_query("custom draft after main pruning".into());
-    wait_for(ui, |ui| !ui.get_searching());
+    let ready = fixture.controller.clone();
+    wait_for(ui, move |ui| !ui.get_searching() && fully_published(&ready));
     assert_eq!(ui.get_query(), "anchor");
     assert_eq!(ui.get_rows().row_count(), 0);
     assert_eq!(ui.get_ai_quick_rows().row_count(), 0);
@@ -1743,7 +1746,8 @@ fn child_zero_hit_tag_pruning() {
     );
     ui.invoke_ai_action(16, 0);
     ui.set_ai_query("custom draft after layer pruning".into());
-    wait_for(ui, |ui| !ui.get_searching());
+    let ready = fixture.controller.clone();
+    wait_for(ui, move |ui| !ui.get_searching() && fully_published(&ready));
     let rows = ui.get_ai_quick_rows().iter().collect::<Vec<_>>();
     assert_eq!(ui.get_query(), "glow");
     assert_eq!(ui.get_rows().row_count(), 0);
