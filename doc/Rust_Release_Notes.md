@@ -2,7 +2,7 @@
 
 程序 1.0.3 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9
 
-以已发布 `v1.0.2` 为基线准备 PATCH 发布。API、资料库写目标、快照范围及完整格式沿用 1.0.2，不新增资料库迁移；进度与验证边界见 [1.0.3 发布记录](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_1.0.3.md)。
+已于 2026-11-17 17:49:48 UTC（北京时间 2026-11-18 01:49:48）正式发布 [v1.0.3](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.3)，以 `v1.0.2` 为基线使用 PATCH。七份正式产物来自最终 main/tag `130a64429aaa826fef2c8acc0c6168eb95bcad90`，tag object 为 `c8079fd74733a18346ae6998b67d618c3aea9894`；实际平台包验收、十四项线上资产与七份下载校验文件、发布后同一固定安装的 908 个文件／两个 EXE／CLI 1.0.3／隔离启动核验通过，copied=0，工作数据保留。API、资料库写目标、快照范围及完整格式沿用 1.0.2，不新增资料库迁移；审查、范围复用、beta、维护和平台限制见 [1.0.3 发布记录](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_1.0.3.md)。
 
 - **外观与字体**：系统字体、文字颜色、命名预设及推荐主题；增加护眼黑曜、深海蓝、暖砂琥珀和 OLED 黑色表面，保留原始默认／工作室呈现。旧 Forest 设置自动规范化为 Obsidian，保留其他偏好。
 - **AI Skill**：供应商、Skill 与文件、搜索行为分别管理；支持三份 Markdown 文档的编辑、启用、预览和文件夹导入导出。仅已保存且启用的方案参与生成，草稿不发送；本地查看副本保留外部修改。

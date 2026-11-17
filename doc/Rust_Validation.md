@@ -10,7 +10,9 @@ Windows Rust 1.97.1 MSVC、Slint 1.17.1、已核验 ASIO SDK 2.3.4。AI 控制�
 
 Linux arm64 使用 Rust 1.97.1、server no-default-features，所选配置 44、外观 2、AI customization/storage/relay 17、remote relay 9、server relay 9，共 81 passed／0 ignored；core/AI/remote/server strict Clippy 通过。Linux x64 在 ARM64 OrbStack 上仿真，同一所选依赖闭包 strict Clippy 通过；功能测试按平台无关输入复用 arm64 和 Windows 证据，未声称 x64 执行 81 项。候选与原检查身份的 crates/server/tools/资源 Git 对象一致，Cargo.lock 仅 11 个本地 workspace 包版本变更，外部依赖不变。
 
-复用本报告 2026-11-16／17 的配置持久化、受争用偏好、AI 设置／Skill 文件夹、主题与固定设置导航的原通过身份。数据库、扫描、Metadata、音频引擎、IPC、更新器和查询性能实现未改，相关 `v1.0.2` 数据安全及平台基线继续适用；本轮不执行无关 workspace 或百万条基准。新增 AI 写入错误归类已有专门回归，另选择原生关闭检查。实际包、原生关闭、beta 同步、发布和安装状态在 [1.0.3 发布记录](Rust_Release_1.0.3.md) 按实际完成收据补齐；本节源码检查不替代最终 main/tag payload 验收。
+Mac `b83d834` 所选 AI 59、desktop 47 个不同父测试、remote 9、server 9，共 124 passed／39 ignored；重叠过滤器只计一次。较早 `bd1225f` 的 core 配置 44 和外观 2 项通过，相关输入未变，保留原检查身份。严格 Clippy 通过；零匹配过滤器的失败与修正后 9 项 remote 通过分别保留。中英文 200% 的额外软件渲染诊断通过真实横向滚轮和坐标点击验证右侧主题、预设名称与保存按钮，未确认为产品缺陷；该私有实验单独记录，不增加已提交测试计数，也不代表物理鼠标或不同系统 DPI 验收。
+
+复用本报告 2026-11-16／17 的配置持久化、受争用偏好、AI 设置／Skill 文件夹、主题与固定设置导航的原通过身份。数据库、扫描、Metadata、音频引擎、IPC、更新器和查询性能实现未改，相关 `v1.0.2` 数据安全及平台基线继续适用；本轮不执行无关 workspace 或百万条基准。新增 AI 写入错误归类已有专门回归，Windows WM_CLOSE／SC_CLOSE 各 3 轮也通过。最终 main/tag `130a644` 的七份归档、十四项实际线上资产、七份下载校验文件、完整 beta 同步与发布后固定安装均已验收；范围与限制见 [1.0.3 发布记录](Rust_Release_1.0.3.md)。源码检查复用和实际最终包验收分别保留身份，后续文档闭环不重建或再次清理。
 
 ## 全局设置固定标题与操作区（2026-11-17，开发验证）
 

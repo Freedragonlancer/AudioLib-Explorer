@@ -8,7 +8,9 @@ AudioLib Explorer 是一款本地优先音效库管理软件，使用 Rust 编�
 
 v1.0.0 起，桌面端提供 AI 智能搜索：用自然语言描述声音，得到经当前资料库命中核验的英文关键词，1.0.1 主声音最多 6 个，有有效分层素材时总计最多 8 个（已发布的 v1.0.0 最多 5 个）。离线词表无需账号；云端模型需自备 HTTPS 供应商、API Key 和模型。搜索入口在桌面端；当前服务端可按配置转发供应商请求，`AudioLibCli` 不提供交互式 AI 搜索。详见 [AI 智能搜索](#ai-智能搜索)。
 
-- **当前正式版：** [v1.0.1](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.1)，于 2026-11-14 11:22:02 UTC（北京时间 19:22:02）发布。七份已验收产物来自最终 main/tag `21a0e1c`；十四项线上资产与校验正文、固定安装同步及平台限制见 [1.0.1 发布记录](doc/Rust_Release_1.0.1.md)。历史 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0) 保留源码 `1fc6f825` 及其[原始发布记录](doc/Rust_Release_1.0.0.md)。
+- **当前正式版：** [v1.0.3](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.3)，于 2026-11-17 17:49:48 UTC（北京时间 2026-11-18 01:49:48，UTC+8）发布。七份已验收产物来自最终 main/tag `130a644`；外观主题、可编辑 AI Skill、全局设置行为、验证证据、线上资产核验、固定安装同步与平台限制见 [1.0.3 发布记录](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_1.0.3.md)。
+- **上一正式版：** [v1.0.2](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.2)，于 2026-11-16 02:47:34 UTC（北京时间 2026-11-16 10:47:34）发布。七份已验收产物来自最终 main/tag `702366c`；十四项线上资产与校验正文、审查补修、基准条件及固定安装同步见 [1.0.2 发布记录](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_1.0.2.md)。
+- **历史正式版：** [v1.0.1](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.1)，于 2026-11-14 11:22:02 UTC（北京时间 19:22:02）发布。七份已验收产物来自最终 main/tag `21a0e1c`；十四项线上资产与校验正文、固定安装同步及平台限制见 [1.0.1 发布记录](doc/Rust_Release_1.0.1.md)。历史 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0) 保留源码 `1fc6f825` 及其[原始发布记录](doc/Rust_Release_1.0.0.md)。
 - **HTTP API：** `/api/v1/`（客户端与服务端）
 - **数据库 schema：** 普通本地 writer 为8；服务端显式迁移后为9，使用专用 writer；客户端只读校验快照3..=9。
 - **可写库格式：** 本地 base 为 `ale-s8-cld1-t3-m2-p1-a1`，专用服务端 schema-9 base 为 `ale-s9-cld1-t3-m2-p1-a1-sd1`；首次新源成功写入的同一事务启用必需 `audio_sources:1` 及对应 `-af1` 完整格式，旧客户端须升级，详见[兼容说明](doc/api/Library_Migration_Compatibility.md)。受支持的 schema 3–7 仅作为只读迁移来源。schema 8 使用共享专辑实体，Metadata 保留为原始 JSON TEXT。Metadata 压缩暂缓，快照传输仍使用 zstd。
