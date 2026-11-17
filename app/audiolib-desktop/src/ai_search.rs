@@ -193,6 +193,7 @@ enum Reply {
     SettingsSaved(Option<String>, bool),
     SkillFolder(Option<PathBuf>),
     SkillExported(PathBuf),
+    SkillLocalFolder(PathBuf),
     SettingsRejected(AiError),
 }
 
@@ -487,7 +488,7 @@ impl Controller {
                     }
                 }
                 26 => c.activate_ai_unsaved_profile(&ui),
-                30..=42 => c.ai_settings_action(&ui, kind, index),
+                30..=43 => c.ai_settings_action(&ui, kind, index),
                 18 => {
                     c.ai.drafts
                         .lock()
@@ -1785,6 +1786,14 @@ impl Controller {
                     Ok(Reply::SkillExported(path)) => ui.set_ai_status(c.localized(
                         &format!("已导出到 {}", path.display()), &format!("Exported to {}", path.display()),
                     )),
+                    Ok(Reply::SkillLocalFolder(path)) => {
+                        ui.set_ai_skill_folder(path.to_string_lossy().into_owned().into());
+                        ui.set_ai_status(c.localized(
+                            "已准备本地查看副本；外部编辑后可从“导入 / 导出”重新导入",
+                            "Local viewing copy ready; use Import / export to import external edits",
+                        ));
+                        c.open_explorer(path.to_string_lossy().into_owned(), false);
+                    }
                     Ok(Reply::SearchFailed) => {
                         c.clear_ai_suggestions(&ui);
                         c.ai_failure(&ui, c.localized(

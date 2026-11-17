@@ -76,6 +76,7 @@ export component AiSkillEditor inherits VerticalLayout {
     }
     HorizontalLayout {
         Text { horizontal-stretch: 1; min-width: 0px; overflow: elide; text: root.dirty ? (root.chinese ? "未保存 · 切换时保留草稿" : "Unsaved · switching retains drafts") : (root.chinese ? "已保存 / 内置" : "Saved / built-in"); color: root.dirty ? Theme.text(6, 8, Theme.warning) : Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); }
+        Button { text: root.chinese ? "打开本地文件夹" : "Open local folder"; accessible-label: "Open AI skill folder"; enabled: !root.busy; clicked => { root.action(43,0); } }
         Button { text: root.chinese ? "导入 / 导出" : "Import / export"; clicked => { root.transfer-visible = !root.transfer-visible; editor-scroll.viewport-y = 0px; } }
         if root.skill-id != "": Button { text: root.chinese ? "删除…" : "Delete…"; enabled: !root.busy; clicked => { root.confirm-delete = !root.confirm-delete; editor-scroll.viewport-y = 0px; } }
     }
