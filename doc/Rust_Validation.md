@@ -1,5 +1,29 @@
 # Rust 验证报告
 
+## AI 设置与 Skill 文档管理（2026-11-17，开发验证）
+
+基于 beta `8c344c2`，分支 `codex/ai-settings-skill-editor`。AI 设置拆为供应商、Skill 与文件、搜索行为；自定义方案支持复制、改名、三份 Markdown 文档编辑、逐文件启用、合并预览、保存/启用、删除确认及文件夹导入导出。搜索行为可保存分层、自动搜索开关和 1–3 个自动任务数量。说明见 [AI 智能搜索](Rust_AI_Search.md)。
+
+旧 `ai/profiles.json` 的供应商、加密密钥和 2000 字兼容提示词格式不变；新增 `ai/customization.json` 原子保存文档及行为，不改工作库。无新增配置文件时保留当前会话控制值，避免首次加载覆盖旧行为。已保存的启用方案参与生成，草稿不发送；输入校验拒绝不阻止正常关闭，也不会清除先前真正的写入失败状态。实际持久化失败保留原配置和关闭保护，重试后解除。
+
+Windows Rust 1.97.1 MSVC、Slint 1.17.1、已核验 ASIO SDK 2.3.4。最终格式检查、desktop ASIO all-targets strict Clippy、AI/remote/server no-default-features all-targets strict Clippy 均通过。功能验证使用隔离目录、本机 HTTP mock 和现有测试入口：
+
+| 范围 | 结果与证据（`.rust-validation/local-checks/`） |
+| --- | --- |
+| AI 后端 | 59 项通过，初始 `e10248e2b5c54bb98da66ba087d79dfc`；最终存储/兼容补修后重新验证 customization 4 项 `87f26ff6c1674ea19dcd31ee9671ea58`、storage 7 项 `6fbb7d1d2f1b436e8e9b4765014ee1a7`、relay 6 项 `7b465836c52a4fda8c27aa9da6d38007`。未变的参考检索、Jev 和供应商协议测试复用首轮结果，不重复计数 |
+| 桌面 AI 控制器 | 38 个不同父测试通过：37 项 `3b461096740243cea8f905cd930d1207`，转发生成补修 `b691932af45f44fbbe5651205b0da631`；最终 Skill 编辑/保存失败/无效导入回归及 strict Clippy 为 `9e0fc7672b3c4ab2bb476fa26b8ee06e`。父测试实际启动相应隔离子测试，忽略标记仅用于避免直接重复运行子入口 |
+| 远程与服务器直接调用方 | remote AI relay 9 项 `02d59ad3c4a04d65a838337fa6cf2db8`，server `--test ai_relay` 9 项 `b393e5854640478dab2082538cc5b8eb`；三包 strict Clippy `1d6737e26a974427b60072f4153fa1b6` |
+| 界面 | 最终 1 项真实 Slint 软件渲染/按钮点击检查 `983785f58c72416b9193c647e273b88e`。中英文、1080×700/1440×900 与 100%/150%/200% 组合共 20 张截图在 `.rust-validation/ai-settings/screenshots/*-x*.png`；已查看，保存/管理按钮固定底部，高缩放采用单行导航和更高设置面板 |
+| 原生关闭 | 当前开发源码构建 desktop/CLI ASIO debug 载荷，许可证预检通过；`validate-desktop-close.ps1` 的 WM_CLOSE/SC_CLOSE 各 3 次通过，正常排空且空库可重开。构建、验收及二进制哈希证据在 `.rust-validation/ai-settings/native-build.log`、`native-close.log`、`native-close-report.json` |
+
+初轮控制器回归发现首次加载错误覆盖会话中的自动搜索/分层选择，已修复并覆盖旧默认与显式保存两条路径。Windows mock relay 接受的 socket 改为显式阻塞读取配合已有超时，消除非阻塞读竞争；随后端到端检查确认合并的自定义 Skill 实际随转发生成请求发送。两个问题均已重跑相应检查，不将初轮失败当作通过。
+
+稳定范围：数据库、扫描、Metadata、普通配置写入机制、IPC、音频后端及离线参考数据均未改动；复用本文 2026-11-16/17 设置和关闭基线，以及 AI 搜索文档中的既有子系统验收。新增文档写入及关闭错误归类已由上述专门回归和原生关闭覆盖；没有变更跨实例锁或 release CLI 数据保全路径，因此未重跑完整 review-fixes、音库管理、workspace 或百万条基准。实际付费供应商及线上服务器未调用；旧转发服务器使用超过 2000 字的新 Skill 需升级，64 KiB 请求体上限仍保留。
+
+上述开发验证未发布、打包或部署；原生启动和保存检查均使用临时数据，未修改日常音库与设置。随后用户要求合入 beta 并本地交付，沿用 `windows-local` 计划从最终合并身份更新固定 `local_release/`；实际包验收、安装身份/启动和交付后的统一缓存清理以该次管线收据为准，复用上述输入未变的源码验证。
+
+任务结束执行已登记目标的 `Intermediate` / 0 GiB 中间产物清理，通过；按逻辑大小删除约 43.97 GiB，保留约 2.76 GiB 的根级最终产物等受保护内容。无维护阻塞或未核验目标；SDK、dist、安装及音源保留。证据 `.rust-validation/ai-settings/cache-cleanup.log`。
+
 ## 原始默认预设与 OLED 纯黑黑曜（2026-11-17，beta）
 
 基于 beta `934f362`，分支 `codex/oled-obsidian-classic-preset`。主题设置新增紧凑的「原始默认」入口，复用既有 `default` 标识、原始 palette 和 Classic 布局，无新增存储格式；通过已有推荐主题回调应用，清除文字覆盖并保留字体。黑曜将窗口、素材导航、结果列表底层、播放器和空波形改为不透明 `#000000`，详情/对话框面板为 `#0C0C0C`，浮层为 `#181818`；柔白文字和选中灰阶独立保留。纯黑工作区标志在切换到其他主题时复位。设计继续使用架构说明链接的 frontend-design 与 Carbon 方法，不改变音频频谱的数据颜色。

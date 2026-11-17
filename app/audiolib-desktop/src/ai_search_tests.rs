@@ -3,6 +3,130 @@
 use super::*;
 
 #[test]
+fn skill_editor_preserves_legacy_and_drafts_and_commits_only_saved_documents() {
+    isolated("ai_search::child_skill_editor");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_skill_editor() {
+    use audiolib_ai::storage::ProfileStore;
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    let root = fixture.root.join("preferences");
+    let mut store = ProfileStore::open(&root).unwrap();
+    store.save_prompt(true, "保留原有提示词").unwrap();
+    let original = std::fs::read(root.join("ai/profiles.json")).unwrap();
+    drop(store);
+    ui.set_ai_layers(false);
+    ui.set_ai_auto_search(true);
+    ui.set_ai_auto_search_count(2);
+    ui.invoke_ai_action(22, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_layers());
+    assert!(ui.get_ai_auto_search());
+    assert_eq!(ui.get_ai_auto_search_count(), 2);
+    assert_eq!(ui.get_ai_instruction(), "保留原有提示词");
+    assert!(!ui.get_ai_custom_skill_active());
+    ui.set_ai_skill_folder(root.to_string_lossy().into_owned().into());
+    ui.invoke_ai_action(41, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_error());
+    assert!(fixture.controller.ai.wait_saves().is_ok());
+    ui.set_ai_settings_page(1);
+    ui.invoke_ai_action(31, 0);
+    assert!(!ui.get_ai_skill_id().is_empty());
+    let id = ui.get_ai_skill_id();
+    ui.set_ai_skill_file(1);
+    ui.invoke_ai_action(36, 0);
+    assert_eq!(
+        ui.get_ai_skill_prompt(),
+        audiolib_ai::config::DEFAULT_PROMPT
+    );
+    ui.set_ai_skill_name("机械设计".into());
+    ui.set_ai_skill_prompt("优先金属机械".into());
+    ui.set_ai_skill_dirty(true);
+    ui.set_ai_skill_index(0);
+    ui.invoke_ai_action(30, 0);
+    assert!(ui.get_ai_skill_id().is_empty());
+    ui.set_ai_skill_index(1);
+    ui.invoke_ai_action(30, 1);
+    assert_eq!(ui.get_ai_skill_id(), id);
+    assert_eq!(ui.get_ai_skill_prompt(), "优先金属机械");
+    ui.invoke_ai_action(33, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_skill_dirty());
+    assert!(ui.get_ai_custom_skill_active());
+    let saved = ProfileStore::open(&root)
+        .unwrap()
+        .generation_guidance("old prompt")
+        .unwrap();
+    assert!(saved.contains("优先金属机械"));
+    ui.set_ai_skill_prompt("uncommitted".into());
+    ui.set_ai_skill_dirty(true);
+    ui.set_ai_auto_search_count(1);
+    ui.set_ai_layers(false);
+    ui.invoke_ai_action(39, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert_eq!(ui.get_ai_skill_prompt(), "uncommitted");
+    assert!(ui.get_ai_skill_dirty());
+    let saved_store = ProfileStore::open(&root).unwrap();
+    assert_eq!(
+        saved_store.generation_guidance("old prompt").unwrap(),
+        saved
+    );
+    assert_eq!(saved_store.customization().auto_search_count, 1);
+    assert!(!saved_store.customization().layers);
+    ui.invoke_ai_action(35, 0);
+    assert_eq!(ui.get_ai_skill_prompt(), "优先金属机械");
+    ui.set_ai_skill_body_enabled(false);
+    ui.set_ai_skill_prompt_enabled(false);
+    ui.set_ai_skill_techniques_enabled(false);
+    ui.invoke_ai_action(33, 0);
+    assert!(ui.get_ai_error());
+    assert!(!ui.get_ai_busy());
+    assert_eq!(
+        ProfileStore::open(&root)
+            .unwrap()
+            .generation_guidance("old prompt")
+            .unwrap(),
+        saved
+    );
+    ui.invoke_ai_action(35, 0);
+    // A failed durable write retains drafts and the close barrier until a successful retry.
+    let path = root.join("ai/customization.json");
+    let backup = root.join("ai/customization.saved");
+    std::fs::rename(&path, &backup).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    ui.invoke_ai_action(39, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_error());
+    assert!(fixture.controller.ai.wait_saves().is_err());
+    ui.invoke_ai_action(41, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(fixture.controller.ai.wait_saves().is_err());
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&backup, &path).unwrap();
+    ui.invoke_ai_action(39, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(fixture.controller.ai.wait_saves().is_ok());
+    ui.invoke_ai_action(34, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_custom_skill_active());
+    assert!(ui.get_ai_skill_id().is_empty());
+    assert_eq!(
+        std::fs::read(root.join("ai/profiles.json")).unwrap(),
+        original
+    );
+    // Discarding a new unsaved copy returns to the built-in entry.
+    ui.invoke_ai_action(31, 0);
+    ui.invoke_ai_action(35, 0);
+    assert!(ui.get_ai_skill_id().is_empty());
+    assert_eq!(ui.get_ai_skills().row_count(), 1);
+    finish(&fixture);
+}
+
+#[test]
 fn new_ai_profiles_stay_unsaved_until_saved_and_preserve_their_drafts() {
     isolated("ai_search::child_unsaved_provider");
 }
@@ -338,6 +462,9 @@ fn child_ai_server_mode() {
                     Err(error) => panic!("owned relay accept: {error}"),
                 }
             };
+            // Windows accepted sockets can inherit the listener's nonblocking mode.
+            // Use the explicit read deadline below instead of racing the client write.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
@@ -364,6 +491,15 @@ fn child_ai_server_mode() {
             stream.read_exact(&mut body).unwrap();
             let request: RelayRequest = serde_json::from_slice(&body).unwrap();
             request.validate().unwrap();
+            if index == 2 {
+                let audiolib_ai::relay::RelayOperation::Generate { guidance, .. } =
+                    &request.operation
+                else {
+                    panic!("expected generation");
+                };
+                assert!(guidance.chars().count() > 2000);
+                assert!(guidance.contains("Custom relay sound design role"));
+            }
             assert_eq!(request.profile.timeout_seconds, 180);
             let response = if index == 0 {
                 assert!(head.starts_with("POST /api/v1/ai/models "));
@@ -418,6 +554,11 @@ fn child_ai_server_mode() {
     let stored = ProfileStore::open(&root).unwrap();
     assert_eq!(stored.selected().unwrap().request_mode, RequestMode::Server);
     drop(stored);
+    ui.invoke_ai_action(31, 0);
+    ui.set_ai_skill_prompt("Custom relay sound design role".into());
+    ui.invoke_ai_action(33, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_error(), "{}", ui.get_ai_status());
     ui.set_ai_auto_search(false);
     ui.set_ai_prompt("wind".into());
     ui.invoke_ai_action(2, 0);

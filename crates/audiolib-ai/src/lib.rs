@@ -1,6 +1,7 @@
 // crates/audiolib-ai/src/lib.rs
 //! Local sound-design references and bounded optional AI provider calls.
 pub mod config;
+pub mod customization;
 pub mod jev;
 pub mod provider;
 pub mod reference;

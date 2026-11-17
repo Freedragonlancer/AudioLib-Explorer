@@ -77,7 +77,7 @@ pub fn request(
     layers: bool,
     guidance: &str,
 ) -> Result<(Value, Vec<String>)> {
-    crate::config::validate_instruction(guidance)?;
+    crate::config::validate_guidance(guidance)?;
     validate_intent(intent).map_err(|_| AiError::Invalid)?;
     let candidates = ReferenceIndex::embedded().decision_candidates(intent, layers);
     let mut summaries = BTreeMap::new();
