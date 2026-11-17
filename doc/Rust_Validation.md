@@ -4,7 +4,7 @@
 
 基于 beta `3607fce`，分支 `codex/ai-skill-open-folder`。Skill 页新增“打开本地文件夹”，在后台为当前内置／自定义内容准备本地查看副本，并复用已有 Explorer／Finder 文件夹入口。查看副本包含三份编辑文档及完整内置参考文件，位于数据目录 `ai/skill-files/`；按内容复用，后续修订使用不同目录，已有外部编辑不覆盖。草稿不因此保存或启用，外部编辑可显式重新导入；原供应商、密钥和配置格式不变。
 
-Windows Rust 1.97.1 MSVC、已核验 ASIO SDK 2.3.4；格式、desktop ASIO all-targets strict Clippy 与 `--bin AudioLibExplorer --test-filter skill_` 对应的 4 项测试通过，记录 `.rust-validation/local-checks/157ee8228524441f9e11ea7912b4d8ee/`。两项新增回归覆盖参考文件齐全、重复打开保留外部编辑、修订隔离、导入衔接及未知缓存拒绝；既有 Skill 保存/兼容父测试和界面测试也通过。1 个 ignored 入口由父测试实际启动，不属于缺失覆盖。中英文、100%/150%/200% 组合共 20 张截图位于 `.rust-validation/ai-skill-folder/screenshots/`，已检查代表截图，实际按钮点击正确派发打开操作。
+Windows Rust 1.97.1 MSVC、已核验 ASIO SDK 2.3.4；格式、desktop ASIO all-targets strict Clippy 与 `--bin AudioLibExplorer skill_` 对应的 4 项测试通过，记录 `.rust-validation/local-checks/157ee8228524441f9e11ea7912b4d8ee/`。两项新增回归覆盖参考文件齐全、重复打开保留外部编辑、修订隔离、导入衔接及未知缓存拒绝；既有 Skill 保存/兼容父测试和界面测试也通过。1 个 ignored 入口由父测试实际启动，不属于缺失覆盖。中英文、100%/150%/200% 组合共 20 张截图位于 `.rust-validation/ai-skill-folder/screenshots/`，已检查代表截图，实际按钮点击正确派发打开操作。
 
 本轮仅改变桌面设置与附属查看文件；配置保存、关闭排空、业务数据、AI 协议及平台文件夹打开实现未改动，复用下面 AI 设置记录的后端、remote/server、原生关闭与兼容验证，未重复无关全包或数据安全全套。Explorer／Finder 由已有原生入口打开，未新增平台 shell 实现；Mac 原生交互本轮未验证。沿用已授权的 beta 和本地交付流程，从最终合并身份运行 `windows-local`，实际包验收、固定安装及统一缓存清理以该次管线收据为准。
 
