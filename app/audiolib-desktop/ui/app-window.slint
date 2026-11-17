@@ -4925,7 +4925,9 @@ main-scroll := ScrollView {
           VerticalLayout { padding: 20px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
             HorizontalLayout { height: 34px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
                 settings-title := Text { horizontal-stretch: 1; text: root.chinese ? "全局设置" : "Global settings"; color: Theme.text(5, 0, Theme.ink); font-size: Theme.font(23); font-weight: 600; }
-                settings-title-close := Action { text-module: 5; width: 36px * Theme.ui-scale; subtle: true; label: "×"; action-label: root.chinese ? "关闭全局设置" : "Close global settings"; enabled: !root.settings-busy && !root.settings-close-confirm; clicked => { root.request-close-settings(); } }
+                settings-title-close := Action { text-module: 5; width: 36px * Theme.ui-scale; subtle: true; action-label: root.chinese ? "关闭全局设置" : "Close global settings"; enabled: !root.settings-busy && !root.settings-close-confirm; clicked => { root.request-close-settings(); }
+                    Image { source: @image-url("icons/close.svg"); width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; colorize: Theme.text(5, 0, Theme.ink); image-fit: contain; accessible-role: none; }
+                }
             }
             Rectangle { height: 1px; background: Theme.border; }
             HorizontalLayout { vertical-stretch: 1; min-height: 0px; spacing: 20px * Theme.ui-scale;
