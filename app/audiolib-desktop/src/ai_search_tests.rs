@@ -91,15 +91,14 @@ fn child_skill_save_failure_identity() {
     wait_for(ui, |ui| !ui.get_ai_busy());
     assert!(!ui.get_ai_error());
     assert!(fixture.controller.ai.wait_saves().is_err());
-    let a_index = fixture
-        .controller
-        .ai
-        .skill_ids
-        .lock()
+    let a_index = (ProfileStore::open(&root)
         .unwrap()
+        .customization()
+        .skills
         .iter()
-        .position(|id| id == &a_id)
-        .unwrap() as i32;
+        .position(|skill| skill.id == a_id)
+        .unwrap()
+        + 1) as i32;
     ui.set_ai_skill_index(a_index);
     ui.invoke_ai_action(30, a_index);
     assert_eq!(ui.get_ai_skill_prompt(), "failed Skill A edit");
