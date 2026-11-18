@@ -1,7 +1,7 @@
 // app/audiolib-desktop/ui/theme.slint
 import { Slider, CheckBox, LineEdit } from "std-widgets.slint";
 
-// Soft charcoal surfaces and restrained gray-teal actions keep spectral peaks readable.
+// Classic uses graphite surfaces, amber search and focus accents and separate playback and alert colors.
 export global Theme {
     in-out property <string> font-family;
     // Transparent slots inherit the matching General role, then the original theme color.
@@ -57,36 +57,36 @@ export global Theme {
     out property <length> list-font-size: Theme.list-font(Theme.modern-style ? 14 : 12);
     // Palette tokens. The values here are the default theme; Rust (src/theme.rs) sets
     // them from the selected theme at startup and when the Theme setting changes.
-    in-out property <color> bg: #181b20;
-    in-out property <color> panel: #20242a;
-    in-out property <color> raised: #2a3037;
-    in-out property <color> hover: #353d45;
-    in-out property <color> border: #353d45;
-    in-out property <color> strong-border: #697581;
-    in-out property <color> ink: #d9dee3;
-    in-out property <color> dim: #aab2bd;
-    in-out property <color> muted: #95a0ac;
-    in-out property <color> accent: #8faea6;
-    in-out property <color> accent-hover: #a8c3bb;
+    in-out property <color> bg: #191a1b;
+    in-out property <color> panel: #252627;
+    in-out property <color> raised: #303132;
+    in-out property <color> hover: #3c3d3e;
+    in-out property <color> border: #393a3b;
+    in-out property <color> strong-border: #858582;
+    in-out property <color> ink: #f2f0eb;
+    in-out property <color> dim: #c4c2bc;
+    in-out property <color> muted: #a9a9a4;
+    in-out property <color> accent: #edb85d;
+    in-out property <color> accent-hover: #ffd28a;
     // Additional Studio accents; the classic defaults alias existing palette tones.
-    in-out property <color> mint: #8faea6;
-    in-out property <color> apricot: #c3b48e;
-    in-out property <color> coral: #cf9696;
-    in-out property <color> on-accent: #202b28;
-    in-out property <color> selected: #2b3a38;
-    in-out property <color> checked: #354744;
-    in-out property <color> alternate: #22282e;
-    in-out property <color> warning: #c3b48e;
+    in-out property <color> mint: #96d1ab;
+    in-out property <color> apricot: #e6c68d;
+    in-out property <color> coral: #ec9d90;
+    in-out property <color> on-accent: #251e12;
+    in-out property <color> selected: #414343;
+    in-out property <color> checked: #353737;
+    in-out property <color> alternate: #292a2b;
+    in-out property <color> warning: #ffce86;
     // Segmented switches (page tabs, panel toggles): a recessed track below `panel` and
     // a raised surface for the selected segment, so switches never read as buttons.
-    in-out property <color> trough: #15181c;
-    in-out property <color> segment: #3a434c;
+    in-out property <color> trough: #1a1b1c;
+    in-out property <color> segment: #454746;
     // Exclusion marks (excluded filter tags): restrained like `accent`, readable on `panel`.
-    in-out property <color> danger: #cf9696;
-    in-out property <color> danger-surface: #3a2a2d;
-    in-out property <color> player: #232a30;
-    in-out property <color> player-border: #465059;
-    in-out property <color> tooltip: #14171c;
+    in-out property <color> danger: #f3a49c;
+    in-out property <color> danger-surface: #432b29;
+    in-out property <color> player: #212223;
+    in-out property <color> player-border: #444544;
+    in-out property <color> tooltip: #18191a;
     in-out property <color> overlay: #000000a8;
     // Studio's PR #185 surface resources are inert for the default theme.
     // Keeping a default image value avoids painting any backdrop in classic views.
@@ -108,6 +108,9 @@ export global Theme {
     out property <image> player-backdrop: Theme.modern-player ? Theme.studio-player : Theme.empty-backdrop;
     out property <image> transport-backdrop: Theme.modern-player ? Theme.studio-transport : Theme.empty-backdrop;
     out property <image> tab-indicator: Theme.modern-style ? Theme.studio-tab-indicator : Theme.empty-backdrop;
+    out property <color> primary-button: Theme.modern-style ? Theme.accent : Theme.dim;
+    out property <color> primary-button-hover: Theme.modern-style ? Theme.accent-hover : Theme.ink;
+    out property <color> navigation-ink: Theme.modern-style ? Theme.accent : Theme.ink;
     out property <color> toolbar-surface: Theme.modern-player ? #28282a : Theme.bg;
     out property <color> rail-surface: Theme.modern-player ? #2a2b2e : Theme.panel;
     out property <color> library-surface: Theme.pure-black-workspace ? Theme.bg : (Theme.modern-player ? #202224 : Theme.panel);
@@ -123,7 +126,12 @@ export global Theme {
     out property <brush> tab-surface: Theme.modern-player ? @linear-gradient(180deg, #343537 0%, #272a2c 100%) : Theme.panel;
     // Not themeable. Matches the pixel renderer. Frequency hues and noise-to-black are audio data.
     out property <color> spectral-canvas: #849094;
-    out property <color> normal-canvas: Theme.modern-player ? transparent : (Theme.tinted-surfaces ? Theme.trough : #1d2328);
+    out property <color> normal-canvas: Theme.modern-player ? transparent : (Theme.tinted-surfaces || !Theme.modern-style ? Theme.trough : #1d2328);
+    public pure function interactive-fill(active: bool, hovered: bool, pressed: bool, idle: color) -> color {
+        if pressed { return Theme.checked.mix(Theme.navigation-ink, 0.78); }
+        if active { return hovered ? Theme.selected.mix(Theme.navigation-ink, 0.87) : Theme.selected; }
+        return hovered ? Theme.hover : idle;
+    }
     // Motion. Transitions stay short and ease out; nothing bounces or travels far.
     // `motion` scales every duration below: 1 keeps the designed timing, 0 turns
     // transitions off (state changes then apply immediately).
@@ -211,17 +219,20 @@ export component ThemedCheckBox inherits Rectangle {
     HorizontalLayout {
         padding: 0px; spacing: 12px * Theme.ui-scale;
         Rectangle {
-            width: 18px * Theme.ui-scale; height: 18px * Theme.ui-scale; y: (parent.height - self.height) / 2;
-            border-radius: 3px * Theme.ui-scale; border-width: 1px;
-            background: root.checked ? Theme.accent : Theme.panel;
-            border-color: root.has-focus ? Theme.ink : (root.checked ? Theme.accent : Theme.strong-border);
-            opacity: root.enabled ? 1 : 0.45;
-            // Use explicit vector geometry: a font-dependent glyph may be absent
-            // from the selected UI font and leave checked items as blank squares.
-            if root.checked: Image {
-                source: @image-url("icons/check.svg"); colorize: Theme.on-accent;
-                x: 3px * Theme.ui-scale; y: 3px * Theme.ui-scale; width: 12px * Theme.ui-scale; height: 12px * Theme.ui-scale;
-                image-fit: contain; accessible-role: none;
+            width: 18px * Theme.ui-scale; min-height: self.width;
+            Rectangle {
+                width: parent.width; height: self.width; y: (parent.height - self.height) / 2;
+                border-radius: 3px * Theme.ui-scale; border-width: 1px;
+                background: root.checked ? Theme.accent : Theme.panel;
+                border-color: root.has-focus ? Theme.ink : (root.checked ? Theme.accent : Theme.strong-border);
+                opacity: root.enabled ? 1 : 0.45;
+                // Use explicit vector geometry: a font-dependent glyph may be absent
+                // from the selected UI font and leave checked items as blank squares.
+                if root.checked: Image {
+                    source: @image-url("icons/check.svg"); colorize: Theme.on-accent;
+                    x: 3px * Theme.ui-scale; y: 3px * Theme.ui-scale; width: 12px * Theme.ui-scale; height: 12px * Theme.ui-scale;
+                    image-fit: contain; accessible-role: none;
+                }
             }
         }
         if root.text != "": Text {

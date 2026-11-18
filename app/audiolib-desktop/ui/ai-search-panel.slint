@@ -58,7 +58,8 @@ export component AiSearchAction inherits Rectangle {
         AiSearchToggle { active: root.active; enabled: root.enabled; chinese: root.chinese; toggled => { root.toggled(); } }
         submit := Rectangle {
             horizontal-stretch: 1;
-            background: hit.has-hover && self.available ? Theme.accent.brighter(0.08) : Theme.accent;
+            background: !self.available ? Theme.accent : hit.pressed ? Theme.accent.darker(0.12) : hit.has-hover ? Theme.accent-hover : Theme.accent;
+            animate background { duration: Theme.motion-fast; easing: ease-out; }
             border-radius: 4px * Theme.ui-scale;
             border-width: submit-focus.has-focus ? 2px : 0px;
             border-color: Theme.ink;
