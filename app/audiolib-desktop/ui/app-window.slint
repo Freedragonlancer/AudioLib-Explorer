@@ -3854,7 +3854,7 @@ main-scroll := ScrollView {
             active: !Theme.modern-style;
             premute-db <=> root.audition-premute-db;
             show-remaining <=> root.audition-show-remaining;
-            height: Theme.modern-player ? max(114px * Theme.ui-scale, root.audition-preferred-height) : (root.short-layout ? 176px : 204px) * Theme.ui-scale + self.selection-feedback-height;
+            height: Theme.modern-player ? max(114px * Theme.ui-scale, root.audition-preferred-height) : (root.short-layout ? 176px : 204px) * Theme.ui-scale;
             expanded: root.audition-expanded;
             narrow: root.content-width < 1440px * Theme.ui-scale;
             waveform-mask: root.waveform-mask;
@@ -4727,7 +4727,7 @@ main-scroll := ScrollView {
             active: Theme.modern-style;
             premute-db <=> root.audition-premute-db;
             show-remaining <=> root.audition-show-remaining;
-            height: Theme.modern-player ? max(114px * Theme.ui-scale, root.audition-preferred-height) : (root.short-layout ? 176px : 204px) * Theme.ui-scale + self.selection-feedback-height;
+            height: Theme.modern-player ? max(114px * Theme.ui-scale, root.audition-preferred-height) : (root.short-layout ? 176px : 204px) * Theme.ui-scale;
             expanded: root.audition-expanded;
             narrow: root.content-width < 1440px * Theme.ui-scale;
             waveform-mask: root.waveform-mask;

@@ -618,6 +618,30 @@ fn narrow_selection_has_a_separate_drag_grip_without_covering_plot_or_ruler() {
     for modern in [false, true] {
         let ui = window(modern);
         ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+        settle();
+        let wave = ElementHandle::find_by_accessible_label(&ui, "Waveform timeline")
+            .next()
+            .unwrap();
+        let ruler = ElementHandle::find_by_accessible_label(&ui, "Waveform time ruler")
+            .next()
+            .unwrap();
+        let geometry = || {
+            (
+                wave.absolute_position(),
+                wave.size(),
+                ruler.absolute_position(),
+                ruler.size(),
+            )
+        };
+        let idle = geometry();
+        pressed(&ui, 0.2);
+        moved(&ui, point(&ui, 0.4));
+        assert_eq!(
+            geometry(),
+            idle,
+            "Draft selection moved the waveform or ruler"
+        );
+        released(&ui, 0.4);
         ui.set_wave_selection_start(8.0);
         ui.set_wave_selection_end(8.001);
         ui.set_wave_selection_active(true);
@@ -625,25 +649,24 @@ fn narrow_selection_has_a_separate_drag_grip_without_covering_plot_or_ruler() {
         let grip = ElementHandle::find_by_accessible_label(&ui, "Drag selection as WAV")
             .next()
             .expect("Narrow ranges retain a separate drag grip");
-        let wave = ElementHandle::find_by_accessible_label(&ui, "Waveform timeline")
-            .next()
-            .unwrap();
         let origin = grip.absolute_position();
         let size = grip.size();
-        let plot_origin = wave.absolute_position();
-        let plot_size = wave.size();
+        assert_eq!(
+            geometry(),
+            idle,
+            "Committed selection moved the waveform or ruler"
+        );
         assert!(size.width > 0.0 && size.height > 0.0);
-        assert!(
-            origin.y + size.height <= plot_origin.y || origin.y >= plot_origin.y + plot_size.height,
-            "modern={modern}, grip={origin:?}+{size:?}, plot={plot_origin:?}+{plot_size:?}"
-        );
-        let ruler = ElementHandle::find_by_accessible_label(&ui, "Waveform time ruler")
-            .next()
-            .unwrap();
-        assert!(
-            origin.y + size.height <= ruler.absolute_position().y
-                || origin.y >= ruler.absolute_position().y + ruler.size().height
-        );
+        let separate = |other: &ElementHandle| {
+            let pos = other.absolute_position();
+            let bounds = other.size();
+            origin.x + size.width <= pos.x
+                || origin.x >= pos.x + bounds.width
+                || origin.y + size.height <= pos.y
+                || origin.y >= pos.y + bounds.height
+        };
+        assert!(separate(&wave));
+        assert!(separate(&ruler));
         let start = LogicalPosition::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
         let requests = Rc::new(RefCell::new(0));
         let observed = requests.clone();
@@ -680,6 +703,13 @@ fn narrow_selection_has_a_separate_drag_grip_without_covering_plot_or_ruler() {
         settle();
         assert_eq!(*endings.borrow(), 1);
         assert!(!ui.get_wave_selection_gesture());
+        ui.set_wave_selection_active(false);
+        settle();
+        assert_eq!(
+            geometry(),
+            idle,
+            "Clearing the selection moved the waveform or ruler"
+        );
         ui.hide().unwrap();
     }
 }
@@ -786,7 +816,13 @@ fn crossing_the_export_grip_cannot_take_over_a_draw_or_boundary_resize() {
         settle();
         pressed(&ui, 0.2);
         moved(&ui, grip_center);
-        pointer(&ui, 4);
+        // Crossing the opposite endpoint reverses the resize cursor, even over the grip.
+        let expected = if grip_center.x > point(&ui, 0.6).x {
+            5
+        } else {
+            4
+        };
+        pointer(&ui, expected);
         pointer_release(&ui, grip_center);
         assert_eq!(ranges.borrow().len(), 3);
         assert!(!ui.get_wave_selection_gesture());
