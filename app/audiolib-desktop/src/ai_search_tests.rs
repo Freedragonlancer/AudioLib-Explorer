@@ -543,11 +543,15 @@ fn child_openai_official_profile() {
     assert_eq!(official.base_url, Protocol::OpenAiOfficial.default_url());
     assert_eq!(official.model, "owned-official-model");
     if audiolib_windows::user_secret_protection_available() {
-        assert_eq!(
-            saved.key(&retained).unwrap().expose(),
-            "owned-compatible-key"
-        );
-        assert_eq!(saved.key(&official).unwrap().expose(), "owned-official-key");
+        for (profile, expected) in [
+            (&retained, "owned-compatible-key"),
+            (&official, "owned-official-key"),
+        ] {
+            let key = saved.key(profile).unwrap();
+            let request = audiolib_ai::relay::RelayRequest::models(profile, &key).unwrap();
+            let wire = serde_json::to_value(request).unwrap();
+            assert_eq!(wire["api_key"], expected);
+        }
     }
     drop(saved);
 
