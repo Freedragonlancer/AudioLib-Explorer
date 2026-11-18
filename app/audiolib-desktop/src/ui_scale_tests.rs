@@ -238,6 +238,76 @@ fn ai_skill_settings_render_in_both_languages_and_compact_windows() {
     }
 }
 
+#[test]
+fn openai_official_form_is_readable_in_both_languages_and_scales() {
+    use i_slint_backend_testing::ElementHandle;
+
+    init_software_backend();
+    for chinese in [false, true] {
+        for scale in [1.0, 2.0] {
+            let ui = AppWindow::new().unwrap();
+            ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+            crate::theme::apply_theme(&ui, "default-v2");
+            ui.global::<crate::Theme>().set_ui_scale(scale);
+            ui.set_chinese(chinese);
+            ui.set_ai_visible(true);
+            ui.set_ai_collapsed(false);
+            ui.set_ai_settings(true);
+            ui.set_ai_settings_page(0);
+            ui.set_ai_protocol(8);
+            ui.set_ai_endpoint(
+                audiolib_ai::config::Protocol::OpenAiOfficial
+                    .default_url()
+                    .into(),
+            );
+            let action = std::rc::Rc::new(std::cell::Cell::new(-1));
+            let observed = action.clone();
+            ui.on_ai_action(move |kind, _| observed.set(kind));
+            ui.show().unwrap();
+            let language = if chinese { "cn" } else { "en" };
+            save_snapshot(
+                &ui,
+                &format!("openai-official-{language}-x{scale}-1080x700.png"),
+            );
+            let selector = ElementHandle::find_by_accessible_label(
+                &ui,
+                if chinese {
+                    "AI 供应商类型"
+                } else {
+                    "AI provider type"
+                },
+            )
+            .next()
+            .unwrap();
+            assert_eq!(
+                selector.accessible_value().as_deref(),
+                Some(if chinese {
+                    "OpenAI 官方"
+                } else {
+                    "OpenAI Official"
+                })
+            );
+            let endpoint = ElementHandle::find_by_accessible_label(&ui, "AI Base URL")
+                .next()
+                .unwrap();
+            assert_eq!(endpoint.accessible_enabled(), Some(false));
+            let save = ElementHandle::find_by_accessible_label(
+                &ui,
+                if chinese {
+                    "保存配置"
+                } else {
+                    "Save profile"
+                },
+            )
+            .next()
+            .unwrap();
+            save.mock_single_click(slint::platform::PointerEventButton::Left);
+            assert_eq!(action.get(), 8);
+            ui.hide().unwrap();
+        }
+    }
+}
+
 fn long_remote_source_label(chinese: bool) -> &'static str {
     if chinese {
         "服务器模式 · 影视制作音效资料库 — 当前项目使用的远端扩展拟音合集 · 音效库：木门、机械装置与室内环境素材 · 同步状态：已更新完整资料与目录，可继续检索与试听 · 较长的无空格服务器标识：sound-archive-production-foley-current-project.example.test:8791"

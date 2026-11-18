@@ -22,7 +22,13 @@ pub struct RelayProfile {
 impl From<&Profile> for RelayProfile {
     fn from(profile: &Profile) -> Self {
         Self {
-            protocol: profile.protocol,
+            // The dedicated local entry uses the existing Responses wire value,
+            // so old relay servers and their approved upstreams keep working.
+            protocol: if profile.protocol == Protocol::OpenAiOfficial {
+                Protocol::Responses
+            } else {
+                profile.protocol
+            },
             base_url: profile.base_url.clone(),
             model: profile.model.clone(),
             timeout_seconds: profile.timeout_seconds,
@@ -107,6 +113,8 @@ impl std::fmt::Debug for RelayRequest {
 impl RelayRequest {
     /// Construct model discovery without transmitting any app-local profile identity.
     pub fn models(profile: &Profile, key: &ApiKey) -> Result<Self> {
+        // Enforce the fixed official endpoint before mapping its local identity.
+        profile.validate_discovery_request()?;
         let request = Self {
             profile: profile.into(),
             operation: RelayOperation::Models,
@@ -125,6 +133,7 @@ impl RelayRequest {
         guidance: &str,
         session: &str,
     ) -> Result<Self> {
+        profile.validate_request()?;
         let request = Self {
             profile: profile.into(),
             operation: RelayOperation::Generate {
@@ -359,6 +368,75 @@ impl RelayResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn official_entry_keeps_responses_relay_wire_and_validates_before_mapping() {
+        let profile = Profile {
+            protocol: Protocol::OpenAiOfficial,
+            base_url: Protocol::OpenAiOfficial.default_url().into(),
+            model: "owned-model".into(),
+            ..Default::default()
+        };
+        let key = ApiKey::new("owned-official-key".into()).unwrap();
+        for request in [
+            RelayRequest::models(&profile, &key).unwrap(),
+            RelayRequest::generate(
+                &profile,
+                &key,
+                "wind",
+                false,
+                crate::config::DEFAULT_PROMPT,
+                "owned-session",
+            )
+            .unwrap(),
+        ] {
+            let wire = serde_json::to_value(&request).unwrap();
+            assert_eq!(wire["profile"]["protocol"], "responses");
+            assert_eq!(
+                wire["profile"]["base_url"],
+                Protocol::OpenAiOfficial.default_url()
+            );
+            assert!(wire["profile"].get("id").is_none());
+            assert!(wire["profile"].get("credential_ref").is_none());
+            let decoded: RelayRequest = serde_json::from_value(wire).unwrap();
+            decoded.validate().unwrap();
+            assert_eq!(decoded.profile.protocol, Protocol::Responses);
+            let compatible = Profile {
+                protocol: Protocol::Responses,
+                ..profile.clone()
+            };
+            assert_eq!(
+                upstream_identity(&decoded.profile).unwrap(),
+                upstream_identity(&RelayProfile::from(&compatible)).unwrap()
+            );
+        }
+        for base_url in [
+            "https://gateway.example/v1",
+            "http://127.0.0.1:9000/v1",
+            "https://api.openai.com:443/v1",
+            "https://api.openai.com/v1/responses",
+        ] {
+            let invalid = Profile {
+                base_url: base_url.into(),
+                ..profile.clone()
+            };
+            assert!(matches!(
+                RelayRequest::models(&invalid, &key),
+                Err(AiError::InvalidConfig(crate::ConfigField::Url))
+            ));
+            assert!(matches!(
+                RelayRequest::generate(
+                    &invalid,
+                    &key,
+                    "wind",
+                    false,
+                    crate::config::DEFAULT_PROMPT,
+                    "owned-session"
+                ),
+                Err(AiError::InvalidConfig(crate::ConfigField::Url))
+            ));
+        }
+    }
+
     use crate::{config::DEFAULT_PROMPT, reference::ReferenceIndex};
 
     fn profile() -> Profile {

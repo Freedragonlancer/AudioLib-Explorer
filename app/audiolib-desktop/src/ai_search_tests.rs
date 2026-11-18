@@ -457,6 +457,158 @@ fn child_unsaved_provider() {
 }
 
 #[test]
+fn openai_official_profiles_keep_compatible_profiles_and_credentials_separate() {
+    isolated("ai_search::child_openai_official_profile");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_openai_official_profile() {
+    use audiolib_ai::{config::Protocol, storage::ProfileStore};
+    use i_slint_backend_testing::ElementHandle;
+
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    let preferences = fixture.root.join("preferences");
+    ui.show().unwrap();
+    ui.invoke_ai_action(22, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+
+    // Save through the controller so session-only credentials are available on
+    // Unix too. Neither saving nor inspecting the form contacts a provider.
+    ui.invoke_ai_action(9, 0);
+    assert_eq!(ui.get_ai_protocol(), 0);
+    ui.set_ai_profile_name("Existing compatible".into());
+    ui.set_ai_endpoint("https://compatible.example.test/v1".into());
+    ui.set_ai_model("owned-compatible-model".into());
+    ui.set_ai_key("owned-compatible-key".into());
+    ui.invoke_ai_action(8, 0);
+    wait_for(ui, |ui| {
+        !ui.get_ai_busy() && ui.get_ai_provider_index() == 1
+    });
+    assert!(!ui.get_ai_error(), "{}", ui.get_ai_status());
+    let retained = ProfileStore::open(&preferences)
+        .unwrap()
+        .selected()
+        .unwrap()
+        .clone();
+    assert_eq!(retained.protocol, Protocol::ChatCompletions);
+    assert!(ui.get_ai_saved_key());
+
+    ui.invoke_ai_action(9, 0);
+    assert_eq!(ui.get_ai_protocol(), 0, "New must keep the Chat default");
+    ui.set_ai_endpoint("https://draft.example.test/v1".into());
+    ui.set_ai_model("discarded-draft-model".into());
+    ui.set_ai_key("discarded-draft-key".into());
+    // The actual ComboBox binding sets the index before its selected callback.
+    ui.set_ai_protocol(8);
+    ui.invoke_ai_action(12, 8);
+    assert_eq!(ui.get_ai_endpoint(), Protocol::OpenAiOfficial.default_url());
+    assert!(ui.get_ai_model().is_empty());
+    assert!(ui.get_ai_key().is_empty());
+    assert!(ui.get_ai_profile_id().is_empty());
+    assert!(!ui.get_ai_saved_key());
+
+    for (chinese, label, value) in [
+        (false, "AI provider type", "OpenAI Official"),
+        (true, "AI 供应商类型", "OpenAI 官方"),
+    ] {
+        ui.set_chinese(chinese);
+        let selector = ElementHandle::find_by_accessible_label(ui, label)
+            .next()
+            .expect("localized provider selector");
+        assert_eq!(selector.accessible_value().as_deref(), Some(value));
+        let endpoint = ElementHandle::find_by_accessible_label(ui, "AI Base URL")
+            .next()
+            .expect("official endpoint field");
+        assert_eq!(endpoint.accessible_enabled(), Some(false));
+    }
+    ui.set_chinese(false);
+    ui.set_ai_profile_name("Owned official".into());
+    ui.set_ai_model("owned-official-model".into());
+    ui.set_ai_key("owned-official-key".into());
+    ui.invoke_ai_action(8, 0);
+    wait_for(ui, |ui| {
+        !ui.get_ai_busy() && ui.get_ai_provider_index() == 2
+    });
+    assert!(!ui.get_ai_error(), "{}", ui.get_ai_status());
+    assert!(ui.get_ai_saved_key());
+    assert!(ui.get_ai_key().is_empty());
+    let saved = ProfileStore::open(&preferences).unwrap();
+    assert_eq!(saved.profiles().len(), 2);
+    assert_eq!(saved.profiles()[0], retained);
+    let official = saved.selected().unwrap().clone();
+    assert_ne!(official.id, retained.id);
+    assert_eq!(official.protocol, Protocol::OpenAiOfficial);
+    assert_eq!(official.base_url, Protocol::OpenAiOfficial.default_url());
+    assert_eq!(official.model, "owned-official-model");
+    if audiolib_windows::user_secret_protection_available() {
+        assert_eq!(
+            saved.key(&retained).unwrap().expose(),
+            "owned-compatible-key"
+        );
+        assert_eq!(saved.key(&official).unwrap().expose(), "owned-official-key");
+    }
+    drop(saved);
+
+    // Even though Chat defaults to the same official URL, a protocol change
+    // cannot silently reuse the official profile's hidden credential.
+    let persisted = std::fs::read(preferences.join("ai/profiles.json")).unwrap();
+    ui.set_ai_key("discarded-switch-key".into());
+    ui.set_ai_protocol(0);
+    ui.invoke_ai_action(12, 0);
+    assert_eq!(
+        ui.get_ai_endpoint(),
+        Protocol::ChatCompletions.default_url()
+    );
+    assert!(ui.get_ai_model().is_empty());
+    assert!(ui.get_ai_key().is_empty());
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(ui, "AI Base URL")
+            .next()
+            .unwrap()
+            .accessible_enabled(),
+        Some(true)
+    );
+    ui.set_ai_model("owned-chat-after-switch".into());
+    ui.invoke_ai_action(8, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_error());
+    assert_eq!(
+        std::fs::read(preferences.join("ai/profiles.json")).unwrap(),
+        persisted
+    );
+
+    ui.invoke_ai_action(18, 0);
+    assert_eq!(ui.get_ai_protocol(), 8);
+    assert_eq!(ui.get_ai_endpoint(), Protocol::OpenAiOfficial.default_url());
+    assert_eq!(ui.get_ai_model(), "owned-official-model");
+    assert!(ui.get_ai_key().is_empty());
+    ui.set_ai_provider_index(1);
+    ui.invoke_ai_action(4, 1);
+    assert_eq!(ui.get_ai_protocol(), 0);
+    assert_eq!(ui.get_ai_endpoint(), retained.base_url);
+    assert_eq!(ui.get_ai_model(), retained.model);
+    assert!(ui.get_ai_saved_key());
+    assert!(ui.get_ai_key().is_empty());
+    ui.set_ai_provider_index(2);
+    ui.invoke_ai_action(4, 2);
+    assert_eq!(ui.get_ai_protocol(), 8);
+    assert_eq!(ui.get_ai_profile_id(), official.id);
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(ui, "AI Base URL")
+            .next()
+            .unwrap()
+            .accessible_enabled(),
+        Some(false)
+    );
+    let reopened = ProfileStore::open(&preferences).unwrap();
+    assert_eq!(reopened.profiles()[0], retained);
+    assert_eq!(reopened.profiles()[1], official);
+    finish(&fixture);
+}
+
+#[test]
 fn ai_configuration_errors_allow_model_discovery_and_preserve_saved_credentials() {
     isolated("ai_search::child_ai_configuration_errors");
 }
