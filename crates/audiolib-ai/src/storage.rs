@@ -323,6 +323,76 @@ impl ProfileStore {
 mod tests {
     use super::*;
     #[test]
+    fn official_profiles_do_not_reuse_or_replace_compatible_profile_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = ProfileStore::open(root.path()).unwrap();
+        let compatible = Profile {
+            protocol: Protocol::Responses,
+            model: "owned-model".into(),
+            ..Default::default()
+        };
+        store
+            .save(
+                compatible,
+                Some(ApiKey::new("owned-compatible-key".into()).unwrap()),
+            )
+            .unwrap();
+        let saved = store.selected().unwrap().clone();
+        let bytes = std::fs::read(&store.path).unwrap();
+        let mut official = Profile {
+            protocol: Protocol::OpenAiOfficial,
+            ..saved.clone()
+        };
+        assert!(matches!(
+            store.discovery_key(&official, None),
+            Err(AiError::InvalidConfig(ConfigField::EndpointChanged))
+        ));
+        assert!(matches!(
+            store.save(official.clone(), None),
+            Err(AiError::InvalidConfig(ConfigField::EndpointChanged))
+        ));
+        assert_eq!(std::fs::read(&store.path).unwrap(), bytes);
+        official.id = uuid::Uuid::new_v4().to_string();
+        store
+            .save(
+                official,
+                Some(ApiKey::new("owned-official-key".into()).unwrap()),
+            )
+            .unwrap();
+        let saved_official = store.selected().unwrap().clone();
+        assert_eq!(saved_official.protocol, Protocol::OpenAiOfficial);
+        assert_eq!(store.profiles().len(), 2);
+        assert_eq!(
+            store
+                .profiles()
+                .iter()
+                .find(|profile| profile.id == saved.id)
+                .unwrap(),
+            &saved
+        );
+        assert_eq!(store.key(&saved).unwrap().expose(), "owned-compatible-key");
+        assert_eq!(
+            store.key(&saved_official).unwrap().expose(),
+            "owned-official-key"
+        );
+        let reopened = ProfileStore::open(root.path()).unwrap();
+        assert_eq!(reopened.selected().unwrap(), &saved_official);
+        if audiolib_windows::user_secret_protection_available() {
+            assert_eq!(
+                reopened.key(&saved).unwrap().expose(),
+                "owned-compatible-key"
+            );
+            assert_eq!(
+                reopened.key(&saved_official).unwrap().expose(),
+                "owned-official-key"
+            );
+        }
+        let serialized = std::fs::read_to_string(&store.path).unwrap();
+        assert!(!serialized.contains("owned-compatible-key"));
+        assert!(!serialized.contains("owned-official-key"));
+    }
+
+    #[test]
     fn clipboard_key_whitespace_is_not_retained_in_session_or_protected_storage() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = ProfileStore::open(dir.path()).unwrap();

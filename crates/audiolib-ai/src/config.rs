@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_PROMPT: &str =
     "作为资深声音设计师，请根据输入内容，合理匹配声音设计需要用的专业Keyword";
 
+/// Fixed API base for the dedicated official OpenAI entry.
+pub const OPENAI_OFFICIAL_BASE_URL: &str = "https://api.openai.com/v1";
+
 /// Minimum user-selected provider request timeout.
 pub const MIN_TIMEOUT_SECONDS: u64 = 2;
 /// Initial timeout for new profiles; saved choices retain their original value.
@@ -69,6 +72,9 @@ pub enum Protocol {
     OpenCodeGo,
     DeepSeek,
     Magpie,
+    /// Official OpenAI Responses with a fixed endpoint; compatible entries stay separate.
+    #[serde(rename = "open_ai_official")]
+    OpenAiOfficial,
 }
 
 impl Protocol {
@@ -83,6 +89,7 @@ impl Protocol {
             Self::OpenCodeGo => "OpenCode Go",
             Self::DeepSeek => "DeepSeek",
             Self::Magpie => "Magpie",
+            Self::OpenAiOfficial => "OpenAI Official",
         }
     }
 
@@ -97,6 +104,7 @@ impl Protocol {
             Self::OpenCodeGo => 5,
             Self::DeepSeek => 6,
             Self::Magpie => 7,
+            Self::OpenAiOfficial => 8,
         }
     }
     /// Unknown UI indices never silently choose a network protocol.
@@ -110,13 +118,16 @@ impl Protocol {
             5 => Ok(Self::OpenCodeGo),
             6 => Ok(Self::DeepSeek),
             7 => Ok(Self::Magpie),
+            8 => Ok(Self::OpenAiOfficial),
             _ => Err(AiError::Invalid),
         }
     }
     /// Public initial endpoint; users explicitly configure custom services.
     pub fn default_url(self) -> &'static str {
         match self {
-            Self::ChatCompletions | Self::Responses => "https://api.openai.com/v1",
+            Self::ChatCompletions | Self::Responses | Self::OpenAiOfficial => {
+                OPENAI_OFFICIAL_BASE_URL
+            }
             Self::Anthropic => "https://api.anthropic.com/v1",
             Self::Gemini => "https://generativelanguage.googleapis.com/v1beta",
             Self::Jev => "https://api.typesafe.ai/v1",
@@ -221,6 +232,12 @@ impl Profile {
         if !(MIN_TIMEOUT_SECONDS..=MAX_TIMEOUT_SECONDS).contains(&self.timeout_seconds) {
             return Err(AiError::InvalidConfig(ConfigField::Timeout));
         }
+        if self.protocol == Protocol::OpenAiOfficial
+            && self.base_url != OPENAI_OFFICIAL_BASE_URL
+            && self.base_url != "https://api.openai.com/v1/"
+        {
+            return Err(AiError::InvalidConfig(ConfigField::Url));
+        }
         validate_endpoint_url(&self.base_url, self.protocol == Protocol::Magpie)?;
         Ok(())
     }
@@ -312,6 +329,68 @@ impl ApiKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn official_openai_has_a_distinct_stable_identity_and_fixed_endpoint() {
+        assert_eq!(Protocol::default(), Protocol::ChatCompletions);
+        assert_eq!(Profile::default().protocol, Protocol::ChatCompletions);
+        assert_eq!(Protocol::from_index(8).unwrap(), Protocol::OpenAiOfficial);
+        assert_eq!(Protocol::OpenAiOfficial.index(), 8);
+        assert_eq!(Protocol::OpenAiOfficial.display_name(), "OpenAI Official");
+        assert_eq!(
+            serde_json::to_string(&Protocol::OpenAiOfficial).unwrap(),
+            "\"open_ai_official\""
+        );
+        assert_eq!(
+            Protocol::OpenAiOfficial.default_url(),
+            OPENAI_OFFICIAL_BASE_URL
+        );
+        for base in [OPENAI_OFFICIAL_BASE_URL, "https://api.openai.com/v1/"] {
+            let profile = Profile {
+                protocol: Protocol::OpenAiOfficial,
+                base_url: base.into(),
+                model: "owned-model".into(),
+                ..Default::default()
+            };
+            profile.validate_request().unwrap();
+            let decoded: Profile =
+                serde_json::from_slice(&serde_json::to_vec(&profile).unwrap()).unwrap();
+            assert_eq!(decoded, profile);
+        }
+        for base in [
+            "https://gateway.example/v1",
+            "https://api.openai.com.example/v1",
+            "http://127.0.0.1:9000/v1",
+            "http://api.openai.com/v1",
+            "https://api.openai.com:443/v1",
+            "https://api.openai.com/v1/responses",
+            "https://api.openai.com/v1//",
+            "https://api.openai.com/V1",
+            "https://api.openai.com/v1?key=synthetic",
+            "https://api.openai.com/v1#fragment",
+        ] {
+            let profile = Profile {
+                protocol: Protocol::OpenAiOfficial,
+                base_url: base.into(),
+                model: "owned-model".into(),
+                ..Default::default()
+            };
+            assert!(
+                matches!(
+                    profile.validate_discovery_request(),
+                    Err(AiError::InvalidConfig(ConfigField::Url))
+                ),
+                "{base}"
+            );
+            assert!(
+                matches!(
+                    profile.validate_request(),
+                    Err(AiError::InvalidConfig(ConfigField::Url))
+                ),
+                "{base}"
+            );
+        }
+    }
+
     #[test]
     fn clipboard_keys_trim_outer_whitespace_and_reject_embedded_controls() {
         for value in [
@@ -504,6 +583,7 @@ mod tests {
                 Protocol::Jev,
                 Protocol::OpenCodeGo,
                 Protocol::DeepSeek,
+                Protocol::OpenAiOfficial,
             ] {
                 let profile = Profile {
                     protocol,
@@ -554,6 +634,7 @@ mod tests {
             (5, Protocol::OpenCodeGo, "open_code_go"),
             (6, Protocol::DeepSeek, "deep_seek"),
             (7, Protocol::Magpie, "magpie"),
+            (8, Protocol::OpenAiOfficial, "open_ai_official"),
         ] {
             assert_eq!(protocol.index(), index);
             assert_eq!(Protocol::from_index(index).unwrap(), protocol);
@@ -564,7 +645,7 @@ mod tests {
                 protocol
             );
         }
-        assert!(Protocol::from_index(8).is_err());
+        assert!(Protocol::from_index(9).is_err());
         assert!(Protocol::from_index(-1).is_err());
         let profile = Profile {
             protocol: Protocol::Magpie,
