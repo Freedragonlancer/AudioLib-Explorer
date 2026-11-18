@@ -1,5 +1,6 @@
 // app/audiolib-desktop/ui/audition-panel.slint
 import { ComboBox } from "std-widgets.slint";
+import { LineEdit as NativeLineEdit } from "std-widgets.slint";
 import { Theme, ThemedSlider as Slider, ThemedLineEdit as LineEdit } from "theme.slint";
 
 /// One time-ruler tick: its position as a fraction of the visible range and, on
@@ -285,6 +286,25 @@ component PlayToggle inherits Rectangle {
     }
 }
 component Caption inherits Text { color: Theme.text(4, 1, Theme.dim); font-size: Theme.font(11); vertical-alignment: center; }
+
+component ClassicTransformField inherits Rectangle {
+    in property <string> input-label;
+    in property <bool> enabled <=> edit.enabled;
+    in-out property <string> text <=> edit.text;
+    out property <bool> has-focus: edit.has-focus;
+    callback accepted <=> edit.accepted;
+    forward-focus: edit;
+    edit := NativeLineEdit {
+        accessible-label: root.input-label;
+        width: root.width; height: root.height;
+    }
+    height: max(24px * Theme.ui-scale, Theme.font(12) + 6px * Theme.ui-scale);
+    if root.has-focus && root.enabled: Rectangle {
+        x: 4px * Theme.ui-scale; y: parent.height - 2px * Theme.ui-scale;
+        width: parent.width - 8px * Theme.ui-scale; height: 2px * Theme.ui-scale;
+        background: Theme.accent;
+    }
+}
 
 // A Pitch / Rate entry: type a value and press Enter, or step it with the mouse
 // wheel or Up / Down (Shift for fine steps). The controller rejects out-of-range
@@ -778,11 +798,11 @@ component MonitorModeButton inherits ClassicTool {
     hint: root.active
         ? (root.chinese ? "当前 MONO · 点击恢复 STEREO 监听" : "MONO · Switch to STEREO monitoring")
         : (root.chinese ? "当前 STEREO · 点击切换到 MONO 合并监听" : "STEREO · Switch to MONO fold-down");
-    width: 28px * Theme.ui-scale + Theme.font(11) * 4.8;
+    width: 20px * Theme.ui-scale + Theme.font(11) * 4.5;
     HorizontalLayout {
-        alignment: center; spacing: 4px * Theme.ui-scale;
+        alignment: center; spacing: 3px * Theme.ui-scale;
         Image {
-            width: 17px * Theme.ui-scale; height: self.width; y: (parent.height - self.height) / 2;
+            width: 13px * Theme.ui-scale; height: self.width; y: (parent.height - self.height) / 2;
             source: root.active ? @image-url("icons/monitor-mono.svg") : @image-url("icons/monitor-stereo.svg");
             colorize: root.active ? Theme.accent : Theme.dim; accessible-role: none;
         }
@@ -1303,10 +1323,10 @@ component ClassicAuditionPanel inherits Rectangle {
             }
             Rectangle { width: 1px; background: Theme.player-border; }
             Caption { text: root.chinese ? "音高" : "Pitch"; }
-            LineEdit { width: 62px * Theme.ui-scale; text <=> root.pitch-text; enabled: root.ready; input-label: root.chinese ? "变调半音，回车或离开时应用" : "Pitch semitones, applied on Enter or focus loss"; changed has-focus => { if !self.has-focus && root.ready { root.transform(self.text, root.rate-text, root.mono, root.repeat); } } accepted => { root.transform(self.text, root.rate-text, root.mono, root.repeat); } }
+            ClassicTransformField { y: (parent.height - self.height) / 2; width: 24px * Theme.ui-scale + Theme.font(12) * 2.95; text <=> root.pitch-text; enabled: root.ready; input-label: root.chinese ? "变调半音，回车或离开时应用" : "Pitch semitones, applied on Enter or focus loss"; changed has-focus => { if !self.has-focus && root.ready { root.transform(self.text, root.rate-text, root.mono, root.repeat); } } accepted => { root.transform(self.text, root.rate-text, root.mono, root.repeat); } }
             Caption { text: root.chinese ? "半音" : "st"; }
             Caption { text: root.chinese ? "速度" : "Rate"; }
-            LineEdit { width: 57px * Theme.ui-scale; text <=> root.rate-text; enabled: root.ready; input-label: root.chinese ? "保持音高的播放速度，回车或离开时应用" : "Pitch-preserving speed, applied on Enter or focus loss"; changed has-focus => { if !self.has-focus && root.ready { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } } accepted => { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } }
+            ClassicTransformField { y: (parent.height - self.height) / 2; width: 24px * Theme.ui-scale + Theme.font(12) * 2.15; text <=> root.rate-text; enabled: root.ready; input-label: root.chinese ? "保持音高的播放速度，回车或离开时应用" : "Pitch-preserving speed, applied on Enter or focus loss"; changed has-focus => { if !self.has-focus && root.ready { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } } accepted => { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } }
             Caption { text: "×"; }
             ClassicTool { icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; hint: root.chinese ? "恢复 0 半音与 1× 速度" : "Restore 0 semitones and 1× speed"; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
             Rectangle { width: 1px; background: Theme.player-border; }
@@ -1314,6 +1334,7 @@ component ClassicAuditionPanel inherits Rectangle {
             volume-control := Slider { input-label: root.chinese ? "音量" : "Volume"; min-width: 76px * Theme.ui-scale; max-width: 160px * Theme.ui-scale; horizontal-stretch: 1; minimum: -60; maximum: 0; step: 0.1; value <=> root.volume-db; changed => { root.volume(self.value); } }
             Caption { width: 66px * Theme.ui-scale; text: root.volume-label; horizontal-alignment: right; }
             MonitorModeButton {
+                height: max(24px * Theme.ui-scale, Theme.font(11) + 6px * Theme.ui-scale); y: (parent.height - self.height) / 2;
                 chinese: root.chinese; active: root.mono;
                 clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); }
             }
