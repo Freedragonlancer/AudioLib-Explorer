@@ -196,6 +196,10 @@ pwsh tools/verify-release-assets.ps1 -Tag v0.9.6 -ListExpectedAssets
 
 包含 Rust 构建/检查的计划默认在全部交付阶段成功后追加 `Intermediate` 清理，`-BuildCacheLimitGiB` 默认 0（清除全部合格中间文件），可显式设为正数按预算保留。管线先释放构建租约，再独占清理；子检查/构建自动延后清理，不在 ChecksFile 中再加一次。清理保留 profile 根目录的最终 EXE/库/PDB，不破坏 build/package/accept/install 身份或续跑；全部构建阶段复用时复用上次成功清理，显式 `-CleanBuildArtifacts` 可要求重新维护。交付失败不清理，清理失败保留已通过的交付收据供续跑。只读资产核验计划不自动创建或清理缓存。SDK、正式包和固定安装均保留，详见[编译缓存维护](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md)。
 
+Windows 和 macOS 可各保留一个专用发布 checkout、一个已登记的 `CARGO_TARGET_DIR` 和一个正数缓存预算。Beta 候选和正式标签在同一个 checkout 路径使用自己的 Git 提交，正式产物仍由正式标签的管线生成。每个版本的 `RunDirectory` 单独保留。路径、工具链和 feature 选择固定后，Cargo 可以复用仍匹配的依赖和编译结果。
+
+同一 target 上依次运行客户端和服务端计划。中间计划传 `-CleanBuildArtifacts:$false`，该 target 的最后一个计划指定 `-BuildCacheLimitGiB 8` 即可按 8 GiB 的逻辑大小预算维护缓存。8 GiB 是两端的起始预算，可根据实际收据和可用磁盘空间调整。独立源码检查目录按开发检查的缓存规则管理。
+
 多份计划共享同一受管缓存时，等它们的构建与交付全部结束，再集中维护一次；不要给每条并行计划都追加清理。只复用原有结果、未构建/测试 Rust 的文档或流程任务不触发维护扫描。
 
 修改执行器时运行 `pwsh tools/test-release-pipeline.ps1`，只使用自有 Git/文件夹/伪命令验证续跑、输出边界、参数、环境与产物失效，不编译应用或访问真实库。安装器使用 `tools/test-local-release-install.ps1` 验证拒绝不完整包；提供 `-RuntimePayload <已验收包>` 时在自有临时 checkout 中验证安装、重复执行、启动与数据保留，不更新工作区的真实安装。计划路由变化还需预览对应 `Plan`；本机脚本语法通过不代表 Mac、Linux 或硬件验收通过。
