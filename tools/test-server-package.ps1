@@ -144,6 +144,35 @@ try {
     $otherLinuxPlatform = if ($otherLinuxTarget -ceq 'x86_64-unknown-linux-gnu') { 'Linux x64' } else { 'Linux arm64' }
     Expect-Rejection { & $packager -Tag v0.4.4 -Target $otherLinuxTarget } $otherLinuxPlatform
     Expect-Rejection { & $validator -Tag v0.4.4 -Target $otherLinuxTarget } $otherLinuxPlatform
+
+    $receiptPath = Join-Path $testRoot '.rust-validation/release-pipeline/example/server-validation.json'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $receiptPath) -Force | Out-Null
+    Set-Content -LiteralPath $receiptPath -Value '{"success":true}' -Encoding utf8NoBOM
+    Expect-Rejection { & $validator -Tag v0.4.4 -Target $target -ReportPath $receiptPath } 'Required server release artifact is missing'
+    if (Test-Path -LiteralPath $receiptPath) { throw 'Failed acceptance left a previous success receipt.' }
+    # The next attempt reaches validation again, proving that failure released the receipt lock.
+    Expect-Rejection { & $validator -Tag invalid -Target $target -ReportPath $receiptPath } 'Tag must be'
+    $outsideReceipt = Join-Path $testRoot 'doc/server-validation.json'
+    $unrelatedState = Join-Path (Split-Path -Parent $receiptPath) 'state.json'
+    Set-Content -LiteralPath $outsideReceipt -Value 'Outside receipt boundary.'
+    Set-Content -LiteralPath $unrelatedState -Value 'Unrelated pipeline state.'
+    Expect-Rejection { & $validator -Tag invalid -Target $target -ReportPath $outsideReceipt } 'escaped its owned boundary'
+    Expect-Rejection { & $validator -Tag invalid -Target $target -ReportPath $unrelatedState } 'must be named server-validation.json'
+    if ((Get-Content -LiteralPath $outsideReceipt -Raw).Trim() -cne 'Outside receipt boundary.' -or
+        (Get-Content -LiteralPath $unrelatedState -Raw).Trim() -cne 'Unrelated pipeline state.') { throw 'Receipt validation touched an unrelated file.' }
+    $linkedReceiptParent = Join-Path (Split-Path -Parent $receiptPath) 'linked'
+    $outsideReceiptParent = Split-Path -Parent $outsideReceipt
+    Assert-TestPath $linkedReceiptParent
+    Assert-TestPath $outsideReceiptParent
+    try {
+        if ($IsWindows) { New-Item -ItemType Junction -Path $linkedReceiptParent -Target $outsideReceiptParent | Out-Null }
+        else { $null = [IO.Directory]::CreateSymbolicLink($linkedReceiptParent, $outsideReceiptParent) }
+        Expect-Rejection { & $validator -Tag invalid -Target $target -ReportPath (Join-Path $linkedReceiptParent 'server-validation.json') } 'Linked .* path'
+        if ((Get-Content -LiteralPath $outsideReceipt -Raw).Trim() -cne 'Outside receipt boundary.') { throw 'Receipt validation followed a linked ancestor.' }
+    } finally {
+        if (Test-Path -LiteralPath $linkedReceiptParent) { [IO.Directory]::Delete($linkedReceiptParent) }
+    }
+
     & $packager -Tag v0.4.4 -Target $target
     if ((Get-Content -LiteralPath (Join-Path $payload 'update-channel.txt') -Raw).Trim() -cne 'stable' -or
         (Get-Content -LiteralPath (Join-Path $payload 'update-version.txt') -Raw).Trim() -cne '0.4.4') { throw 'Stable server update metadata differs.' }
@@ -318,7 +347,7 @@ try {
         $link = Get-Item -LiteralPath $dist -Force -ErrorAction SilentlyContinue
         if ($null -ne $link -and ($link.Attributes -band [IO.FileAttributes]::ReparsePoint)) { Assert-TestPath $dist; Remove-Item -LiteralPath $dist -Force }
     }
-    Write-Host 'Server package boundary regression passed: layout 2 with both binaries, frozen old-updater refusal, manual-bootstrap metadata, complete licenses, dependency closure, safe report/checksums, incompatible public doc rejection/preservation, linked-path guard and ASIO target/SDK boundary (positive ASIO fixture on Windows).'
+    Write-Host 'Server package boundary regression passed: layout 2 with both binaries, frozen old-updater refusal, manual-bootstrap metadata, complete licenses, dependency closure, safe report/checksums, acceptance receipt path and stale-output protection, incompatible public doc rejection/preservation, linked-path guard and ASIO target/SDK boundary (positive ASIO fixture on Windows).'
 } finally {
     $env:CARGO_TARGET_DIR = $savedTargetDirectory
     if (Test-Path -LiteralPath $testRoot) {

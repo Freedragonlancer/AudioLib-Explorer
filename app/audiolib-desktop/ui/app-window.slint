@@ -3553,7 +3553,7 @@ main-scroll := ScrollView {
                                             }
                                         }
                                     }
-                                    table-name-cell := Text { x: root.table-name-x + 12px * Theme.ui-scale; height: parent.height; width: root.table-name-size - 24px * Theme.ui-scale; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: Theme.text(2, result-hit.pressed ? 14 : result-hit.has-hover ? 4 : -1, row.missing ? Theme.text(2, 12, Theme.warning) : (root.selected-row == index ? Theme.text(2, 5, row.played ? Theme.text(2, 11, Theme.accent) : Theme.text(2, row.favorite ? 13 : 0, Theme.ink)) : (row.played ? Theme.text(2, 11, Theme.accent) : Theme.text(2, row.favorite ? 13 : 0, Theme.ink)))); font-weight: root.selected-row == index ? 600 : 400; font-size: Theme.list-font-size; overflow: elide; vertical-alignment: center; }
+                                    table-name-cell := Text { x: root.table-name-x + 12px * Theme.ui-scale; height: parent.height; width: root.table-name-size - 24px * Theme.ui-scale; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: Theme.text(2, result-hit.pressed ? 14 : result-hit.has-hover ? 4 : -1, row.missing ? Theme.text(2, 12, Theme.warning) : (root.selected-row == index ? Theme.text(2, 5, row.played ? Theme.text(2, 11, Theme.played-ink) : Theme.text(2, row.favorite ? 13 : 0, Theme.ink)) : (row.played ? Theme.text(2, 11, Theme.played-ink) : Theme.text(2, row.favorite ? 13 : 0, Theme.ink)))); font-weight: root.selected-row == index ? 600 : 400; font-size: Theme.list-font-size; overflow: elide; vertical-alignment: center; }
                                     table-duration-cell := Text { x: root.table-duration-x + 12px * Theme.ui-scale; height: parent.height; width: root.table-duration-size - 24px * Theme.ui-scale; text: row.duration; color: Theme.text(2, 0, Theme.ink); horizontal-alignment: right; vertical-alignment: center; font-size: Theme.list-font(11); overflow: elide; }
                                     HorizontalLayout { alignment: start; padding-left: root.table-state-size + root.table-wave-size + root.table-name-size + root.table-duration-size + 12px * Theme.ui-scale; padding-right: 12px * Theme.ui-scale; spacing: 24px * Theme.ui-scale;
                                         table-format-cell := Text { width: root.table-format-size - 24px * Theme.ui-scale; text: row.format; color: Theme.text(2, 1, Theme.dim); vertical-alignment: center; font-size: Theme.list-font(10); overflow: elide; }
@@ -3854,7 +3854,7 @@ main-scroll := ScrollView {
             active: !Theme.modern-style;
             premute-db <=> root.audition-premute-db;
             show-remaining <=> root.audition-show-remaining;
-            height: Theme.modern-player ? max(114px * Theme.ui-scale, root.audition-preferred-height) : (root.short-layout ? 176px : 204px) * Theme.ui-scale + self.selection-feedback-height;
+            height: Theme.modern-player ? max(114px * Theme.ui-scale, root.audition-preferred-height) : (root.short-layout ? 176px : 204px) * Theme.ui-scale;
             expanded: root.audition-expanded;
             narrow: root.content-width < 1440px * Theme.ui-scale;
             waveform-mask: root.waveform-mask;
@@ -4395,7 +4395,7 @@ main-scroll := ScrollView {
                                     background: root.selected-row == index ? Theme.selected : (row.checked ? Theme.checked : (studio-result-hit.has-hover ? Theme.hover : (Math.mod(index, 2) == 0 ? Theme.table-alternate : Theme.table-surface)));
                                     Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border.with-alpha(0.35); }
                                     Rectangle { x: 0px; y: 0px; height: parent.height; width: 3px * Theme.ui-scale; background: root.selected-row == index ? Theme.accent : row.marker; }
-                                    studio-table-name-cell := Text { x: root.table-name-x + 12px * Theme.ui-scale; width: root.table-name-size - 24px * Theme.ui-scale; height: root.studio-result-row-height; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: Theme.text(2, studio-result-hit.pressed ? 14 : studio-result-hit.has-hover ? 4 : -1, root.selected-row == index ? Theme.text(2, 5, Theme.accent) : (row.missing ? Theme.text(2, 12, Theme.warning) : (row.played ? Theme.text(2, 11, Theme.accent) : Theme.text(2, row.favorite ? 13 : 0, Theme.ink)))); font-size: Theme.list-font-size; overflow: elide; vertical-alignment: center; }
+                                    studio-table-name-cell := Text { x: root.table-name-x + 12px * Theme.ui-scale; width: root.table-name-size - 24px * Theme.ui-scale; height: root.studio-result-row-height; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: Theme.text(2, studio-result-hit.pressed ? 14 : studio-result-hit.has-hover ? 4 : -1, root.selected-row == index ? Theme.text(2, 5, Theme.accent) : (row.missing ? Theme.text(2, 12, Theme.warning) : (row.played ? Theme.text(2, 11, Theme.played-ink) : Theme.text(2, row.favorite ? 13 : 0, Theme.ink)))); font-size: Theme.list-font-size; overflow: elide; vertical-alignment: center; }
                                     if root.list-waveforms-visible: studio-table-wave-cell := Rectangle { x: root.table-wave-x + 12px * Theme.ui-scale; width: root.table-wave-size - 24px * Theme.ui-scale; height: root.studio-result-row-height;
                                         if row.wave-state == 0 || row.wave-state == 3: Rectangle { y: (parent.height - self.height) / 2; width: row.wave-state == 0 ? parent.width : parent.width * 0.4; height: 2px * Theme.ui-scale; background: Theme.strong-border; opacity: row.wave-state == 0 ? 0.7 : 0.35; }
                                         if row.wave-state == 2: Rectangle { y: parent.height / 2; width: parent.width; height: 1px; background: Theme.dim; opacity: 0.6; }
@@ -4727,7 +4727,7 @@ main-scroll := ScrollView {
             active: Theme.modern-style;
             premute-db <=> root.audition-premute-db;
             show-remaining <=> root.audition-show-remaining;
-            height: Theme.modern-player ? max(114px * Theme.ui-scale, root.audition-preferred-height) : (root.short-layout ? 176px : 204px) * Theme.ui-scale + self.selection-feedback-height;
+            height: Theme.modern-player ? max(114px * Theme.ui-scale, root.audition-preferred-height) : (root.short-layout ? 176px : 204px) * Theme.ui-scale;
             expanded: root.audition-expanded;
             narrow: root.content-width < 1440px * Theme.ui-scale;
             waveform-mask: root.waveform-mask;

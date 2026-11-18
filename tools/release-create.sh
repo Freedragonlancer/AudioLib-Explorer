@@ -3,20 +3,22 @@
 # Create a GitHub Release for an existing tag with the agreed naming rule:
 #   title = "AudioLib Explorer <tag>"; suffixed tags (-beta.N / -rc.N) are --prerelease --latest=false.
 # Drafts stay unpublished and are explicitly excluded from Latest. Resume uploads
-# only missing, verified assets; --publish is a separate, explicit finalization.
+# only missing, verified assets. Stage pairs can add accepted packages as they
+# become available. --publish is a separate, explicit full-set finalization.
 # The tag's X.Y.Z must equal the Cargo.toml [workspace.package] version.
 #   tools/release-create.sh <tag> [--notes-file <file>] [--draft] [--dry-run] [--] [asset ...]
 #   tools/release-create.sh <tag> --resume-draft [--publish] [--dry-run] [--notes-file <file>] <all-assets...>
+#   tools/release-create.sh <tag> --resume-draft --stage-pairs [--dry-run] [--notes-file <file>] <cumulative-pairs...>
 set -euo pipefail
 die() { echo "release-create: $*" >&2; exit 1; }
-[ $# -ge 1 ] || die "usage: $0 <tag> [--notes-file <file>] [--draft] [--dry-run] [--resume-draft [--publish]] [--] [asset ...]"
+[ $# -ge 1 ] || die "usage: $0 <tag> [--notes-file <file>] [--draft] [--dry-run] [--resume-draft [--publish|--stage-pairs]] [--] [asset ...]"
 tag=$1; shift
 [[ $tag =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-(rc|beta)\.[0-9]+)?$ ]] || die "tag '$tag' must be vX.Y.Z, vX.Y.Z-rc.N or vX.Y.Z-beta.N"
 core=${BASH_REMATCH[1]}; suffix=${BASH_REMATCH[2]}
 root=$(cd "$(dirname "$0")/.." && pwd)
 cargo_ver=$(awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f&&/^version *=/{gsub(/[" ]/,"");sub("version=","");print;exit}' "$root/Cargo.toml")
 [ "$core" = "$cargo_ver" ] || die "tag $tag does not match Cargo.toml workspace version $cargo_ver"
-notes=(--notes-file "$root/doc/Rust_Release_Notes.md"); dry=0; draft=0; resume=0; publish=0; assets=()
+notes=(--notes-file "$root/doc/Rust_Release_Notes.md"); dry=0; draft=0; resume=0; publish=0; stage_pairs=0; assets=()
 while [ $# -gt 0 ]; do
   case $1 in
     --notes-file)
@@ -27,6 +29,7 @@ while [ $# -gt 0 ]; do
     --draft) draft=1; shift ;;
     --resume-draft) resume=1; shift ;;
     --publish) publish=1; shift ;;
+    --stage-pairs) stage_pairs=1; shift ;;
     --) shift; assets+=("$@"); break ;;
     -*) die "unknown option: $1" ;;
     *) assets+=("$1"); shift ;;
@@ -34,6 +37,9 @@ while [ $# -gt 0 ]; do
 done
 [ "$publish" = 0 ] || [ "$resume" = 1 ] || die '--publish requires --resume-draft'
 [ "$publish" = 0 ] || [ "$draft" = 0 ] || die '--publish conflicts with --draft'
+[ "$stage_pairs" = 0 ] || [ "$resume" = 1 ] || die '--stage-pairs requires --resume-draft'
+[ "$stage_pairs" = 0 ] || [ "$publish" = 0 ] || die '--stage-pairs conflicts with --publish'
+[ "$stage_pairs" = 0 ] || [ "$draft" = 0 ] || die '--stage-pairs conflicts with --draft'
 args=("$tag" --verify-tag --title "AudioLib Explorer $tag" "${notes[@]}")
 [ -n "$suffix" ] && args+=(--prerelease)
 if [ -n "$suffix" ] || [ "$draft" = 1 ]; then args+=(--latest=false); fi
@@ -58,7 +64,10 @@ if [ "$resume" = 0 ]; then
   exit $?
 fi
 [ "$release_count" = 1 ] && [ "$release_draft" = true ] || die '--resume-draft requires one existing unpublished draft'
-[ "${assets[*]+set}" = set ] || die 'Resume requires the complete expected local asset set'
+if [ "${assets[*]+set}" != set ]; then
+  [ "$stage_pairs" = 0 ] || die 'Stage pairs requires at least one archive and checksum pair'
+  die 'Resume requires the complete expected local asset set'
+fi
 [ -f "${notes[1]}" ] && [ ! -L "${notes[1]}" ] || die 'Resume notes must be a regular, unlinked file'
 
 expected_text=$(pwsh -NoLogo -NoProfile -File "$root/tools/verify-release-assets.ps1" -Tag "$tag" -ListExpectedAssets) || die 'Cannot obtain the official expected asset set (resume requires PowerShell 7)'
@@ -108,7 +117,22 @@ for asset in "${assets[@]}"; do
   asset_hash=$(sha256_file "$asset_path") || die 'Cannot hash local artifact'
   local_names+=("$asset_name"); local_paths+=("$asset_path"); local_sizes+=("$asset_size"); local_hashes+=("$asset_hash"); local_count=$((local_count+1))
 done
-[ "$local_count" = "$expected_count" ] || die 'Resume requires the complete expected local asset set'
+upload_order=()
+if [ "$stage_pairs" = 1 ]; then
+  paired_count=0
+  for ((index=0; index<local_count; index++)); do
+    archive_name=${local_names[index]}
+    [[ $archive_name != *.sha256 ]] || continue
+    find_local "$archive_name.sha256"
+    [ "$found_index" -ge 0 ] || die "Stage pairs requires an archive and checksum for each supplied package: $archive_name"
+    upload_order+=("$index" "$found_index")
+    paired_count=$((paired_count+2))
+  done
+  [ "$paired_count" = "$local_count" ] || die 'Stage pairs requires an archive and checksum for each supplied package'
+else
+  [ "$local_count" = "$expected_count" ] || die 'Resume requires the complete expected local asset set'
+  for ((index=0; index<local_count; index++)); do upload_order+=("$index"); done
+fi
 for ((index=0; index<local_count; index++)); do
   case ${local_names[index]} in
     *.sha256)
@@ -183,7 +207,7 @@ expected_draft=true; expected_prerelease=false; [ -z "$suffix" ] || expected_pre
 verify_notes
 fetch_snapshot
 missing=0
-for ((index=0; index<local_count; index++)); do
+for index in "${upload_order[@]}"; do
   find_remote "${local_names[index]}"
   [ "$remote_found" = 0 ] || continue
   missing=$((missing+1)); verify_local "$index"
@@ -211,6 +235,8 @@ if [ "$publish" = 1 ]; then
   expected_draft=false; fetch_snapshot
   [ "$remote_count" = "$local_count" ] || die 'Published asset set differs'
   printf 'Published resumed release %s (%s verified assets).\n' "$tag" "$remote_count"
+elif [ "$stage_pairs" = 1 ]; then
+  printf 'Draft %s staged and verified (%s assets); left unpublished. Use --resume-draft --publish with the complete asset set to finalize.\n' "$release_id" "$remote_count"
 else
   printf 'Draft %s resumed and verified (%s assets); left unpublished. Use --resume-draft --publish to finalize.\n' "$release_id" "$remote_count"
 fi

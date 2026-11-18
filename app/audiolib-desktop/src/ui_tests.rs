@@ -3661,9 +3661,6 @@ fn compressed_player_aligns_filename_and_preserves_selection_actions() {
     ui.set_view_end(60.0);
     ui.set_play_time("00:05.050".into());
     ui.set_play_end("01:00.000".into());
-    let cleared = Rc::new(RefCell::new(0));
-    let observed = cleared.clone();
-    ui.on_wave_selection_cleared(move || *observed.borrow_mut() += 1);
     let cancelled = Rc::new(RefCell::new(0));
     let observed = cancelled.clone();
     ui.on_wave_selection_cancel_requested(move || *observed.borrow_mut() += 1);
@@ -3755,23 +3752,34 @@ fn compressed_player_aligns_filename_and_preserves_selection_actions() {
                     )
                     .unwrap();
                 }
-                ui.set_wave_selection_start(1.0);
-                ui.set_wave_selection_end(2.0);
+                ui.set_wave_selection_start(1.238);
+                ui.set_wave_selection_end(2.475);
                 ui.set_wave_selection_active(true);
+                ui.set_wave_selection_export_state(2);
                 settle();
-                let count = *cleared.borrow();
-                let control = ElementHandle::find_by_accessible_label(
+                let duration = ElementHandle::find_by_accessible_label(
                     &ui,
                     if chinese {
-                        "清除波形选区"
+                        "选区时长"
                     } else {
-                        "Clear waveform selection"
+                        "Selection duration"
                     },
                 )
                 .next()
                 .unwrap();
-                control.mock_single_click(slint::platform::PointerEventButton::Left);
-                assert_eq!(*cleared.borrow(), count + 1);
+                assert_eq!(
+                    duration.accessible_description().unwrap().as_str(),
+                    "1.24 s"
+                );
+                let feedback = ElementHandle::find_by_accessible_label(&ui, feedback_label)
+                    .next()
+                    .unwrap();
+                assert!(
+                    filename.absolute_position().x + filename.size().width
+                        <= feedback.absolute_position().x
+                );
+                assert!(filename.size().width > feedback.size().width);
+                ui.set_wave_selection_export_state(0);
                 ui.set_wave_selection_active(false);
                 ui.set_wave_selection_preparing(true);
                 settle();

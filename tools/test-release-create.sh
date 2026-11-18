@@ -246,14 +246,16 @@ seed_remote() {
 }
 mutation_count() { if [ -f "$state/mutations" ]; then cat "$state/mutations"; else printf 0; fi; }
 resume_command() { "$here/release-create.sh" "$tag" --resume-draft --notes-file "$notes" "$@" -- "${all_assets[@]}"; }
-reject_resume() {
+stage_command() { "$here/release-create.sh" "$tag" --resume-draft --stage-pairs --notes-file "$notes" "$@"; }
+reject_draft() {
   local message=$1 error before after; shift
   before=$(mutation_count)
-  if error=$(resume_command "$@" 2>&1); then fail 'invalid draft resume accepted'; fi
+  if error=$("$@" 2>&1); then fail 'invalid draft command accepted'; fi
   after=$(mutation_count)
-  [[ $error == *"$message"* && $error != *unbound* ]] || fail "wrong resume rejection: $error"
+  [[ $error == *"$message"* && $error != *unbound* ]] || fail "wrong draft rejection: $error"
   [ "$after" = "$before" ] || fail 'invalid draft reached a mutation'
 }
+reject_resume() { local message=$1; shift; reject_draft "$message" resume_command "$@"; }
 assert_mutation() {
   local number=$1 verb=$2
   mutation=()
@@ -346,6 +348,69 @@ if resume_command --publish >/dev/null 2>&1; then fail 'concurrent matching loca
 unset AUDIOLIB_RESUME_NOTES_FILE_RACE AUDIOLIB_RESUME_NOTES_PATH
 printf '%s\n' "$original_notes" > "$notes"
 
+# A cumulative subset can stage complete pairs while the draft stays unpublished.
+reset_draft
+out=$(stage_command --dry-run -- "${all_assets[@]:0:2}")
+[[ $out == *'gh release upload'* && $out != *'gh release edit'* && $out == *'no mutations performed'* ]] || fail 'stage preview did not limit itself to uploads'
+[ "$(mutation_count)" = 0 ] && [ "$(cat "$state/draft")" = true ] || fail 'stage preview mutated draft'
+stage_command -- "${all_assets[1]}" "${all_assets[0]}" >/dev/null
+[ "$(mutation_count)" = 2 ] && [ "$(wc -l < "$state/assets" | tr -d '[:space:]')" = 2 ] && [ "$(cat "$state/draft")" = true ] || fail 'first pair did not stage without publishing'
+assert_mutation 0 upload; [ "${mutation[4]}" = "${all_assets[0]}" ] || fail 'wrong first staged archive'
+assert_mutation 1 upload; [ "${mutation[4]}" = "${all_assets[1]}" ] || fail 'wrong first staged checksum'
+
+stage_command -- "${all_assets[@]:0:4}" >/dev/null
+[ "$(mutation_count)" = 4 ] && [ "$(cat "$state/draft")" = true ] || fail 'next cumulative pair retransmitted or published assets'
+assert_mutation 2 upload; [ "${mutation[4]}" = "${all_assets[2]}" ] || fail 'wrong next staged archive'
+assert_mutation 3 upload; [ "${mutation[4]}" = "${all_assets[3]}" ] || fail 'wrong next staged checksum'
+stage_command -- "${all_assets[@]:0:4}" >/dev/null
+[ "$(mutation_count)" = 4 ] || fail 'stage retry retransmitted matching assets'
+
+# Publish still requires the complete local contract and verifies staged assets.
+reject_draft 'complete expected local asset set' "$here/release-create.sh" "$tag" --resume-draft --publish --notes-file "$notes" -- "${all_assets[@]:0:4}"
+stage_command -- "${all_assets[@]}" >/dev/null
+[ "$(mutation_count)" = 14 ] && [ "$(wc -l < "$state/assets" | tr -d '[:space:]')" = 14 ] && [ "$(cat "$state/draft")" = true ] || fail 'complete staged set did not remain a draft'
+assert_mutation 4 upload; [ "${mutation[4]}" = "${all_assets[4]}" ] || fail 'staging complete set retransmitted an earlier batch'
+resume_command --publish >/dev/null
+[ "$(mutation_count)" = 15 ] && [ "$(cat "$state/draft")" = false ] || fail 'finalization of a complete draft did more than publish once'
+assert_mutation 14 edit; [ "${mutation[4]}" = --latest=true ] || fail 'staged stable release lost Latest'
+
+# Recover an interrupted pair by uploading only its missing checksum.
+reset_draft
+export AUDIOLIB_RESUME_UPLOAD_AFTER_STORE_FAIL=1
+if stage_command -- "${all_assets[@]:0:2}" >/dev/null 2>&1; then fail 'stage upload failure hidden'; else status=$?; fi
+unset AUDIOLIB_RESUME_UPLOAD_AFTER_STORE_FAIL
+[ "$status" = 43 ] && [ "$(mutation_count)" = 1 ] && [ "$(wc -l < "$state/assets" | tr -d '[:space:]')" = 1 ] || fail 'interrupted stage lost its accepted archive'
+stage_command -- "${all_assets[@]:0:2}" >/dev/null
+[ "$(mutation_count)" = 2 ] && [ "$(cat "$state/draft")" = true ] || fail 'pair retry retransmitted or published'
+assert_mutation 1 upload; [ "${mutation[4]}" = "${all_assets[1]}" ] || fail 'pair retry did not select the missing checksum'
+
+# A stage call must supply valid pairs and all previously staged local bytes.
+reset_draft
+reject_draft 'at least one archive and checksum pair' stage_command --
+reject_draft 'archive and checksum' stage_command -- "${all_assets[0]}"
+reject_draft 'archive and checksum' stage_command -- "${all_assets[1]}"
+reject_draft 'Duplicate local' stage_command -- "${all_assets[@]:0:2}" "${all_assets[0]}"
+printf 'owned invalid asset\n' > "$payload/unknown.zip"
+reject_draft 'Unexpected local' stage_command -- "${all_assets[@]:0:2}" "$payload/unknown.zip"
+
+reset_draft; seed_remote 2
+reject_draft 'Unexpected remote' stage_command -- "${all_assets[@]:2:2}"
+reset_draft
+printf 'asset\t9000\textra.zip\tuploaded\t1\tsha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > "$state/assets"
+reject_draft 'Unexpected remote' stage_command -- "${all_assets[@]:0:2}"
+reset_draft; seed_remote 1
+sed 's/sha256:[a-f0-9]*/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$state/assets" > "$state/rewrite"; mv "$state/rewrite" "$state/assets"
+reject_draft 'size/SHA256 conflicts' stage_command -- "${all_assets[@]:0:2}"
+reset_draft; seed_remote 1
+awk 'BEGIN { FS=OFS="\t" } { $4="starter"; print }' "$state/assets" > "$state/rewrite"; mv "$state/rewrite" "$state/assets"
+reject_draft 'incomplete' stage_command -- "${all_assets[@]:0:2}"
+reset_draft; seed_remote 1; cp "$state/assets" "$state/duplicate"; cat "$state/duplicate" >> "$state/assets"
+reject_draft 'Duplicate remote' stage_command -- "${all_assets[@]:0:2}"
+
+reject '--stage-pairs requires --resume-draft' "$tag" --stage-pairs
+reject '--stage-pairs conflicts with --publish' "$tag" --resume-draft --stage-pairs --publish
+reject '--stage-pairs conflicts with --draft' "$tag" --resume-draft --stage-pairs --draft
+
 # Normal create also checks authenticated drafts before invoking create.
 reset_draft
 if "$here/release-create.sh" "$tag" --notes-file "$notes" >/dev/null 2>&1; then fail 'duplicate draft creation accepted'; fi
@@ -353,4 +418,4 @@ if "$here/release-create.sh" "$tag" --notes-file "$notes" >/dev/null 2>&1; then 
 reject '--publish requires --resume-draft' "$tag" --publish
 reject '--publish conflicts with --draft' "$tag" --resume-draft --draft --publish
 
-echo 'release-create tests passed (offline fake gh/pwsh/git; legacy create, draft discovery, exact-set resume, conflicts, partial retry, explicit publish)'
+echo 'release-create tests passed (offline fake gh/pwsh/git; legacy create, draft discovery, exact-set resume, cumulative pairs, conflicts, partial retry, explicit publish)'

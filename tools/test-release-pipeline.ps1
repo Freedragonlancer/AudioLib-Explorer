@@ -389,6 +389,59 @@ switch -Exact ($scriptName) {
         (Read-State).stages.install.status -ne 'passed' -or
         [IO.File]::ReadAllText((Join-Path $taskSelectedInstall 'user-file.keep')) -cne 'preserve original installation data'){throw 'Local manifest identity did not invalidate only installation or original data changed.'}
     Write-Host 'PASS: local delivery routes fixed installation and selected manifest; only installation reruns on routing/manifest changes.'
+
+    $taskAcceptStub=@'
+param([string]$Tag,[string]$Target,[string]$ReportPath)
+$ErrorActionPreference='Stop'
+$reports=Join-Path (Get-Location).ProviderPath '.rust-validation/release-pipeline'
+if (!$ReportPath.StartsWith($reports+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or
+    [IO.Path]::GetFileName($ReportPath) -cne 'server-validation.json') { throw 'Mock server receipt escaped fixture run.' }
+Write-Host 'Synthetic compatibility diagnostics precede the JSON receipt.'
+if (Test-Path -LiteralPath target/fail-server-accept) { throw 'Synthetic server acceptance failure.' }
+$proof=@{success=$true;tag=$Tag;target=$Target}
+$proof | ConvertTo-Json -Compress | Set-Content -LiteralPath $ReportPath -Encoding utf8
+$proof | ConvertTo-Json -Compress
+'@
+
+    [IO.File]::WriteAllText((Join-Path $taskRoot 'tools/validate-server-package.ps1'),$taskAcceptStub)
+    foreach ($taskServerPlan in @('server.json','server-unix.json')) {
+        $taskPlan=Get-Content -LiteralPath (Join-Path $PSScriptRoot "release-plans/$taskServerPlan") -Raw | ConvertFrom-Json -AsHashtable
+        $taskPlan.require_tag=$false; $taskPlan.host='any'; $taskPlan.environment_tools=@()
+        $taskAccept=$taskPlan.stages | Where-Object id -ceq 'accept'
+        # Use actual validator parameters and outputs. Replace upstream work with owned fake files.
+        $taskPlan.stages=@(foreach ($dependency in $taskAccept.needs) {
+            @{id=$dependency;script='worker.ps1';parameters=@{Name=$dependency;Selected=$false;Packages=@('one','two')};outputs=@("target/$dependency.bin")}
+        })+@($taskAccept)
+        $taskPlan | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $taskPlanPath -Encoding utf8
+        Invoke-FixtureGit @('add','.'); Invoke-FixtureGit @('commit','-qm',"server receipt fixture for $taskServerPlan")
+        $taskRun=Join-Path $taskRoot ".rust-validation/release-pipeline/receipt-$($taskPlan.name)"
+        $taskReceipt=Join-Path $taskRun 'server-validation.json'
+        $taskFailure=Join-Path $taskRoot 'target/fail-server-accept'
+        [IO.File]::WriteAllText($taskFailure,'owned synthetic failure')
+        $null=Invoke-Pipeline 'Run' 1
+        if ((Read-State).stages.accept.status -cne 'failed' -or (Test-Path -LiteralPath $taskReceipt)) {
+            throw 'Failed synthetic acceptance exposed a success receipt.'
+        }
+        Remove-Item -LiteralPath $taskFailure
+        foreach ($taskAttempt in 1,2) {
+            $null=Invoke-Pipeline 'Run' 0
+            $taskProof=Get-Content -LiteralPath $taskReceipt -Raw | ConvertFrom-Json
+            $taskServerState=Read-State
+            if ($taskProof.success -ne $true -or $taskProof.tag -cne 'v0.0.1' -or $taskProof.target -cne $taskPlan.variables.Target -or
+                $taskServerState.stages.accept.status -cne 'passed' -or
+                @($taskAccept.needs | Where-Object { $taskServerState.stages[$_].status -cne 'reused' }).Count) {
+                throw 'Receipt recovery changed upstream work or lost the accepted server identity.'
+            }
+            if ($taskAttempt -eq 1) { [IO.File]::WriteAllText($taskReceipt,'tampered synthetic receipt') }
+        }
+        $taskReceiptHash=(Get-FileHash -LiteralPath $taskReceipt -Algorithm SHA256).Hash
+        $null=Invoke-Pipeline 'Run' 0
+        if ((Read-State).stages.accept.status -cne 'reused' -or
+            (Get-FileHash -LiteralPath $taskReceipt -Algorithm SHA256).Hash -cne $taskReceiptHash) {
+            throw 'Unchanged acceptance receipt was not reused.'
+        }
+    }
+    Write-Host 'PASS: native server plans write JSON independently of logs, reuse verified receipts, and recover failed or changed receipts without repeating upstream work.'
 } finally {
     [Environment]::SetEnvironmentVariable('AUDIOLIB_PIPELINE_TEST',$taskSaved)
     $env:GH_TOKEN=$taskSavedGhToken

@@ -158,6 +158,26 @@ fn metadata_after_data_is_indexed_only_inside_the_riff_parent() {
 }
 
 #[test]
+fn complete_pcm_with_four_byte_short_riff_size_scans_at_full_duration() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("audio");
+    fs::create_dir(&root).unwrap();
+    let source = root.join("short-riff.wav");
+    let mut bytes = wav();
+    let end = bytes.len() - 4;
+    set_riff_end(&mut bytes, end);
+    fs::write(&source, &bytes).unwrap();
+    let provider = Arc::new(SqliteProvider::open(&temp.path().join("library.db")).unwrap());
+
+    let progress = scan(&ScanService::new(provider.clone()), &root, false);
+    assert_eq!((progress.added, progress.errors), (1, 0));
+    let page = provider.search(&SearchRequest::default()).unwrap();
+    assert_eq!(page.total_count, 1);
+    assert!((page.results[0].duration - 4.0 / 48_000.0).abs() < 1e-9);
+    assert_eq!(fs::read(source).unwrap(), bytes);
+}
+
+#[test]
 fn in_parent_chunk_overruns_still_fail_without_marking_existing_audio_missing() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("audio");
@@ -171,9 +191,9 @@ fn in_parent_chunk_overruns_still_fail_without_marking_existing_audio_missing() 
     fs::remove_file(source).unwrap();
 
     let mut data_overrun = wav();
-    let end = data_overrun.len() - 4;
+    let end = data_overrun.len() - 2;
     set_riff_end(&mut data_overrun, end);
-    // Physical bytes exist, but data may not claim bytes beyond its parent.
+    // A two-byte short declaration is outside the four-byte PCM exception.
     fs::write(root.join("data-parent-overrun.wav"), data_overrun).unwrap();
     let mut metadata_overrun = wav();
     append_info(&mut metadata_overrun, "invalidparentmetadata");

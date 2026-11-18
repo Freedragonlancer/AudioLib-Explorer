@@ -149,15 +149,10 @@ pub(crate) fn read_info_reader(
         ));
     }
     let rf64 = &header[..4] != b"RIFF";
-    let (container_end, rf64_data_size) = container_bounds(&mut file, &header, file_len)?;
+    let (mut container_end, rf64_data_size) = container_bounds(&mut file, &header, file_len)?;
+    let short_riff_size = !rf64 && file_len - container_end == 4;
     let mut attrs = Map::new();
     let mut embedded = EmbeddedMetadata::default();
-    if include_metadata && container_end < file_len {
-        embedded.warning(format!(
-            "Ignored {} trailing bytes outside the WAV container",
-            file_len - container_end
-        ));
-    }
     let mut metadata_bytes = 0_u64;
     let mut sample_rate = 0;
     let mut channels = 0;
@@ -170,9 +165,11 @@ pub(crate) fn read_info_reader(
     let mut fact_frames = None;
     let mut position = 12_u64;
     while position < container_end {
+        // A short RIFF size can cut through the data header of a tiny WAV.
+        // The final PCM chunk check below still governs any overrun.
         let payload = position
             .checked_add(8)
-            .filter(|end| *end <= container_end)
+            .filter(|end| *end <= container_end || (short_riff_size && *end <= file_len))
             .ok_or_else(|| Error::Audio("Truncated WAV chunk header".into()))?;
         file.seek(SeekFrom::Start(position))?;
         let mut chunk = [0_u8; 8];
@@ -194,16 +191,33 @@ pub(crate) fn read_info_reader(
         let end = payload
             .checked_add(size)
             .ok_or_else(|| Error::Audio("WAV chunk size overflow".into()))?;
-        if end > container_end {
-            return Err(Error::Audio(format!(
-                "Truncated WAV chunk {:?}",
-                &chunk[..4]
-            )));
-        }
         let next = end
             .checked_add(size & 1)
-            .filter(|end| *end <= container_end)
             .ok_or_else(|| Error::Audio("Truncated WAV chunk padding".into()))?;
+        if end > container_end {
+            // Some RIFF writers omit four bytes from the parent size. Accept
+            // this only for a complete, frame-aligned PCM chunk ending at EOF.
+            let complete_pcm_tail = short_riff_size
+                && &chunk[..4] == b"data"
+                && data_offset == 0
+                && matches!(format_tag, 1 | 3)
+                && block_align != 0
+                && size.is_multiple_of(u64::from(block_align))
+                && next == file_len;
+            if !complete_pcm_tail {
+                return Err(Error::Audio(format!(
+                    "Truncated WAV chunk {:?}",
+                    &chunk[..4]
+                )));
+            }
+            container_end = file_len;
+            if include_metadata {
+                embedded.warning("RIFF size is four bytes short; used the complete PCM data");
+            }
+        }
+        if next > container_end {
+            return Err(Error::Audio("Truncated WAV chunk padding".into()));
+        }
         if include_metadata {
             embedded.chunk(&chunk[..4], size);
         }
@@ -362,6 +376,12 @@ pub(crate) fn read_info_reader(
     // finish() consumes the collector, so take the cover first.
     let artwork = embedded.take_artwork();
     if include_metadata {
+        if container_end < file_len {
+            embedded.warning(format!(
+                "Ignored {} trailing bytes outside the WAV container",
+                file_len - container_end
+            ));
+        }
         embedded.finish(&mut attrs);
         if &header[..4] != b"RIFF" {
             attrs["wav_metadata"]
