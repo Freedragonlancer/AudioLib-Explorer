@@ -598,6 +598,61 @@ fn legacy_seek_freezes_its_transport_duration_limit() {
 }
 
 #[test]
+fn selection_status_text_fits_its_slot_during_drag_resize_and_export() {
+    i_slint_backend_testing::init_no_event_loop();
+    for modern in [false, true] {
+        let ui = window(modern);
+        ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+        let ranges = accept_ranges(&ui);
+        for chinese in [true, false] {
+            ui.set_chinese(chinese);
+            settle();
+            let check = || {
+                let slot = ElementHandle::find_by_accessible_label(
+                    &ui,
+                    if chinese {
+                        "波形导出状态"
+                    } else {
+                        "Waveform export status"
+                    },
+                )
+                .next()
+                .unwrap();
+                let text =
+                    ElementHandle::find_by_element_id(&ui, "WaveSelectionOverlay::status-text")
+                        .next()
+                        .unwrap();
+                let left = slot.absolute_position().x;
+                let text_left = text.absolute_position().x;
+                assert!(slot.size().width > 0.0);
+                assert!(
+                    text_left >= left - 0.5
+                        && text_left + text.size().width <= left + slot.size().width + 0.5,
+                    "Status text must stay between the selection duration and the next control"
+                );
+            };
+            pressed(&ui, 0.7);
+            moved(&ui, point(&ui, 0.2));
+            check();
+            released(&ui, 0.2);
+            pressed(&ui, 0.2);
+            moved(&ui, point(&ui, 0.3));
+            check();
+            released(&ui, 0.3);
+            near(*ranges.borrow().last().unwrap(), (6.0, 14.0));
+
+            ui.set_wave_selection_preparing(true);
+            ui.set_wave_selection_progress("Preparing the selected WAV for export… 50%".into());
+            settle();
+            check();
+            ui.set_wave_selection_preparing(false);
+            ui.set_wave_selection_active(false);
+        }
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
 fn narrow_selection_has_a_separate_drag_grip_without_covering_plot_or_ruler() {
     i_slint_backend_testing::init_no_event_loop();
     for modern in [false, true] {

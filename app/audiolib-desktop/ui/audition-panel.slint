@@ -1091,10 +1091,12 @@ component WaveSelectionOverlay inherits Rectangle {
             }
             status := Rectangle {
                 horizontal-stretch: 1; min-width: 0px;
+                property <string> message: root.editing || root.mode >= 4 ? root.hint : root.export-label;
                 accessible-role: text; accessible-label: root.chinese ? "波形导出状态" : "Waveform export status";
-                accessible-description: status-text.text;
+                accessible-description: self.message;
                 status-text := Text {
-                    text: root.editing || root.mode >= 4 ? root.hint : root.export-label;
+                    width: parent.width; height: parent.height;
+                    text: root.editing && status.message != "" ? (root.chinese ? "松开试听" : "Release to audition") : status.message;
                     color: root.export-state == 5 && !root.gesture ? Theme.text(4, 9, Theme.danger) : root.export-state == 2 && !root.gesture ? Theme.text(4, 4, Theme.accent-hover) : Theme.text(4, 1, Theme.dim);
                     font-size: Theme.font(9); horizontal-alignment: right; vertical-alignment: center; overflow: elide; accessible-role: none;
                 }
