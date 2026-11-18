@@ -8,7 +8,7 @@ language updates the displayed theme names; the saved identifier stays the same.
 
 | Identifier | English / Chinese | Presentation |
 | --- | --- | --- |
-| `default` | Default / 默认 | Graphite Classic workbench with periwinkle actions and selection, bookmark icons for saved searches and stars for favorite sounds. Separate Play and Pause controls, Pitch/Rate fields and Waveform ruler. |
+| `default` | Default / 默认 | Graphite Classic workbench with amber search and focus accents, neutral selected rows and green playback feedback, bookmark icons for saved searches and stars for favorite sounds. Separate Play and Pause controls, Pitch/Rate fields and Waveform ruler. |
 | `studio` | Studio / 工作室 | Redesigned player from PR #182, retaining the subsequent overview keyboard fix: animated transport controls, editable values with feedback, status display and overview navigation |
 | `default-v2` | Default v2 / 默认 v2 | Studio navigation, search, library table and inspector, paired with the Classic bottom player and a coordinated charcoal and muted teal palette |
 

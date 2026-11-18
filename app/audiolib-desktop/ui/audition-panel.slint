@@ -631,6 +631,8 @@ export component PlayedRegion {
 }
 
 component ClassicTool inherits Rectangle {
+    in property <color> primary-tone: Theme.primary-button;
+    in property <color> primary-hover-tone: Theme.primary-button-hover;
     in property <string> symbol;
     in property <image> icon;
     in property <string> label;
@@ -686,12 +688,12 @@ component ClassicTool inherits Rectangle {
         width: root.width; height: root.height;
         border-radius: 5px * Theme.ui-scale;
         background: root.primary
-            ? (root.pressed ? Theme.accent.darker(0.18) : (root.hovered ? Theme.accent-hover : Theme.accent))
+            ? (root.pressed ? root.primary-tone.darker(0.18) : (root.hovered ? root.primary-hover-tone : root.primary-tone))
             : root.active
                 ? (root.pressed ? Theme.selected : Theme.checked)
                 : (root.pressed ? Theme.trough : (root.hovered ? Theme.hover : Theme.raised.mix(Theme.player, 0.3)));
         border-width: 1px;
-        border-color: root.primary || root.active ? Theme.accent : (root.hovered ? Theme.strong-border : Theme.player-border);
+        border-color: root.primary ? root.primary-tone : root.active ? Theme.accent : (root.hovered ? Theme.strong-border : Theme.player-border);
         animate background, border-color, y { duration: Theme.motion-fast; easing: ease-out; }
         property <color> ink: root.primary ? Theme.on-accent : (root.active ? Theme.accent-hover : Theme.ink);
         property <length> glyph: min(19px * Theme.ui-scale, max(10px * Theme.ui-scale, root.height - 6px * Theme.ui-scale)) - (root.pressed ? 2px * Theme.ui-scale : 0px);
@@ -1241,7 +1243,10 @@ component ClassicAuditionPanel inherits Rectangle {
                         clicked => { root.play(); }
                     }
                     ClassicTool {
-                        height: 28px * Theme.ui-scale; primary: root.transport-ready && root.state == 3; icon: @image-url("icons/pause.svg");
+                        height: 28px * Theme.ui-scale; primary: root.transport-ready && root.state == 3;
+                        primary-tone: Theme.modern-style ? Theme.primary-button : Theme.mint;
+                        primary-hover-tone: Theme.modern-style ? Theme.primary-button-hover : Theme.mint.brighter(0.15);
+                        icon: @image-url("icons/pause.svg");
                         label: root.chinese ? "暂停" : "Pause"; tip-align: -1; checkable: true;
                         active: root.transport-ready && root.state == 4;
                         enabled: root.transport-ready && root.state == 3;

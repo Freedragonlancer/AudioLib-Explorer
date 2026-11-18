@@ -86,10 +86,10 @@ component Action inherits Rectangle {
     accessible-action-default => { if root.enabled { root.clicked(); } }
     forward-focus: button-focus;
     border-radius: 5px * Theme.ui-scale;
-    background: root.primary ? (hit.pressed ? Theme.accent.darker(0.12) : hit.has-hover ? Theme.accent-hover : Theme.accent)
+    background: root.primary ? (hit.pressed ? Theme.primary-button.darker(0.12) : hit.has-hover ? Theme.primary-button-hover : Theme.primary-button)
         : Theme.interactive-fill(root.active, hit.has-hover, hit.pressed, root.subtle ? transparent : Theme.raised);
     border-width: 1px;
-    border-color: button-focus.has-focus ? Theme.accent-hover : root.active ? Theme.accent : hit.has-hover ? Theme.strong-border : (root.subtle ? transparent : Theme.border);
+    border-color: button-focus.has-focus ? Theme.accent-hover : root.active && Theme.modern-style ? Theme.accent : root.active || hit.has-hover ? Theme.strong-border : (root.subtle ? transparent : Theme.border);
     animate background, border-color { duration: Theme.motion-fast; easing: ease-out; }
     opacity: root.enabled ? 1 : 0.42;
     if root.icon.width > 0: Image {
@@ -227,7 +227,7 @@ component IconSegment inherits Rectangle {
     in property <image> icon;
     in property <string> label;
     in property <string> caption;
-    in property <color> active-ink: Theme.accent;
+    in property <color> active-ink: Theme.navigation-ink;
     in property <bool> active: false;
     in property <int> count: 0;
     in property <bool> enabled: true;
@@ -297,7 +297,7 @@ component SegmentTab inherits Rectangle {
         Image {
             y: (parent.height - self.height) / 2; width: 14px * Theme.ui-scale; height: 14px * Theme.ui-scale;
             source: root.icon; image-fit: contain; accessible-role: none;
-            colorize: root.active ? Theme.accent : (tab-hit.has-hover ? Theme.dim : Theme.muted);
+            colorize: root.active ? Theme.navigation-ink : (tab-hit.has-hover ? Theme.dim : Theme.muted);
         }
         Text { text: root.label; color: root.active ? Theme.text(0, 0, Theme.ink) : (tab-hit.has-hover ? Theme.text(0, 1, Theme.dim) : Theme.text(0, 2, Theme.muted)); font-size: Theme.font(12); font-weight: root.active ? 600 : 400; vertical-alignment: center; }
         if root.count > 0: CountBadge { y: (parent.height - self.height) / 2; count: root.count; }
@@ -840,7 +840,7 @@ component StudioIconSegment inherits Rectangle {
         Image {
             y: (parent.height - self.height) / 2; width: 16px * Theme.ui-scale; height: 16px * Theme.ui-scale;
             source: root.icon; image-fit: contain; accessible-role: none;
-            colorize: root.active || root.highlighted ? Theme.accent : (segment-hit.has-hover ? Theme.ink : Theme.muted);
+            colorize: root.highlighted ? Theme.accent : root.active ? Theme.navigation-ink : (segment-hit.has-hover ? Theme.ink : Theme.muted);
         }
         segment-label := Text { visible: root.show-label; text: root.show-label ? root.caption : ""; color: root.active ? Theme.text(0, 0, Theme.ink) : Theme.text(0, 1, Theme.dim); font-size: Theme.font(11); vertical-alignment: center; }
         if root.count > 0: Text { text: root.count; color: Theme.text(0, 6, Theme.accent); font-size: Theme.font(11); font-weight: 700; vertical-alignment: center; }
@@ -3024,7 +3024,7 @@ main-scroll := ScrollView {
             }
             classic-search-group := Rectangle { horizontal-stretch: 3; min-width: clamp(root.width - 1040px * Theme.ui-scale, 360px * Theme.ui-scale, 500px * Theme.ui-scale); preferred-width: 560px * Theme.ui-scale; max-width: 720px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: search-input.has-focus || root.ai-visible ? Theme.accent : Theme.border;
                 HorizontalLayout { padding: 5px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-                    Image { width: 20px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: Theme.accent; image-fit: contain; }
+                    Image { width: 20px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: search-input.has-focus ? Theme.accent : Theme.dim; image-fit: contain; }
                     search-input := LineEdit { text-module: 1; horizontal-stretch: 1; min-width: 70px * Theme.ui-scale; enabled: !root.background-blocked; text <=> root.search-entry-text;
                         input-label: root.ai-visible ? (root.chinese ? "AI 声音描述" : "AI sound description") : (root.chinese ? "搜索关键词" : "Search keywords");
                         placeholder-text: root.ai-visible ? (root.chinese ? "描述声音，例如科幻爆炸…" : "Describe a sound, e.g. sci-fi explosion…") : (root.chinese ? "搜索声音、标签和源文件 Metadata…" : "Search sounds, tags and source Metadata…");
@@ -3306,7 +3306,7 @@ main-scroll := ScrollView {
             }
             results-column := VerticalLayout { horizontal-stretch: 1; min-width: 520px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                 HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-                    if root.checked-count <= 1: Image { width: 18px * Theme.ui-scale; height: parent.height; image-fit: contain; source: @image-url("icons/peaks.svg"); colorize: Theme.accent; accessible-role: none; }
+                    if root.checked-count <= 1: Image { width: 18px * Theme.ui-scale; height: parent.height; image-fit: contain; source: @image-url("icons/peaks.svg"); colorize: Theme.dim; accessible-role: none; }
                     if root.checked-count <= 1: Text { horizontal-stretch: 1; min-width: 0px; overflow: elide; text: root.favorites-only ? (root.chinese ? "我的收藏" : "Favorites") : (root.chinese ? "声音列表" : "Sounds"); color: Theme.text(2, 0, Theme.ink); font-size: Theme.font(15); font-weight: 600; vertical-alignment: center; }
                     if root.checked-count <= 1: Label { text-module: 2; width: min(self.preferred-width, (root.wide-layout ? 225px : 190px) * Theme.ui-scale); text: root.result-heading; font-size: Theme.font(11); overflow: elide; Tooltip { text: @markdown("\{root.result-heading}"); } }
                     if root.checked-count > 1: selection-actions := Action { text-module: 2;
@@ -3517,7 +3517,7 @@ main-scroll := ScrollView {
                                         if row.wave-state == 1: Image {
                                             width: parent.width; height: parent.height - 4px * Theme.ui-scale;
                                             source: row.wave; image-fit: fill; image-rendering: pixelated;
-                                            colorize: root.selected-row == index ? Theme.accent-hover : Theme.muted;
+                                            colorize: root.selected-row == index ? Theme.ink : Theme.muted;
                                         }
                                         // Root offline: the stale copy dimmed under a warning tint.
                                         if row.wave-state == 4: Rectangle {
