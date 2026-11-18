@@ -147,7 +147,7 @@ impl Controller {
                 c.invalidate_library_reads();
                 // Keep drafts bound to this provider until the normal source-switch
                 // barrier drains them. Hiding a declined library must not discard writes.
-                c.records.lock().unwrap().clear();
+                c.replace_result_records(Vec::new());
                 ui.set_rows(slint::ModelRc::new(
                     slint::VecModel::<crate::AudioRow>::default(),
                 ));

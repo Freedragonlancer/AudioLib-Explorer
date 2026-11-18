@@ -125,7 +125,9 @@ fn table_column_widths_scale_proportionally_with_ui_scale() {
     init_software_backend();
     let total_at = |scale: f32| {
         let ui = AppWindow::new().unwrap();
-        ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+        // Keep the same workbench breakpoint while varying the UI scale.
+        ui.window()
+            .set_size(slint::LogicalSize::new(1440.0 * scale, 900.0 * scale));
         ui.global::<crate::Theme>().set_ui_scale(scale);
         ui.set_table_name_width(300.0);
         ui.set_table_tags_width(140.0);

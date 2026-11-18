@@ -1765,8 +1765,9 @@ impl Controller {
         ui.set_task_restoring(true);
         ui.set_search_workspace_loading(true);
         ui.set_searching(false);
+        ui.set_folder_counts_pending(false);
         apply_task_controls(ui, &task);
-        self.records.lock().unwrap().clear();
+        self.replace_result_records(Vec::new());
         *self.selected.lock().unwrap() = None;
         ui.set_rows(ModelRc::new(VecModel::<AudioRow>::default()));
         ui.set_selected_id("".into());
@@ -1973,7 +1974,7 @@ impl Controller {
                 row
             })
             .collect();
-        *self.records.lock().unwrap() = records;
+        self.replace_result_records(records);
         publish_audio_rows(ui, self.decorate_list_waveforms(rows));
         ui.set_selected_row(selected_row.map_or(-1, |index| index as i32));
         ui.set_checked_count(checked.len() as i32);
