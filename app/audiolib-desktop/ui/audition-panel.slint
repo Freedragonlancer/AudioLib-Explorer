@@ -16,7 +16,7 @@ global Clock {
         let ms = floor(max(0, seconds) * 1000);
         return Clock.pad2(floor(ms / 60000)) + ":" + Clock.pad2(Math.mod(floor(ms / 1000), 60)) + "." + Clock.pad3(Math.mod(ms, 1000));
     }
-    // Two fixed decimals, the Pitch / Rate field format published by the controller.
+    // Rounded hundredths for Pitch, Rate and selection duration.
     public pure function fixed2(value: float) -> string {
         let hundredths = Math.round(abs(value) * 100);
         let part = Math.mod(hundredths, 100);
@@ -847,7 +847,6 @@ component WaveSelectionOverlay inherits Rectangle {
     in property <bool> shift-held;
     in property <int> cancel-revision;
     callback committed(float,float);
-    callback cleared();
     callback drag-requested();
     callback drag-ended();
     callback cancel-requested();
@@ -857,6 +856,9 @@ component WaveSelectionOverlay inherits Rectangle {
     callback pointer-feedback-changed();
     in property <Point> feedback-offset;
     in property <length> feedback-width;
+    // Keep the drag handle stationary as preparation, progress and hover hints change.
+    out property <length> preferred-feedback-width: (root.chinese ? 182px : 206px) * max(Theme.ui-scale, Theme.font(10) / 10px);
+    property <bool> show-grip-label: root.feedback-width >= 14.5 * Theme.font(10);
     out property <bool> show-feedback: root.shown-active || root.is-preparing || root.export-state != 0;
     out property <bool> gesture: root.mode != 0;
     out property <bool> hovered: hit.has-hover;
@@ -954,7 +956,7 @@ component WaveSelectionOverlay inherits Rectangle {
         : root.shift-held ? (root.chinese ? "拖动重新框选 · 松开自动试听" : "Drag a new range · Release to audition")
         : "";
     property <string> export-label: root.is-preparing ? (root.progress-text != "" ? root.progress-text : (root.chinese ? "正在准备 WAV…" : "Preparing WAV…"))
-        : root.export-state == 2 ? (root.chinese ? "WAV 已就绪，拖出导出" : "WAV ready; drag out to export")
+        : root.export-state == 2 ? (root.chinese ? "已就绪" : "Ready")
         : root.export-state == 3 ? (root.chinese ? "正在拖出 WAV" : "Dragging WAV")
         : root.export-state == 4 ? (root.chinese ? "已取消 · 再次拖出可重试" : "Cancelled · Drag again to retry")
         : root.export-state == 5 ? (root.progress-text != "" ? root.progress-text : (root.chinese ? "准备失败 · 再次拖出重试" : "Preparation failed · Drag again to retry"))
@@ -1048,14 +1050,14 @@ component WaveSelectionOverlay inherits Rectangle {
             padding-left: 4px * Theme.ui-scale; padding-right: 2px * Theme.ui-scale; padding-top: 1px; spacing: 5px * Theme.ui-scale;
             grip-frame := Rectangle {
                 visible: root.shown-active;
-                width: !root.shown-active ? 0px : (root.feedback-width < 330px * Theme.ui-scale ? 25px : 65px) * Theme.ui-scale;
+                width: !root.shown-active ? 0px : 25px * Theme.ui-scale + (root.show-grip-label ? grip-label.preferred-width : 0px);
                 height: 24px * Theme.ui-scale; background: grip.has-hover ? Theme.control-hover-surface : transparent; border-radius: 3px * Theme.ui-scale;
                 property <bool> tip-ready: false;
                 accessible-role: button; accessible-label: root.chinese ? "拖出选区 WAV" : "Drag selection as WAV";
                 accessible-enabled: root.enabled && root.selection-active && root.export-state != 3;
                 accessible-description: root.chinese ? "按住并拖出，导出当前选区；短选区也可使用此手柄" : "Press and drag to export the current selection; this handle also works for narrow ranges";
                 Image { source: @image-url("icons/export.svg"); colorize: Theme.accent-hover; width: 15px * Theme.ui-scale; height: self.width; x: 5px * Theme.ui-scale; y: (parent.height - self.height) / 2; }
-                if root.feedback-width >= 330px * Theme.ui-scale: Text { x: 25px * Theme.ui-scale; width: parent.width - self.x; height: parent.height; text: root.chinese ? "拖出 WAV" : "Drag WAV"; color: Theme.text(4, 0, Theme.ink); font-size: Theme.font(10); vertical-alignment: center; accessible-role: none; }
+                grip-label := Text { visible: root.show-grip-label; x: 25px * Theme.ui-scale; height: parent.height; text: root.chinese ? "拖出 WAV" : "Drag WAV"; color: Theme.text(4, 0, Theme.ink); font-size: Theme.font(10); vertical-alignment: center; accessible-role: none; }
                 grip := TouchArea {
                     changed has-hover => { if !self.has-hover { grip-frame.tip-ready = false; } }
                     mouse-cursor: root.native-cursor ? crosshair : (root.pointer-kind > 0 && root.pointer-kind < 11 ? none : default);
@@ -1082,29 +1084,32 @@ component WaveSelectionOverlay inherits Rectangle {
                 Tip { z: 10; anchor-width: parent.width; anchor-height: parent.height; align: -1; text: root.hint; show: grip-frame.tip-ready && grip.has-hover && !root.gesture; }
             }
             if root.shown-active: Text {
-                width: (root.feedback-width >= 330px * Theme.ui-scale ? 155px : 62px) * Theme.ui-scale;
-                text: root.feedback-width >= 330px * Theme.ui-scale ? Clock.format(root.shown-start) + " – " + Clock.format(root.shown-end) + "  ·  " + Clock.format(root.shown-end - root.shown-start) : "Δ " + Clock.format(root.shown-end - root.shown-start);
+                width: self.preferred-width;
+                text: Clock.fixed2(max(0, root.shown-end - root.shown-start)) + " s";
                 color: Theme.text(4, 0, Theme.ink); font-size: Theme.font(9); vertical-alignment: center; overflow: elide;
-                accessible-role: text; accessible-label: root.chinese ? "选区起点、终点和时长" : "Selection start, end and duration";
-                accessible-description: Clock.format(root.shown-start) + " – " + Clock.format(root.shown-end) + " · " + Clock.format(root.shown-end - root.shown-start);
+                accessible-role: text; accessible-label: root.chinese ? "选区时长" : "Selection duration"; accessible-description: self.text;
             }
-            Text {
-                horizontal-stretch: 1; min-width: 0px; text: root.editing || root.mode >= 4 ? root.hint : root.export-label;
-                color: root.export-state == 5 && !root.gesture ? Theme.text(4, 9, Theme.danger) : root.export-state == 2 && !root.gesture ? Theme.text(4, 4, Theme.accent-hover) : Theme.text(4, 1, Theme.dim);
-                font-size: Theme.font(9); vertical-alignment: center; overflow: elide;
+            status := Rectangle {
+                horizontal-stretch: 1; min-width: 0px;
                 accessible-role: text; accessible-label: root.chinese ? "波形导出状态" : "Waveform export status";
-                accessible-description: root.export-label;
+                accessible-description: status-text.text;
+                status-text := Text {
+                    text: root.editing || root.mode >= 4 ? root.hint : root.export-label;
+                    color: root.export-state == 5 && !root.gesture ? Theme.text(4, 9, Theme.danger) : root.export-state == 2 && !root.gesture ? Theme.text(4, 4, Theme.accent-hover) : Theme.text(4, 1, Theme.dim);
+                    font-size: Theme.font(9); horizontal-alignment: right; vertical-alignment: center; overflow: elide; accessible-role: none;
+                }
+                property <bool> tip-ready: false;
+                status-hover := TouchArea {
+                    changed has-hover => { if !self.has-hover { status.tip-ready = false; } }
+                }
+                Timer { interval: Theme.tooltip-delay; running: status-hover.has-hover && !root.gesture && !status.tip-ready; triggered => { status.tip-ready = true; } }
+                Tip { anchor-width: parent.width; anchor-height: parent.height; align: 1; text: status-text.text; show: status.tip-ready && status-hover.has-hover && !root.gesture && status-text.preferred-width > parent.width; }
             }
             if root.is-preparing: Tool {
                 width: (root.chinese ? 42px : 52px) * Theme.ui-scale; height: 24px * Theme.ui-scale;
                 symbol: root.chinese ? "取消" : "Cancel"; symbol-size: Theme.font(10); subtle: true;
                 label: root.chinese ? "取消切片准备" : "Cancel slice preparation"; hint: "Esc"; tip-align: 1;
                 clicked => { root.cancel-gesture(); root.cancel-requested(); }
-            }
-            if root.shown-active: Tool {
-                width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; symbol: "×"; symbol-size: Theme.font(14); subtle: true;
-                label: root.chinese ? "清除波形选区" : "Clear waveform selection"; hint: "Esc"; tip-align: 1;
-                clicked => { root.cancel-gesture(); root.cleared(); }
             }
         }
     }
@@ -1404,7 +1409,6 @@ component ClassicAuditionPanel inherits Rectangle {
                         export-state: root.selection-export-state; native-cursor: root.selection-native-cursor;
                         shift-held: root.selection-shift-held; cancel-revision: root.selection-cancel-revision;
                         committed(start, end) => { root.selection-committed(start, end); }
-                        cleared => { root.selection-cleared(); }
                         drag-requested => { root.selection-drag-requested(); }
                         drag-ended => { root.selection-drag-ended(); }
                         cancel-requested => { root.selection-cancel-requested(); }
@@ -1445,7 +1449,7 @@ component ClassicAuditionPanel inherits Rectangle {
             }
             Text { horizontal-stretch: 1; min-width: 0px; height: 25px * Theme.ui-scale; text: root.name == "" ? (root.chinese ? "未加载声音" : "No sound loaded") : root.name; overflow: elide; color: Theme.text(4, 0, Theme.ink); font-size: Theme.font(11); vertical-alignment: center; accessible-role: text; accessible-label: root.chinese ? "当前试听文件" : "Audition filename"; }
             feedback-slot := Rectangle {
-                width: scrub.show-feedback ? min(440px * Theme.ui-scale, root.width * 0.39) : 0px;
+                width: scrub.show-feedback ? min(scrub.preferred-feedback-width, root.width * 0.39) : 0px;
                 height: 24px * Theme.ui-scale; y: (parent.height - self.height) / 2;
                 visible: scrub.show-feedback;
             }
@@ -1655,8 +1659,9 @@ component WorkbenchAuditionPanel inherits Rectangle {
     Rectangle { x: 0px; y: 0px; height: 1px; background: Theme.player-border; }
     private property <float> font-factor: max(1, Theme.ui-font-px / 13.0);
     feedback-slot := Rectangle {
-        x: 12px * Theme.ui-scale; y: parent.height - 28px * Theme.ui-scale;
-        width: wave-frame.absolute-position.x - self.absolute-position.x - 10px * Theme.ui-scale;
+        property <length> right-edge: wave-frame.absolute-position.x - root.absolute-position.x - 10px * Theme.ui-scale;
+        x: self.right-edge - self.width; y: parent.height - 28px * Theme.ui-scale;
+        width: min(scrub.preferred-feedback-width, max(0px, self.right-edge - 12px * Theme.ui-scale));
         height: 24px * Theme.ui-scale;
     }
     dock-layout := GridLayout { padding-left: 12px * Theme.ui-scale; padding-right: 10px * Theme.ui-scale; padding-top: 6px * Theme.ui-scale; padding-bottom: 6px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
@@ -1935,7 +1940,6 @@ component WorkbenchAuditionPanel inherits Rectangle {
                         export-state: root.selection-export-state; native-cursor: root.selection-native-cursor;
                         shift-held: root.selection-shift-held; cancel-revision: root.selection-cancel-revision;
                         committed(start, end) => { root.selection-committed(start, end); }
-                        cleared => { root.selection-cleared(); }
                         drag-requested => { root.selection-drag-requested(); }
                         drag-ended => { root.selection-drag-ended(); }
                         cancel-requested => { root.selection-cancel-requested(); }

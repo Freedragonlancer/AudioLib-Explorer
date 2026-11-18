@@ -30,6 +30,16 @@ fn settle() {
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1));
 }
 
+fn escape(ui: &AppWindow) {
+    ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Escape.into(),
+    });
+    ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Escape.into(),
+    });
+    settle();
+}
+
 fn point(ui: &AppWindow, fraction: f32) -> LogicalPosition {
     let wave = ElementHandle::find_by_accessible_label(ui, "Waveform timeline")
         .next()
@@ -373,11 +383,7 @@ fn repeated_ranges_tolerate_synchronous_preview_and_source_publication_callbacks
             near(ranges.borrow()[index], (start * 20.0, end * 20.0));
             assert!(!ui.get_wave_selection_gesture());
             if index % 4 == 3 {
-                ElementHandle::find_by_accessible_label(&ui, "Clear waveform selection")
-                    .next()
-                    .unwrap()
-                    .invoke_accessible_default_action();
-                settle();
+                escape(&ui);
                 assert!(!ui.get_wave_selection_active());
             }
         }
@@ -421,7 +427,7 @@ fn gesture_freezes_pending_viewport_and_identity_changes_cancel_without_committi
 }
 
 #[test]
-fn escape_cancels_gesture_then_preparation_then_selection_and_clear_is_accessible() {
+fn escape_cancels_gesture_then_preparation_then_selection() {
     i_slint_backend_testing::init_no_event_loop();
     for modern in [false, true] {
         let ui = window(modern);
@@ -429,13 +435,7 @@ fn escape_cancels_gesture_then_preparation_then_selection_and_clear_is_accessibl
         select(&ui, 0.2, 0.6);
         ui.set_help_visible(true);
         settle();
-        ui.window().dispatch_event(WindowEvent::KeyPressed {
-            text: Key::Escape.into(),
-        });
-        ui.window().dispatch_event(WindowEvent::KeyReleased {
-            text: Key::Escape.into(),
-        });
-        settle();
+        escape(&ui);
         assert!(
             !ui.get_help_visible(),
             "A modal receives Escape before the selection"
@@ -443,16 +443,7 @@ fn escape_cancels_gesture_then_preparation_then_selection_and_clear_is_accessibl
         assert!(ui.get_wave_selection_active());
         pressed(&ui, 0.8);
         moved(&ui, point(&ui, 0.9));
-        let escape = || {
-            ui.window().dispatch_event(WindowEvent::KeyPressed {
-                text: Key::Escape.into(),
-            });
-            ui.window().dispatch_event(WindowEvent::KeyReleased {
-                text: Key::Escape.into(),
-            });
-            settle();
-        };
-        escape();
+        escape(&ui);
         released(&ui, 0.9);
         assert_eq!(ranges.borrow().len(), 1);
         assert!(ui.get_wave_selection_active());
@@ -467,7 +458,7 @@ fn escape_cancels_gesture_then_preparation_then_selection_and_clear_is_accessibl
         ui.set_wave_selection_preparing(true);
         moved(&ui, point(&ui, 0.4));
         pointer(&ui, 6);
-        escape();
+        escape(&ui);
         assert_eq!(*cancels.borrow(), 1);
         assert!(ui.get_wave_selection_active());
         let clears = Rc::new(RefCell::new(0));
@@ -477,15 +468,9 @@ fn escape_cancels_gesture_then_preparation_then_selection_and_clear_is_accessibl
             *observed.borrow_mut() += 1;
             weak.unwrap().set_wave_selection_active(false);
         });
-        escape();
+        escape(&ui);
         assert_eq!(*clears.borrow(), 1);
         assert!(!ui.get_wave_selection_active());
-        ui.set_wave_selection_active(true);
-        ElementHandle::find_by_accessible_label(&ui, "Clear waveform selection")
-            .next()
-            .unwrap()
-            .invoke_accessible_default_action();
-        assert_eq!(*clears.borrow(), 2);
         ui.hide().unwrap();
     }
 }
@@ -831,7 +816,7 @@ fn crossing_the_export_grip_cannot_take_over_a_draw_or_boundary_resize() {
 }
 
 #[test]
-fn feedback_buttons_keep_cancel_and_clear_independent_across_themes_views_and_languages() {
+fn cancelling_preparation_preserves_selection_until_escape_across_themes_views_and_languages() {
     i_slint_backend_testing::init_no_event_loop();
     for modern_theme in [false, true] {
         for modern_player in [false, true] {
@@ -895,22 +880,7 @@ fn feedback_buttons_keep_cancel_and_clear_independent_across_themes_views_and_la
                     (ui.get_wave_selection_start(), ui.get_wave_selection_end()),
                     selected,
                 );
-                let clear = ElementHandle::find_by_accessible_label(
-                    &ui,
-                    if chinese {
-                        "清除波形选区"
-                    } else {
-                        "Clear waveform selection"
-                    },
-                )
-                .next()
-                .unwrap();
-                let clear_center = center(&clear);
-                moved(&ui, clear_center);
-                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(900));
-                pointer(&ui, 0);
-                pointer_press(&ui, clear_center);
-                pointer_release(&ui, clear_center);
+                escape(&ui);
                 assert_eq!(*clears.borrow(), 1);
                 assert_eq!(*cancels.borrow(), 1);
                 assert!(!ui.get_wave_selection_active());
