@@ -1006,16 +1006,21 @@ impl ListWaveforms {
 
 /// Window ids for rows `first .. first + count` of `ids`: the visible rows, then one
 /// screen below, then one screen above (nearest first).
-pub(crate) fn window_ids(ids: &[i64], first: usize, count: usize) -> Vec<i64> {
-    let len = ids.len();
-    let first = first.min(len);
-    let visible_end = first.saturating_add(count).min(len);
-    let below_end = visible_end.saturating_add(count).min(len);
+pub(crate) fn window_ids<T>(
+    rows: &[T],
+    first: usize,
+    count: usize,
+    id: impl Fn(&T) -> i64,
+) -> Vec<i64> {
+    if first >= rows.len() {
+        return Vec::new();
+    }
+    let visible_end = first.saturating_add(count).min(rows.len());
+    let below_end = visible_end.saturating_add(count).min(rows.len());
     let above_start = first.saturating_sub(count);
     let mut window = Vec::with_capacity(below_end - above_start);
-    window.extend_from_slice(&ids[first..visible_end]);
-    window.extend_from_slice(&ids[visible_end..below_end]);
-    window.extend(ids[above_start..first].iter().rev());
+    window.extend(rows[first..below_end].iter().map(&id));
+    window.extend(rows[above_start..first].iter().rev().map(id));
     window
 }
 
@@ -1284,10 +1289,19 @@ mod tests {
     #[test]
     fn window_is_visible_rows_then_below_then_above() {
         let ids: Vec<i64> = (0..20).collect();
-        assert_eq!(window_ids(&ids, 5, 3), vec![5, 6, 7, 8, 9, 10, 4, 3, 2]);
-        assert_eq!(window_ids(&ids, 0, 4), vec![0, 1, 2, 3, 4, 5, 6, 7]);
-        assert_eq!(window_ids(&ids, 18, 4), vec![18, 19, 17, 16, 15, 14]);
-        assert!(window_ids(&[], 3, 4).is_empty());
+        assert_eq!(
+            window_ids(&ids, 5, 3, |id| *id),
+            vec![5, 6, 7, 8, 9, 10, 4, 3, 2]
+        );
+        assert_eq!(
+            window_ids(&ids, 0, 4, |id| *id),
+            vec![0, 1, 2, 3, 4, 5, 6, 7]
+        );
+        assert_eq!(
+            window_ids(&ids, 18, 4, |id| *id),
+            vec![18, 19, 17, 16, 15, 14]
+        );
+        assert!(window_ids(&ids, ids.len(), 4, |id| *id).is_empty());
     }
 
     #[test]

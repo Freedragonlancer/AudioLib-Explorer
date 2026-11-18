@@ -491,7 +491,7 @@ component OutputPill inherits Rectangle {
         }
         Text {
             min-width: 0px; overflow: elide; vertical-alignment: center; font-size: Theme.font(10); color: Theme.text(4, 1, Theme.dim);
-            text: root.idle ? (root.chinese ? "输出空闲" : "Output idle") : root.backend + (!root.compact && root.rate != "" ? " · " + root.rate : "");
+            text: root.failed ? (root.chinese ? "播放异常" : "Playback error") : root.idle ? (root.chinese ? "输出空闲" : "Output idle") : root.backend + (!root.compact && root.rate != "" ? " · " + root.rate : "");
         }
         if root.xruns > 0: Text { text: root.xruns + " xruns"; color: Theme.text(4, 8, Theme.warning); font-size: Theme.font(10); vertical-alignment: center; }
     }
@@ -1114,6 +1114,9 @@ component ClassicAuditionPanel inherits Rectangle {
     in property <string> name;
     in property <string> info;
     in property <string> output;
+    in property <string> output-backend;
+    in property <string> output-rate;
+    in property <int> output-xruns;
     in property <float> position;
     in property <float> duration;
     in property <string> time;
@@ -1226,7 +1229,7 @@ component ClassicAuditionPanel inherits Rectangle {
                         clicked => { root.seek(0); }
                     }
                     ClassicTool {
-                        height: 28px * Theme.ui-scale; icon: @image-url("icons/play.svg");
+                        height: 28px * Theme.ui-scale; primary: root.state != 3; icon: @image-url("icons/play.svg");
                         label: root.chinese ? "播放" : "Play"; tip-align: -1; checkable: true;
                         active: root.transport-ready && root.state == 3;
                         enabled: root.transport-ready && root.state != 3;
@@ -1238,7 +1241,7 @@ component ClassicAuditionPanel inherits Rectangle {
                         clicked => { root.play(); }
                     }
                     ClassicTool {
-                        height: 28px * Theme.ui-scale; icon: @image-url("icons/pause.svg");
+                        height: 28px * Theme.ui-scale; primary: root.transport-ready && root.state == 3; icon: @image-url("icons/pause.svg");
                         label: root.chinese ? "暂停" : "Pause"; tip-align: -1; checkable: true;
                         active: root.transport-ready && root.state == 4;
                         enabled: root.transport-ready && root.state == 3;
@@ -1280,9 +1283,13 @@ component ClassicAuditionPanel inherits Rectangle {
             volume-control := Slider { input-label: root.chinese ? "音量" : "Volume"; min-width: 76px * Theme.ui-scale; max-width: 160px * Theme.ui-scale; horizontal-stretch: 1; minimum: -60; maximum: 0; step: 0.1; value <=> root.volume-db; changed => { root.volume(self.value); } }
             Caption { width: 66px * Theme.ui-scale; text: root.volume-label; horizontal-alignment: right; }
             ClassicTool { width: 54px * Theme.ui-scale; symbol: root.chinese ? "单声道" : "Mono"; label: root.chinese ? "单声道监听" : "Mono monitoring"; active: root.mono; checkable: true; hint: root.mono ? (root.chinese ? "单声道监听已开启，点击关闭" : "Mono monitoring is on; click to turn off") : (root.chinese ? "单声道监听已关闭，点击开启" : "Mono monitoring is off; click to turn on"); clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
-            Caption { horizontal-stretch: 1; min-width: 0px; text: root.output; overflow: elide; horizontal-alignment: right; font-size: Theme.font(9); }
+            Rectangle { horizontal-stretch: 1; }
+            OutputPill {
+                chinese: root.chinese; backend: root.output-backend; rate: root.output-rate;
+                xruns: root.output-xruns; failed: root.state == 7; details: root.output;
+                clicked => { root.output-settings(); }
+            }
             ClassicTool { icon: @image-url("icons/peaks.svg"); label: root.chinese ? "波形显示设置" : "Peak display settings"; tip-align: 1; clicked => { root.peaks(); } }
-            ClassicTool { icon: @image-url("icons/settings.svg"); label: root.chinese ? "音频输出" : "Audio output"; tip-align: 1; clicked => { root.output-settings(); } }
         }
         wave-frame := Rectangle { horizontal-stretch: 1; vertical-stretch: 1; min-height: (root.compact ? 45px : 70px) * Theme.ui-scale + scrub.feedback-height;
             wave := Rectangle { x: 0px; y: 0px; width: parent.width; height: max(1px, parent.height - scrub.feedback-height); background: root.spectral && root.waveform-ready ? Theme.spectral-canvas : Theme.normal-canvas; border-color: Theme.player-border; border-width: 1px; clip: true;
@@ -2109,6 +2116,7 @@ export component AuditionPanel inherits Rectangle {
         name: root.name;
         info: root.info;
         output: root.output;
+        output-backend: root.output-backend; output-rate: root.output-rate; output-xruns: root.output-xruns;
         position: root.position;
         duration: root.duration;
         time: root.time;

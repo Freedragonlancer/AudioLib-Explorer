@@ -2097,7 +2097,7 @@ fn search_history_buttons_navigate_only_when_available_in_both_search_bars() {
 }
 
 #[test]
-fn active_task_toolbar_favorite_and_background_close_do_not_select_a_task() {
+fn task_tab_favorite_and_background_close_do_not_select_a_task() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = window();
     let events = Rc::new(RefCell::new(Vec::new()));
@@ -2110,23 +2110,36 @@ fn active_task_toolbar_favorite_and_background_close_do_not_select_a_task() {
     let observed = events.clone();
     ui.on_search_task_closed(move |id| observed.borrow_mut().push(format!("close:{id}")));
     click(&ui, "Favorite search task: Task 0");
+    click(
+        &ui,
+        "Favorite search task: Task 1 (changed; update from saved search menu)",
+    );
     click(&ui, "Close search task: Task 1");
-    assert_eq!(&*events.borrow(), &["favorite:0", "close:1"]);
+    assert_eq!(&*events.borrow(), &["favorite:0", "favorite:1", "close:1"]);
     click(&ui, "Search task: Task 1");
-    assert_eq!(&*events.borrow(), &["favorite:0", "close:1", "select:1"]);
+    assert_eq!(
+        &*events.borrow(),
+        &["favorite:0", "favorite:1", "close:1", "select:1"]
+    );
     ui.set_active_search_task_index(1);
     settle();
-    let toolbar_favorite = ElementHandle::find_by_accessible_label(
+    let tab_favorite = ElementHandle::find_by_accessible_label(
         &ui,
         "Favorite search task: Task 1 (changed; update from saved search menu)",
     )
     .next()
     .unwrap();
-    toolbar_favorite.mock_single_click(PointerEventButton::Left);
+    tab_favorite.mock_single_click(PointerEventButton::Left);
     settle();
     assert_eq!(
         &*events.borrow(),
-        &["favorite:0", "close:1", "select:1", "favorite:1"]
+        &[
+            "favorite:0",
+            "favorite:1",
+            "close:1",
+            "select:1",
+            "favorite:1"
+        ]
     );
     ui.hide().unwrap();
 }
@@ -2200,7 +2213,7 @@ fn new_task_control_follows_tabs_and_docks_when_resizing_both_themes() {
                 .to_logical(ui.window().scale_factor())
                 .width
                 - bar.size().width;
-            let adaptive_window_width = (outside_strip + 712.0 * scale).max(1080.0 * scale);
+            let adaptive_window_width = (outside_strip + 816.0 * scale).max(1080.0 * scale);
             if scale == 1.0 {
                 snapshot_if_requested(&ui, &format!("task-add-following-{theme}"));
             }
@@ -2215,7 +2228,7 @@ fn new_task_control_follows_tabs_and_docks_when_resizing_both_themes() {
                 narrow_tab_width < wide_tab_width - 1.0,
                 "Tabs must shrink before scrolling: wide={wide_tab_width}, narrow={narrow_tab_width}, theme={theme}, scale={scale}"
             );
-            assert!(narrow_tab_width >= 144.0 * scale - 1.0);
+            assert!(narrow_tab_width >= 170.0 * scale - 1.0);
             for index in 1..4 {
                 assert!(
                     (control(&format!("Search task: Task {index}")).size().width
@@ -2236,7 +2249,7 @@ fn new_task_control_follows_tabs_and_docks_when_resizing_both_themes() {
             settle();
             let first_tab = control("Search task: Task 0");
             assert!(
-                (first_tab.size().width - 144.0 * scale).abs() < 1.0,
+                (first_tab.size().width - 170.0 * scale).abs() < 1.0,
                 "Overflow must retain readable minimum tabs, theme={theme}, scale={scale}"
             );
             let strip_id = if ui.global::<crate::Theme>().get_modern_style() {
@@ -2506,7 +2519,7 @@ fn minimum_width_tabs_keep_keywords_ahead_of_auxiliary_labels_in_both_languages(
             let close = ElementHandle::find_by_accessible_label(&ui, close_label)
                 .next()
                 .unwrap();
-            assert!((tab.size().width - 144.0).abs() < 1.0);
+            assert!((tab.size().width - 170.0).abs() < 1.0);
             assert!(keyword.size().width >= 90.0);
             assert!(keyword.absolute_position().x >= tab.absolute_position().x);
             assert!(

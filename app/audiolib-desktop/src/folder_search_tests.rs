@@ -223,11 +223,14 @@ fn child_search_navigation() {
         .unwrap();
     let engine = audiolib_audio::AudioEngine::new(PlaybackConfig::default()).unwrap();
     let ui = AppWindow::new().unwrap();
+    let mut config = AppConfig::load_in(root.join("preferences")).unwrap();
+    // The navigation checks below assert English status messages.
+    config.language = "en".into();
     let controller = Controller::new(
         &ui,
         provider.clone(),
         engine.handle(),
-        AppConfig::load_in(root.join("preferences")).unwrap(),
+        config,
         PlaybackConfig::default(),
     );
     // A validation failure must supersede both queued and already-running searches.
@@ -649,6 +652,7 @@ fn child_facet_publication() {
     controller.search_folders_computed(&ui, failed, Err("Later folder error".into()));
     controller.search_folders_computed(&ui, failed, Ok(folders("must stay hidden", 10)));
     assert_eq!(ui.get_status(), "Page failed");
+    assert!(!ui.get_folder_counts_pending());
     assert_eq!(ui.get_folders(), old_model);
     assert!(
         controller
@@ -666,10 +670,11 @@ fn child_facet_publication() {
     let facets_first = pending_publication(&controller, &ui);
     controller.search_folders_computed(&ui, facets_first, Ok(folders("facets first", 2)));
     assert_eq!(ui.get_folders(), old_model);
-    ui.set_status("Updating folders".into());
+    ui.set_status("Page is usable".into());
     controller.search_page_published(&ui, facets_first, true);
     assert_eq!(ui.get_folders(), old_model);
-    assert_eq!(ui.get_status(), "Updating folders");
+    assert!(ui.get_folder_counts_pending());
+    assert_eq!(ui.get_status(), "Page is usable");
     controller.reload_tree();
     let c = controller.clone();
     let window = ui.as_weak();
@@ -697,25 +702,28 @@ fn child_facet_publication() {
                 return;
             }
             match next.get() {
-                0 if ui.get_status().starts_with("Ready") => {
+                0 if !ui.get_folder_counts_pending() => {
                     assert_eq!(ui.get_folders().row_count(), 1);
                     assert_eq!(ui.get_folders().row_data(0).unwrap().path, "facets first");
                     assert_eq!(ui.get_folders().row_data(0).unwrap().count, "2");
                     let old_model = ui.get_folders();
                     let page_first = pending_publication(&c, &ui);
-                    ui.set_status("Updating folders".into());
+                    ui.set_status("Page is usable".into());
                     c.search_page_published(&ui, page_first, true);
                     assert_eq!(ui.get_folders(), old_model);
-                    assert_eq!(ui.get_status(), "Updating folders");
+                    assert!(ui.get_folder_counts_pending());
+                    assert_eq!(ui.get_status(), "Page is usable");
                     // Failure from the previous query cannot overwrite this query.
                     c.search_folders_computed(&ui, facets_first, Err("Stale failed facets".into()));
-                    assert_eq!(ui.get_status(), "Updating folders");
+                    assert!(ui.get_folder_counts_pending());
+                    assert_eq!(ui.get_status(), "Page is usable");
                     c.search_folders_computed(&ui, page_first, Ok(folders("page first", 3)));
                     assert_eq!(ui.get_folders(), old_model);
-                    assert_eq!(ui.get_status(), "Updating folders");
+                    assert!(ui.get_folder_counts_pending());
+                    assert_eq!(ui.get_status(), "Page is usable");
                     next.set(1);
                 }
-                1 if ui.get_status().starts_with("Ready") => {
+                1 if !ui.get_folder_counts_pending() => {
                     assert_eq!(ui.get_folders().row_data(0).unwrap().path, "page first");
                     assert_eq!(ui.get_folders().row_data(0).unwrap().count, "3");
                     assert!(
@@ -778,7 +786,7 @@ fn child_facet_publication() {
                     c.search_page_published(&ui, range_generation.get(), true);
                     next.set(4);
                 }
-                4 if ui.get_status().starts_with("Ready") => {
+                4 if !ui.get_folder_counts_pending() => {
                     assert!(!ui.get_searching());
                     assert_eq!(
                         c.search_generation.load(Ordering::Acquire),
@@ -994,7 +1002,9 @@ fn child_million_record_gui_navigation_sample() {
                 slint::quit_event_loop().unwrap();
                 return;
             }
-            let ready = !ui.get_searching() && ui.get_status().starts_with("Ready");
+            let ready = !ui.get_searching()
+                && !ui.get_folder_counts_pending()
+                && ui.get_status().starts_with("Ready");
             match next_stage.get() {
                 0 if ready
                     && ui.get_folders().row_count() > 0
