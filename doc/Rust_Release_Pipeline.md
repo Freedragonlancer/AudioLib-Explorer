@@ -124,6 +124,8 @@ GitHub 阶段可声明 `github_auth: true`：依次使用已有 token 环境、`
 - 源码、执行器、命令脚本、参数、依赖收据、工具版本或已声明环境变化，都会使相关阶段失效。标准的目标编译器参数、Cargo target/profile、SDK 和链接环境自动计入身份；工具版本在仓库目录中查询，匹配实际 Rust 工具链选择。外部 SDK/工具文件变化时也应使用新运行目录；额外相关环境键可放入 `environment_variables`，工具版本放入 `environment_tools`。
 - `reuse: never` 用于必须重新读取的在线状态或外部可变材料（如 registry notice）。状态、日志、命令参数文件均私有；token、密码和服务器地址通过本机环境提供，不写入计划或发布记录。
 
+服务端计划在 `accept` 阶段把原生验收 JSON 写到 `${RunDirectory}/server-validation.json`，并将文件声明为阶段产物。读取收据前确认对应运行的 `accept` 状态为 `passed` 或 `reused`。独立调用 `validate-server-package.ps1` 时可用 `-ReportPath` 选择工作区 `.rust-validation/` 下的 `server-validation.json`，原有 stdout JSON 仍可用。
+
 Docker 继续通过 `package-server-docker.ps1` / `validate-server-docker.ps1` 消费已验收的 Linux 包。其本机路径与 fixture 需明确选择，可按上面的阶段格式放进私有计划；不要把 Docker 验收与原生包验收互相替代。不同本机平台各调用一条计划，执行器不假设 SSH 主机、生产配置或共享容器。
 
 ## 多平台协调与失败恢复
@@ -164,16 +166,23 @@ Docker 继续通过 `package-server-docker.ps1` / `validate-server-docker.ps1` �
 
 `--resume-draft` 只处理已存在的同标签草稿，默认保留草稿状态；`--publish` 必须与它同用，只有完整资产核验通过后才发布。它们不授权一次实际发布操作，发布权限仍来自当前任务。先确认原上传进程或会话已经结束，避免两个上传者竞争同一资产；该入口不声称提供跨主机分布式锁。
 
-以下 Bash 示例中的 `tag`、`notes` 和 `assets` 分别指已有标签、原审定正文和全部已验收正式文件路径数组：
+冻结正式标签和发布正文后，创建一次草稿。每份正式包通过对应平台验收后，把归档和 `.sha256` 加到同一上传者保留的路径数组 `staged_assets` 中。数组包含本批及之前各批的全部文件，使脚本能核对草稿上的每个已有资产。Docker 归档可在对应镜像运行验收通过后上传。
 
 ```bash
-# 只读预览会查询草稿与资产；与完全离线的创建预览不同。
-tools/release-create.sh "$tag" --resume-draft --dry-run --notes-file "$notes" "${assets[@]}"
-# 仅补传缺失文件，保持草稿。
-tools/release-create.sh "$tag" --resume-draft --notes-file "$notes" "${assets[@]}"
-# 完整核验后显式发布；稳定版/beta/rc 的 Latest、预发布规则保持。
-tools/release-create.sh "$tag" --resume-draft --publish --notes-file "$notes" "${assets[@]}"
+# 创建空草稿，后续各批使用同一 tag 和原审定正文。
+tools/release-create.sh "$tag" --draft --notes-file "$notes"
+staged_assets=()
+
+# 每份包验收通过后累积其路径。预览查询草稿，且不会上传。
+staged_assets+=("$archive" "$archive.sha256")
+tools/release-create.sh "$tag" --resume-draft --stage-pairs --dry-run --notes-file "$notes" -- "${staged_assets[@]}"
+tools/release-create.sh "$tag" --resume-draft --stage-pairs --notes-file "$notes" -- "${staged_assets[@]}"
+
+# 资产齐全后，核验完整集合并显式发布。
+tools/release-create.sh "$tag" --resume-draft --publish --notes-file "$notes" -- "${staged_assets[@]}"
 ```
+
+`--stage-pairs` 仅处理草稿。每次输入都要包含完整的归档与 SHA256 文件对。若已上传其中一件后传输失败，待原进程结束，用同一组文件重跑该批，已匹配的文件会跳过。草稿出现状态不完整的资产记录或摘要冲突时，脚本停止，先检查原上传状态。
 
 续传使用 `gh` 的只读 JSON 查询、原生 SHA256 工具和 PowerShell 7 的离线资产合同，不增加 Python 或独立 jq 依赖。合同清单来自唯一入口：
 
@@ -181,7 +190,7 @@ tools/release-create.sh "$tag" --resume-draft --publish --notes-file "$notes" "$
 pwsh tools/verify-release-assets.ps1 -Tag v0.9.6 -ListExpectedAssets
 ```
 
-清单逐行返回归档及 `.sha256` 的精确文件名，不读取 Release 元数据、不连接 GitHub。续传必须提供该标签合同要求的完整集合；缺项、额外项、重名、既有正式 Release、源码 tag object、标题、预发布标记或审定正文不一致均拒绝。已有上传资产只有名称、状态、大小与服务器 SHA256 全部匹配时才跳过；缺失资产才上传，缺少可信 digest 或任何冲突会停止，不下载大包、不覆盖或删除资产。发布前再次读取并核验草稿与完整资产集；失败后保留已完成资产，下一次同一续传命令继续处理缺项。
+清单逐行返回归档及 `.sha256` 的精确文件名，不读取 Release 元数据、不连接 GitHub。普通续传与正式发布要求合同完整集合，分批续传使用合同中的完整文件对。额外项、重名、既有正式 Release、源码 tag object、标题、预发布标记或审定正文不一致均拒绝。已有上传资产只有名称、状态、大小与服务器 SHA256 全部匹配时才跳过；缺失资产才上传，缺少可信 digest 或任何冲突会停止，不下载大包、不覆盖或删除资产。发布前再次读取并核验草稿与完整资产集；失败后保留已完成资产，下一次同一续传命令继续处理缺项。
 
 这些检查不替代原生 payload 验收。恢复后的正式 Release 仍需做线上元数据/摘要核验和固定安装同步；同版本资产替换仍须单独授权。
 
