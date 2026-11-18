@@ -2,18 +2,21 @@
 import { Theme } from "theme.slint";
 
 component TaskTabIcon inherits Rectangle {
-    in property <string> text;
+    in property <image> icon;
     in property <string> label;
     in property <bool> enabled: true;
-    in property <bool> lit: false;
     callback clicked();
     width: 26px * Theme.ui-scale; height: 28px * Theme.ui-scale;
-    border-radius: 4px * Theme.ui-scale; background: hit.has-hover ? Theme.hover : transparent;
+    border-radius: 4px * Theme.ui-scale; background: Theme.interactive-fill(false, hit.has-hover, hit.pressed, transparent);
     border-width: icon-focus.has-focus ? 1px : 0px; border-color: Theme.accent;
     accessible-role: button; accessible-label: root.label; accessible-enabled: root.enabled;
     accessible-action-default => { if root.enabled { root.clicked(); } }
     forward-focus: icon-focus;
-    Text { text: root.text; color: root.lit ? Theme.text(1, 6, Theme.accent) : Theme.text(1, 1, Theme.dim); font-size: Theme.font(16); horizontal-alignment: center; vertical-alignment: center; }
+    if root.icon.width > 0: Image {
+        width: 13px * Theme.ui-scale; height: self.width; source: root.icon;
+        colorize: hit.has-hover || icon-focus.has-focus ? Theme.ink : Theme.dim; accessible-role: none;
+    }
+    opacity: root.enabled ? 1 : 0.45;
     icon-focus := FocusScope {
         enabled: root.enabled; focus-on-click: false;
         key-pressed(event) => { if event.text == " " || event.text == Key.Return { root.clicked(); return accept; } reject }
@@ -22,7 +25,7 @@ component TaskTabIcon inherits Rectangle {
 }
 
 // Document-shaped tabs are distinct from the recessed list-header switches.
-// Closing a background task never selects it; starring lives above the sound list.
+// Closing a background task never selects it; starring targets the task identified by this tab.
 export component SearchTaskTab inherits Rectangle {
     in property <string> name;
     in property <string> keywords;
@@ -38,12 +41,14 @@ export component SearchTaskTab inherits Rectangle {
     in property <bool> editable: true;
     in property <length> tooltip-width: 560px * Theme.ui-scale;
     private property <string> tooltip-text: (root.summary != "" ? root.summary : root.name) + (root.modified ? (root.chinese ? "\n当前条件尚未更新到收藏" : "\nCurrent conditions have not been saved to the favorite") : "");
+    in property <bool> favorite-enabled: true;
+    callback favorite-toggled();
     callback selected();
     callback closed();
     callback rename-requested();
     callback context-requested(Point);
     height: (root.compact ? 32px : 36px) * Theme.ui-scale;
-    min-width: 144px * Theme.ui-scale;
+    min-width: 170px * Theme.ui-scale;
     preferred-width: 200px * Theme.ui-scale;
     accessible-role: tab;
     accessible-label: (root.chinese ? "搜索任务：" : "Search task: ") + root.name;
@@ -55,7 +60,7 @@ export component SearchTaskTab inherits Rectangle {
     forward-focus: task-focus;
     background: Theme.modern-style
         ? (root.active ? Theme.tab-surface : (task-hit.has-hover ? Theme.control-surface : Theme.trough))
-        : (root.active ? Theme.panel : (task-hit.has-hover ? Theme.raised : Theme.trough));
+        : Theme.interactive-fill(root.active, task-hit.has-hover, task-hit.pressed, Theme.trough);
     border-top-left-radius: (Theme.modern-style ? 5px : 7px) * Theme.ui-scale;
     border-top-right-radius: (Theme.modern-style ? 5px : 7px) * Theme.ui-scale;
     border-width: task-focus.has-focus ? 1px : 0px;
@@ -71,13 +76,13 @@ export component SearchTaskTab inherits Rectangle {
         }
     }
     if !root.searched: Text {
-        x: 12px * Theme.ui-scale; width: max(0px, parent.width - 52px * Theme.ui-scale); height: parent.height;
+        x: 12px * Theme.ui-scale; width: max(0px, parent.width - 78px * Theme.ui-scale); height: parent.height;
         text: root.name; color: Theme.text(1, !root.enabled ? 3 : task-hit.pressed ? 14 : task-hit.has-hover ? 4 : root.active ? 5 : 1, root.active ? Theme.text(1, 0, Theme.ink) : Theme.text(1, 1, Theme.dim)); font-size: Theme.font(12);
         font-weight: root.active ? 600 : 400; vertical-alignment: center; overflow: elide;
     }
     if root.searched: Rectangle {
         x: 12px * Theme.ui-scale; y: 3px * Theme.ui-scale;
-        width: max(0px, parent.width - 52px * Theme.ui-scale); height: parent.height - 6px * Theme.ui-scale;
+        width: max(0px, parent.width - 78px * Theme.ui-scale); height: parent.height - 6px * Theme.ui-scale;
         clip: true;
         // Keep tinted keywords and the > directory together at the left edge.
         // Directory context yields to long keywords; the tooltip stays complete.
@@ -108,7 +113,7 @@ export component SearchTaskTab inherits Rectangle {
         }
     }
     if root.modified: Rectangle {
-        x: parent.width - 38px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+        x: parent.width - 64px * Theme.ui-scale; y: (parent.height - self.height) / 2;
         width: 4px * Theme.ui-scale; height: 4px * Theme.ui-scale; border-radius: 2px * Theme.ui-scale; background: Theme.accent;
     }
     task-focus := FocusScope {
@@ -120,7 +125,7 @@ export component SearchTaskTab inherits Rectangle {
         }
     }
     task-hit := TouchArea {
-        width: max(0px, parent.width - 32px * Theme.ui-scale); enabled: root.enabled; mouse-cursor: pointer;
+        width: max(0px, parent.width - 58px * Theme.ui-scale); enabled: root.enabled; mouse-cursor: pointer;
         clicked => { root.selected(); }
         double-clicked => { if root.editable { root.rename-requested(); } }
         pointer-event(event) => {
@@ -142,9 +147,24 @@ export component SearchTaskTab inherits Rectangle {
             }
         }
     }
+    task-favorite := TaskTabIcon {
+        x: parent.width - 57px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+        enabled: root.enabled && root.favorite-enabled;
+        accessible-checkable: true; accessible-checked: root.favorite;
+        Image { width: 15px * Theme.ui-scale; height: 15px * Theme.ui-scale;
+            source: Theme.modern-style
+                ? (root.favorite ? @image-url("icons/task-star-filled.svg") : @image-url("icons/task-star.svg"))
+                : (root.favorite ? @image-url("icons/bookmark-filled.svg") : @image-url("icons/bookmark.svg"));
+            colorize: root.favorite ? Theme.text(1, 6, Theme.accent) : Theme.text(1, 1, Theme.dim);
+            image-fit: contain; accessible-role: none;
+        }
+        label: (root.favorite ? (root.chinese ? "取消搜索任务收藏：" : "Unfavorite search task: ") : (root.chinese ? "收藏搜索任务：" : "Favorite search task: ")) + root.name + (root.modified ? (root.chinese ? "（条件已修改，右键收藏可更新）" : " (changed; update from saved search menu)") : "");
+        Tooltip { text: @markdown("\{task-favorite.label}"); }
+        clicked => { root.favorite-toggled(); }
+    }
     TaskTabIcon {
         x: parent.width - 30px * Theme.ui-scale; y: (parent.height - self.height) / 2;
-        text: "×"; enabled: root.enabled && root.editable;
+        icon: @image-url("icons/close.svg"); enabled: root.enabled && root.editable;
         label: (root.chinese ? "关闭搜索任务：" : "Close search task: ") + root.name;
         clicked => { root.closed(); }
     }

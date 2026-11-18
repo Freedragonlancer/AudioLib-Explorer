@@ -41,34 +41,34 @@ pub(crate) struct Palette {
     pub overlay: u32,
 }
 
-/// The original soft charcoal palette; identical to the defaults in `ui/theme.slint`.
+/// Classic graphite surfaces and amber search accents; identical to the defaults in `ui/theme.slint`.
 pub(crate) const DEFAULT_PALETTE: Palette = Palette {
-    bg: 0xff18_1b20,
-    panel: 0xff20_242a,
-    raised: 0xff2a_3037,
-    hover: 0xff35_3d45,
-    border: 0xff35_3d45,
-    strong_border: 0xff69_7581,
-    ink: 0xffd9_dee3,
-    dim: 0xffaa_b2bd,
-    muted: 0xff95_a0ac,
-    accent: 0xff8f_aea6,
-    accent_hover: 0xffa8_c3bb,
-    mint: 0xff8f_aea6,
-    apricot: 0xffc3_b48e,
-    coral: 0xffcf_9696,
-    on_accent: 0xff20_2b28,
-    selected: 0xff2b_3a38,
-    checked: 0xff35_4744,
-    alternate: 0xff22_282e,
-    warning: 0xffc3_b48e,
-    trough: 0xff15_181c,
-    segment: 0xff3a_434c,
-    danger: 0xffcf_9696,
-    danger_surface: 0xff3a_2a2d,
-    player: 0xff23_2a30,
-    player_border: 0xff46_5059,
-    tooltip: 0xff14_171c,
+    bg: 0xff19_1a1b,
+    panel: 0xff25_2627,
+    raised: 0xff30_3132,
+    hover: 0xff3c_3d3e,
+    border: 0xff39_3a3b,
+    strong_border: 0xff85_8582,
+    ink: 0xfff2_f0eb,
+    dim: 0xffc4_c2bc,
+    muted: 0xffa9_a9a4,
+    accent: 0xffed_b85d,
+    accent_hover: 0xffff_d28a,
+    mint: 0xff96_d1ab,
+    apricot: 0xffe6_c68d,
+    coral: 0xffec_9d90,
+    on_accent: 0xff25_1e12,
+    selected: 0xff41_4343,
+    checked: 0xff35_3737,
+    alternate: 0xff29_2a2b,
+    warning: 0xffff_ce86,
+    trough: 0xff1a_1b1c,
+    segment: 0xff45_4746,
+    danger: 0xfff3_a49c,
+    danger_surface: 0xff43_2b29,
+    player: 0xff21_2223,
+    player_border: 0xff44_4544,
+    tooltip: 0xff18_191a,
     overlay: 0xa800_0000,
 };
 
@@ -267,10 +267,10 @@ fn recommended_themes() -> ModelRc<crate::ThemePreview> {
         ),
         (
             DEFAULT_THEME,
-            "Original default",
-            "原始默认",
-            "Original colors and layout",
-            "保留最初的配色与布局",
+            "Classic",
+            "经典默认",
+            "Graphite and amber",
+            "石墨灰底色，琥珀色搜索与焦点",
         ),
     ]
     .into_iter()
@@ -326,8 +326,7 @@ pub(crate) fn apply_theme(ui: &AppWindow, id: &str) {
     let index = theme_index(&id);
     ui.set_theme_index(index);
     let entry = &BUILTIN_THEMES[index as usize];
-    // A new design gets its own palette and presentation. Preserve the original
-    // default, while spectral frequency colors remain independent audio data.
+    // Spectral frequency colors remain independent of the workbench palette.
     let palette = palette_for(entry.id);
     let theme = ui.global::<crate::Theme>();
     let modern_style = entry.workbench_style == WorkbenchStyle::Studio;

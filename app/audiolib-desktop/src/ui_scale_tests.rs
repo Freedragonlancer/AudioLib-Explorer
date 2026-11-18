@@ -125,7 +125,9 @@ fn table_column_widths_scale_proportionally_with_ui_scale() {
     init_software_backend();
     let total_at = |scale: f32| {
         let ui = AppWindow::new().unwrap();
-        ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+        // Keep the same workbench breakpoint while varying the UI scale.
+        ui.window()
+            .set_size(slint::LogicalSize::new(1440.0 * scale, 900.0 * scale));
         ui.global::<crate::Theme>().set_ui_scale(scale);
         ui.set_table_name_width(300.0);
         ui.set_table_tags_width(140.0);
@@ -233,6 +235,112 @@ fn ai_skill_settings_render_in_both_languages_and_compact_windows() {
                     if chinese { "cn" } else { "en" }
                 ),
             );
+            ui.hide().unwrap();
+        }
+    }
+}
+
+#[test]
+fn openai_official_form_is_readable_in_both_languages_and_scales() {
+    use i_slint_backend_testing::ElementHandle;
+    use slint::platform::WindowEvent;
+
+    init_software_backend();
+    for chinese in [false, true] {
+        for scale in [1.0, 2.0] {
+            let ui = AppWindow::new().unwrap();
+            ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+            crate::theme::apply_theme(&ui, "default-v2");
+            ui.global::<crate::Theme>().set_ui_scale(scale);
+            ui.set_chinese(chinese);
+            ui.set_ai_visible(true);
+            ui.set_ai_collapsed(false);
+            ui.set_ai_settings(true);
+            ui.set_ai_settings_page(0);
+            ui.set_ai_providers(ModelRc::new(VecModel::from(vec![
+                if chinese {
+                    "本地词表（离线）"
+                } else {
+                    "Local reference (offline)"
+                }
+                .into(),
+                if chinese { "未保存" } else { "Unsaved" }.into(),
+            ])));
+            ui.set_ai_provider_index(1);
+            ui.set_ai_auto_name("OpenAI Official 1".into());
+            ui.set_ai_dirty(true);
+            ui.set_ai_protocol(8);
+            ui.set_ai_endpoint(
+                audiolib_ai::config::Protocol::OpenAiOfficial
+                    .default_url()
+                    .into(),
+            );
+            let action = std::rc::Rc::new(std::cell::Cell::new(-1));
+            let observed = action.clone();
+            ui.on_ai_action(move |kind, _| observed.set(kind));
+            ui.show().unwrap();
+            let language = if chinese { "cn" } else { "en" };
+            ui.window().take_snapshot().unwrap();
+            let selector = ElementHandle::find_by_accessible_label(
+                &ui,
+                if chinese {
+                    "AI 供应商类型"
+                } else {
+                    "AI provider type"
+                },
+            )
+            .next()
+            .unwrap();
+            assert_eq!(
+                selector.accessible_value().as_deref(),
+                Some(if chinese {
+                    "OpenAI 官方"
+                } else {
+                    "OpenAI Official"
+                })
+            );
+            // At 200% the fixed footer leaves this field below the fold. Wheel
+            // over the neutral heading above the selector, not the ComboBox.
+            let origin = selector.absolute_position();
+            let position = slint::LogicalPosition::new(origin.x + 8.0, origin.y - 12.0 * scale);
+            let mut endpoint = ElementHandle::find_by_accessible_label(&ui, "AI Base URL").next();
+            for _ in 0..12 {
+                if endpoint.is_some() {
+                    break;
+                }
+                ui.window().dispatch_event(WindowEvent::PointerScrolled {
+                    position,
+                    delta_x: 0.0,
+                    delta_y: -48.0 * scale,
+                });
+                i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+                ui.window().take_snapshot().unwrap();
+                endpoint = ElementHandle::find_by_accessible_label(&ui, "AI Base URL").next();
+            }
+            let endpoint =
+                endpoint.expect("official endpoint reachable by bounded content scrolling");
+            assert_eq!(
+                ui.get_ai_protocol(),
+                8,
+                "scrolling must not change provider"
+            );
+            assert_eq!(endpoint.accessible_enabled(), Some(false));
+            save_snapshot(
+                &ui,
+                &format!("openai-official-{language}-x{scale}-1080x700.png"),
+            );
+            let save = ElementHandle::find_by_accessible_label(
+                &ui,
+                if chinese {
+                    "保存配置"
+                } else {
+                    "Save profile"
+                },
+            )
+            .next()
+            .unwrap();
+            save.mock_single_click(slint::platform::PointerEventButton::Left);
+            assert_eq!(action.get(), 8);
             ui.hide().unwrap();
         }
     }

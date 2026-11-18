@@ -58,7 +58,8 @@ export component AiSearchAction inherits Rectangle {
         AiSearchToggle { active: root.active; enabled: root.enabled; chinese: root.chinese; toggled => { root.toggled(); } }
         submit := Rectangle {
             horizontal-stretch: 1;
-            background: hit.has-hover && self.available ? Theme.accent.brighter(0.08) : Theme.accent;
+            background: !self.available ? Theme.accent : hit.pressed ? Theme.accent.darker(0.12) : hit.has-hover ? Theme.accent-hover : Theme.accent;
+            animate background { duration: Theme.motion-fast; easing: ease-out; }
             border-radius: 4px * Theme.ui-scale;
             border-width: submit-focus.has-focus ? 2px : 0px;
             border-color: Theme.ink;
@@ -420,11 +421,13 @@ export component AiSearchPanel inherits Rectangle {
                 Text { text: root.chinese ? "配置名称" : "Profile name"; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); }
                 LineEdit { input-label: "AI profile name"; text <=> root.profile-name; enabled: !root.busy; placeholder-text: (root.chinese ? "留空自动命名：" : "Automatic name: ") + root.auto-name; edited => { root.profile-edited(); } }
                 Text { text: root.chinese ? "1 · 供应商与地址" : "1 · Provider and endpoint"; color: Theme.text(6, 6, Theme.accent); font-size: Theme.font(12); font-weight: 600; }
-                ComboBox { model: ["OpenAI compatible / Chat", "OpenAI Responses", "Anthropic Messages", "Google Gemini", "Jev TypeSafe", "OpenCode Go", root.chinese ? "DeepSeek 官方" : "DeepSeek Official", "Magpie"];
+                ComboBox { model: ["OpenAI compatible / Chat", "OpenAI Responses", "Anthropic Messages", "Google Gemini", "Jev TypeSafe", "OpenCode Go", root.chinese ? "DeepSeek 官方" : "DeepSeek Official", "Magpie", root.chinese ? "OpenAI 官方" : "OpenAI Official"];
+                    accessible-label: root.chinese ? "AI 供应商类型" : "AI provider type";
                     current-index <=> root.protocol; enabled: !root.busy; selected(value) => { root.action(12,self.current-index); }
                 }
                 Text { text: "Base URL"; color: Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); }
-                LineEdit { input-label: "AI Base URL"; text <=> root.endpoint; enabled: !root.busy; edited => { root.models = []; root.profile-edited(); } }
+                LineEdit { input-label: "AI Base URL"; text <=> root.endpoint; enabled: !root.busy && root.protocol != 8; edited => { root.models = []; root.profile-edited(); } }
+                if root.protocol == 8: Text { text: root.chinese ? "官方地址固定，使用 Responses 接口。请选择支持结构化输出的文本模型；模型列表可见不代表测试调用一定可用。" : "Fixed official endpoint using Responses. Choose a text model with structured output support; a listed model may not support the test call."; color: Theme.text(6, 2, Theme.muted); font-size: Theme.font(11); wrap: word-wrap; }
                 Text { text: root.chinese ? "2 · API Key" : "2 · API key"; color: Theme.text(6, 6, Theme.accent); font-size: Theme.font(12); font-weight: 600; }
                 Text { text: root.clear-key ? (root.chinese ? "保存后将移除密钥" : "Key will be removed when saved") : root.key != "" ? (root.chinese ? "新密钥尚未保存" : "New key has not been saved") : root.key-reusable ? (root.chinese ? "密钥已保存（隐藏显示），留空即可复用" : "Key saved (hidden); leave blank to reuse") : root.saved-key ? (root.chinese ? "地址或协议已更改，请重新填写密钥" : "Endpoint or protocol changed; re-enter the key") : (root.chinese ? "尚未保存密钥" : "No saved key"); color: root.key-reusable && !root.clear-key ? Theme.text(6, 6, Theme.accent) : Theme.text(6, 1, Theme.dim); font-size: Theme.font(11); wrap: word-wrap; }
                 LineEdit { input-label: "AI API Key"; text <=> root.key; input-type: password; enabled: !root.busy; placeholder-text: root.key-reusable ? (root.chinese ? "已保存；填写可替换" : "Saved; enter a replacement") : (root.chinese ? "粘贴供应商 API Key" : "Paste the provider API key"); edited => { root.models = []; root.profile-edited(); } }

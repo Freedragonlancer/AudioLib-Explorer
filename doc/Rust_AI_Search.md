@@ -45,6 +45,7 @@ Skill 页底部的“打开本地文件夹”可一键在资源管理器／Finde
 
 | 协议 | Base URL 示例 | 处理方式 |
 | --- | --- | --- |
+| OpenAI 官方 | 固定 `https://api.openai.com/v1` | `/models` 获取账户可见模型；`/responses`，严格 JSON Schema，`store=false` |
 | OpenAI compatible / Chat | `https://api.openai.com/v1`，或兼容供应商自己的地址 | `/chat/completions`，JSON mode，完整输出后校验 |
 | OpenAI Responses | `https://api.openai.com/v1` | `/responses`，严格 JSON Schema，`store=false` |
 | Anthropic Messages | `https://api.anthropic.com/v1` | `/messages`，强制 `emit_search_plan` 结构化工具输出 |
@@ -55,6 +56,10 @@ Skill 页底部的“打开本地文件夹”可一键在资源管理器／Finde
 | Magpie | `http://127.0.0.1:3425/v1` | 本地模型网关；`/models` 发现当前模型，`/chat/completions` 使用 JSON mode，保留完整模型和路由组 ID |
 
 模型列表来自供应商实时返回，允许手填模型 ID；不把研究时价格、型号或账户余额硬编码。兼容接口需支持 JSON mode；不兼容时明确返回错误，没有无声降级或换供应商。普通产品订阅不自动等同于 API 权限。
+
+“OpenAI 官方”入口在 `v1.0.3` 发布后新增，已发布的 `v1.0.3` 仍使用原有两种 OpenAI 接口选项。新入口使用固定官方地址和 Responses 接口。选择支持 Responses 结构化输出的文本模型；获取列表成功只证明列表请求可用，实际模型权限、输出能力及额度仍由“测试模型调用”和生成分别验证。该入口不增加输出预算、自动重试或自动更换模型。接口依据见 [Responses](https://developers.openai.com/api/docs/guides/migrate-to-responses) 和 [结构化输出](https://developers.openai.com/api/docs/guides/structured-outputs)。
+
+已有 Chat／Responses／其他供应商配置不自动转换；新增官方配置与原配置分别保存，切换协议继续要求重新输入密钥。新配置保留本机直连默认值，也可显式选择服务器转发；转发仍使用既有 `responses` 请求合同。新官方类型需要支持该入口的客户端，旧版客户端不会识别其本地配置类型；回退前应由新版客户端处理该配置并保留原文件备份。
 
 DeepSeek 接入按 [官方接入地址](https://api-docs.deepseek.com/)、[模型列表](https://api-docs.deepseek.com/api/list-models/)、[JSON 输出](https://api-docs.deepseek.com/guides/json_mode/) 和 [thinking 开关](https://api-docs.deepseek.com/guides/thinking_mode/) 实现；模型 ID 以账户实际返回的列表为准。
 

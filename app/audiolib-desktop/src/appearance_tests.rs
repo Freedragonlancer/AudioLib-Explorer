@@ -83,24 +83,13 @@ fn appearance_editor_renders_both_languages_and_reaches_preset_controls() {
                 appearance::apply(&ui, &AppearancePreferences::default());
             });
             use slint::Model;
-            reveal_settings_control(
-                &ui,
-                if chinese {
-                    "原始默认"
-                } else {
-                    "Original default"
-                },
-            );
+            reveal_settings_control(&ui, if chinese { "经典默认" } else { "Classic" });
             let original = ElementHandle::find_by_accessible_label(
                 &ui,
-                if chinese {
-                    "原始默认"
-                } else {
-                    "Original default"
-                },
+                if chinese { "经典默认" } else { "Classic" },
             )
             .next()
-            .expect("original default preset is reachable without advanced options");
+            .expect("Classic preset is reachable without advanced options");
             assert_eq!(original.accessible_enabled(), Some(true));
             original.invoke_accessible_default_action();
             assert_eq!(crate::theme::theme_id(ui.get_theme_index()), "default");
@@ -259,12 +248,10 @@ fn recommended_theme_previews_match_distinct_readable_workbench_palettes() {
         assert!(contrast(theme.get_dim(), theme.get_hover()) >= 4.5);
         assert!(contrast(theme.get_ink(), theme.get_checked()) >= 4.5);
         assert!(contrast(theme.get_strong_border(), theme.get_panel()) >= 3.0);
+        for status in [theme.get_mint(), theme.get_warning(), theme.get_danger()] {
+            assert!(contrast(status, theme.get_hover()) >= 4.5);
+        }
         if crate::theme::theme_id(card.index) != "default" {
-            // Preserve the original palette exactly; enhanced status contrast belongs
-            // to the four redesigned themes, not a silent change to that baseline.
-            for status in [theme.get_mint(), theme.get_warning(), theme.get_danger()] {
-                assert!(contrast(status, theme.get_hover()) >= 4.5);
-            }
             assert_eq!(theme.get_workbench_backdrop_opacity(), 0.0);
             assert_eq!(theme.get_normal_canvas(), theme.get_trough());
         }

@@ -841,6 +841,7 @@ pub struct Controller {
     single_click_play_wake: Condvar,
     playback: Mutex<PlaybackConfig>,
     records: Mutex<Vec<AudioFile>>,
+    waveform_row_indices: Arc<Mutex<HashMap<i64, usize>>>,
     selected: Mutex<Option<AudioFile>>,
     metadata: Mutex<MetadataState>,
     metadata_wake: Condvar,
@@ -1175,6 +1176,7 @@ impl Controller {
             config: Arc::new(Mutex::new(config)),
             playback: Mutex::new(playback),
             records: Mutex::new(Vec::new()),
+            waveform_row_indices: Arc::default(),
             selected: Mutex::new(None),
             metadata: Mutex::new(MetadataState::default()),
             metadata_wake: Condvar::new(),
@@ -2397,6 +2399,9 @@ impl Controller {
     }
 
     fn invalidate_library_reads(&self) {
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_folder_counts_pending(false);
+        }
         self.clear_remote_audition_status();
         self.cancel_all_slices();
         self.cancel_artwork();
@@ -3105,7 +3110,7 @@ impl Controller {
         *self.latest_selection.lock().unwrap() = None;
         self.metadata.lock().unwrap().reset_library();
         *self.selected.lock().unwrap() = None;
-        self.records.lock().unwrap().clear();
+        self.replace_result_records(Vec::new());
         self.multi_selection.lock().unwrap().clear();
         *self.selection_anchor.lock().unwrap() = None;
         if retain_navigation {
@@ -3822,7 +3827,7 @@ impl Controller {
                                         row
                                     })
                                     .collect::<Vec<_>>();
-                                *c2.records.lock().unwrap() = page.results;
+                                c2.replace_result_records(page.results);
                                 let rows = c2.decorate_list_waveforms(rows);
                                 let selected_id = ui.get_selected_id();
                                 let selected_row =
@@ -3892,12 +3897,12 @@ impl Controller {
                                 ui.set_result_summary(
                                     if chinese {
                                         format!(
-                                            "{shown} / {} 条 · {:.1} ms",
+                                            "{shown} / {} 条 · 查询 {:.1} ms",
                                             total, page.execution_time_ms
                                         )
                                     } else {
                                         format!(
-                                            "{shown} of {} sounds · {:.1} ms",
+                                            "{shown} of {} sounds · query {:.1} ms",
                                             total, page.execution_time_ms
                                         )
                                     }
@@ -3911,15 +3916,7 @@ impl Controller {
                                     .and_then(|state| state.retained_status.clone());
                                 ui.set_status(
                                     retained_status
-                                        .unwrap_or_else(|| {
-                                            if chinese {
-                                                "正在更新目录…"
-                                            } else {
-                                                "Updating folders…"
-                                            }
-                                            .into()
-                                        })
-                                        .into(),
+                                        .map_or_else(|| c2.localized("就绪", "Ready"), Into::into),
                                 );
                                 if crate::gui_search_benchmark::enabled() {
                                     let ids = c2
@@ -4519,6 +4516,7 @@ impl Controller {
             .unwrap()
             .as_ref()
             .and_then(|coverage| coverage.revision);
+        ui.set_folder_counts_pending(false);
         self.admit_displayed_window_reads();
         self.search_task_folders_ready(revision);
         self.search_task_page_ready(ui, revision);
@@ -4575,9 +4573,13 @@ impl Controller {
                 SearchPagePhase::Failed
             };
             if !succeeded {
+                ui.set_folder_counts_pending(false);
                 state.pending_folders = None;
                 state.expected_folders = None;
                 return;
+            }
+            if !state.result_window {
+                ui.set_folder_counts_pending(!state.model_published);
             }
             let folders = state.pending_folders.take();
             let finish_tree = state.result_window
@@ -4647,7 +4649,10 @@ impl Controller {
                 self.tree.lock().unwrap().matches = folders;
                 self.reload_tree();
             }
-            Err(error) => ui.set_status(error.into()),
+            Err(error) => {
+                ui.set_folder_counts_pending(false);
+                ui.set_status(error.into());
+            }
         }
     }
 
@@ -4924,6 +4929,7 @@ impl Controller {
         let generation = self.search_generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.tree_generation.fetch_add(1, Ordering::AcqRel);
         ui.set_searching(false);
+        ui.set_folder_counts_pending(false);
         self.cancel_deferred_task_search();
         let mut request = self.request.lock().unwrap().clone();
         self.result_pages
@@ -5319,7 +5325,7 @@ impl Controller {
                 if let Some(generation) = ready_generation
                     && c2.search_generation.load(Ordering::Acquire) == generation
                 {
-                    let ready_status = {
+                    let newly_published = {
                         let mut publication = c2.search_publication.lock().unwrap();
                         if let Some(state) = publication.as_mut().filter(|state| {
                             state.generation == generation
@@ -5327,26 +5333,15 @@ impl Controller {
                                 && !state.model_published
                         }) {
                             state.model_published = true;
-                            Some(state.retained_status.clone())
+                            true
                         } else {
-                            None
+                            false
                         }
                     };
-                    if let Some(retained_status) = ready_status {
+                    if newly_published {
+                        ui.set_folder_counts_pending(false);
                         ui.set_searching(false);
                         c2.search_task_directory_ready(&ui);
-                        ui.set_status(
-                            retained_status
-                                .unwrap_or_else(|| {
-                                    if c2.chinese.load(Ordering::Acquire) {
-                                        "就绪 · 选择声音查看 Metadata"
-                                    } else {
-                                        "Ready · Select a sound for Metadata"
-                                    }
-                                    .into()
-                                })
-                                .into(),
-                        );
                         if crate::gui_search_benchmark::enabled() {
                             let folders = c2.tree.lock().unwrap().matches.clone();
                             crate::gui_search_benchmark::folders_published(
@@ -7346,25 +7341,22 @@ impl Controller {
         }
     }
 
-    /// The result table shows rows `first .. first + count`: ask for their list
-    /// Waveforms, then one screen below and above. Cheap; runs on the event loop.
-    fn request_list_waveforms(&self, first: i32, count: i32) {
-        let ids: Vec<i64> = self
-            .records
-            .lock()
-            .unwrap()
+    /// Install result order and its lookup for asynchronous Waveform deliveries.
+    fn replace_result_records(&self, records: Vec<AudioFile>) {
+        *self.waveform_row_indices.lock().unwrap() = records
             .iter()
-            .map(|file| file.id)
+            .enumerate()
+            .map(|(index, file)| (file.id, index))
             .collect();
+        *self.records.lock().unwrap() = records;
+    }
+
+    /// Request visible Waveforms first, then one screen below and above.
+    fn request_list_waveforms(&self, first: i32, count: i32) {
         let first = usize::try_from(first).unwrap_or(0);
-        // A server window reported after the model shrank must not retarget local rows.
-        if ids.is_empty() || first >= ids.len() {
-            self.list_waveforms.set_window(Vec::new(), 0);
-            return;
-        }
         let count = usize::try_from(count).unwrap_or(0).max(1);
-        self.list_waveforms
-            .set_window(window_ids(&ids, first, count), count);
+        let ids = window_ids(&self.records.lock().unwrap(), first, count, |file| file.id);
+        self.list_waveforms.set_window(ids, count);
     }
 
     /// Keep already known list Waveforms on rows being (re)published.
@@ -8747,21 +8739,22 @@ fn apply_list_waveform(row: &mut AudioRow, cell: &ListWaveformCell, scale: f32) 
 }
 
 /// Publish worker results into the matching rows of the current model.
-fn publish_list_waveforms(ui: &AppWindow, cells: Vec<(i64, ListWaveformCell)>) {
+fn publish_list_waveforms(
+    ui: &AppWindow,
+    indices: &HashMap<i64, usize>,
+    cells: Vec<(i64, ListWaveformCell)>,
+) {
     let rows = ui.get_rows();
     let Some(model) = rows.as_any().downcast_ref::<VecModel<AudioRow>>() else {
         return;
     };
     let scale = ui.window().scale_factor();
-    let cells: HashMap<String, ListWaveformCell> = cells
-        .into_iter()
-        .map(|(id, cell)| (id.to_string(), cell))
-        .collect();
-    for index in 0..model.row_count() {
-        if let Some(mut row) = model.row_data(index)
-            && let Some(cell) = cells.get(row.id.as_str())
+    for (id, cell) in cells {
+        if let Some(&index) = indices.get(&id)
+            && let Some(mut row) = model.row_data(index)
+            && row.id.as_str().parse::<i64>() == Ok(id)
         {
-            apply_list_waveform(&mut row, cell, scale);
+            apply_list_waveform(&mut row, &cell, scale);
             model.set_row_data(index, row);
         }
     }
@@ -8792,9 +8785,10 @@ impl ListWaveformHost for Controller {
     }
     fn deliver_list_waveforms(&self, generation: u64, cells: Vec<(i64, ListWaveformCell)>) {
         let service = self.list_waveforms.clone();
+        let indices = self.waveform_row_indices.clone();
         post(self.ui.clone(), move |ui| {
             if service.generation() == generation {
-                publish_list_waveforms(&ui, cells);
+                publish_list_waveforms(&ui, &indices.lock().unwrap(), cells);
             }
         });
     }

@@ -8,6 +8,98 @@ use std::{cell::Cell, rc::Rc};
 const ROOT_ENV: &str = "AUDIOLIB_TABLE_TEST_ROOT";
 
 #[test]
+fn waveform_batches_only_update_matching_result_ids() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    let rows: Vec<_> = [18, 7, 91]
+        .iter()
+        .map(|id| AudioRow {
+            id: id.to_string().into(),
+            ..Default::default()
+        })
+        .collect();
+    ui.set_rows(ModelRc::new(VecModel::from(rows)));
+    // One matching ID, one position reassigned on navigation, and one absent ID.
+    let indices = HashMap::from([(7, 1), (21, 0)]);
+    let cells = [7, 21, 44].map(|id| (id, ListWaveformCell::Unavailable));
+    publish_list_waveforms(&ui, &indices, cells.into());
+    assert_eq!(
+        ui.get_rows()
+            .iter()
+            .map(|row| row.wave_state)
+            .collect::<Vec<_>>(),
+        [0, 3, 0]
+    );
+}
+
+#[test]
+#[ignore = "explicit UI-thread thumbnail publication timing; excludes decoding and screen presentation"]
+fn measure_result_waveform_publication() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    let waveform = audiolib_core::ListWaveform::new(512, [-16384, 16384].repeat(128)).unwrap();
+    for size in [200, 1000] {
+        let rows = (0..size)
+            .map(|id| AudioRow {
+                id: id.to_string().into(),
+                name: format!("Sound-{id}.wav").into(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let indices = (0..size).map(|index| (index as i64, index)).collect();
+        ui.set_rows(ModelRc::new(VecModel::from(rows)));
+        for count in [1, 32] {
+            let mut samples = Vec::new();
+            for _ in 0..101 {
+                let cells = (size - count..size)
+                    .map(|id| (id as i64, ListWaveformCell::Ready(waveform.clone())))
+                    .collect();
+                let start = std::time::Instant::now();
+                publish_list_waveforms(&ui, &indices, cells);
+                samples.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            let first = samples.remove(0);
+            samples.sort_by(f64::total_cmp);
+            eprintln!(
+                "rows={size} cells={count} first_ms={first:.3} warm_p50_ms={:.3} warm_p95_ms={:.3}",
+                samples[49], samples[94]
+            );
+        }
+    }
+}
+
+#[test]
+fn compact_results_keep_filename_and_duration_inside_both_workbenches() {
+    i_slint_backend_testing::init_no_event_loop();
+    for (theme, prefix) in [("default", ""), ("studio", "studio-")] {
+        let ui = AppWindow::new().unwrap();
+        crate::theme::apply_theme(&ui, theme);
+        ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+        ui.set_rows(ModelRc::new(VecModel::from(vec![AudioRow {
+            name: "Distant pass.wav".into(),
+            duration: "12.34s".into(),
+            duration_clock: "00:12.340".into(),
+            ..Default::default()
+        }])));
+        ui.show().unwrap();
+        settle();
+        let viewport = element(&ui, &format!("{prefix}result-list"));
+        let left = viewport.absolute_position().x;
+        let right = left + ui.get_table_visible_width();
+        let cell = |kind| element(&ui, &format!("{prefix}table-{kind}-cell"));
+        let name = cell("name");
+        let duration = cell("duration");
+        assert!(name.absolute_position().x >= left);
+        assert!(name.absolute_position().x + name.size().width <= duration.absolute_position().x);
+        assert!(duration.absolute_position().x + duration.size().width <= right);
+        let header = element(&ui, &format!("{prefix}table-duration-header"));
+        click(&ui, midpoint(&header));
+        assert_eq!(ui.get_sort_index(), 2);
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
 fn table_headers_sort_and_dividers_track_absolute_pointer_with_limits_and_reset() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();
