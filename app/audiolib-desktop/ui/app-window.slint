@@ -66,6 +66,7 @@ component Action inherits Rectangle {
     in property <int> text-module: 0;
     in property <string> label;
     in property <string> action-label: root.label;
+    in property <image> icon;
     in property <bool> primary: false;
     in property <bool> active: false;
     in property <bool> subtle: false;
@@ -85,11 +86,19 @@ component Action inherits Rectangle {
     accessible-action-default => { if root.enabled { root.clicked(); } }
     forward-focus: button-focus;
     border-radius: 5px * Theme.ui-scale;
-    background: root.primary ? (hit.has-hover ? Theme.accent-hover : Theme.accent) : (root.active ? Theme.selected : (hit.has-hover ? Theme.hover : (root.subtle ? transparent : Theme.raised)));
+    background: root.primary ? (hit.pressed ? Theme.accent.darker(0.12) : hit.has-hover ? Theme.accent-hover : Theme.accent)
+        : Theme.interactive-fill(root.active, hit.has-hover, hit.pressed, root.subtle ? transparent : Theme.raised);
     border-width: 1px;
-    border-color: button-focus.has-focus || root.active ? Theme.accent : (root.subtle ? transparent : Theme.border);
+    border-color: button-focus.has-focus ? Theme.accent-hover : root.active ? Theme.accent : hit.has-hover ? Theme.strong-border : (root.subtle ? transparent : Theme.border);
+    animate background, border-color { duration: Theme.motion-fast; easing: ease-out; }
     opacity: root.enabled ? 1 : 0.42;
-    Text { width: parent.width - (root.dropdown ? 18px * Theme.ui-scale : 0px); text: root.label; color: Theme.text(root.text-module, !root.enabled ? 3 : hit.pressed ? 14 : hit.has-hover ? 4 : root.primary ? 10 : root.active ? 6 : 0, root.primary ? Theme.text(root.text-module, 10, Theme.on-accent) : Theme.text(root.text-module, 0, Theme.ink)); horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(12); }
+    if root.icon.width > 0: Image {
+        width: 16px * Theme.ui-scale; height: self.width;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        source: root.icon; image-fit: contain; accessible-role: none;
+        colorize: button-focus.has-focus || hit.has-hover ? Theme.ink : Theme.dim;
+    }
+    if root.icon.width == 0: Text { width: parent.width - (root.dropdown ? 18px * Theme.ui-scale : 0px); text: root.label; color: Theme.text(root.text-module, !root.enabled ? 3 : hit.pressed ? 14 : hit.has-hover ? 4 : root.primary ? 10 : root.active ? 6 : 0, root.primary ? Theme.text(root.text-module, 10, Theme.on-accent) : Theme.text(root.text-module, 0, Theme.ink)); horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(12); }
     if root.dropdown: Image { source: @image-url("icons/chevron-down.svg"); colorize: Theme.ink; width: 10px * Theme.ui-scale; height: 6px * Theme.ui-scale; x: parent.width - 16px * Theme.ui-scale; y: (parent.height - self.height) / 2; accessible-role: none; }
     button-focus := FocusScope {
         enabled: root.enabled;
@@ -218,6 +227,7 @@ component IconSegment inherits Rectangle {
     in property <image> icon;
     in property <string> label;
     in property <string> caption;
+    in property <color> active-ink: Theme.accent;
     in property <bool> active: false;
     in property <int> count: 0;
     in property <bool> enabled: true;
@@ -233,7 +243,8 @@ component IconSegment inherits Rectangle {
     accessible-action-default => { if root.enabled { root.clicked(); } }
     forward-focus: segment-focus;
     border-radius: 5px * Theme.ui-scale;
-    background: root.active ? Theme.segment : transparent;
+    background: Theme.interactive-fill(root.active, segment-hit.has-hover, segment-hit.pressed, transparent);
+    animate background { duration: Theme.motion-fast; easing: ease-out; }
     border-width: segment-focus.has-focus ? 1px : 0px;
     border-color: Theme.accent;
     opacity: root.enabled ? 1 : 0.42;
@@ -241,7 +252,7 @@ component IconSegment inherits Rectangle {
         Image {
             y: (parent.height - self.height) / 2; width: 16px * Theme.ui-scale; height: 16px * Theme.ui-scale;
             source: root.icon; image-fit: contain; accessible-role: none;
-            colorize: root.active ? Theme.accent : (segment-hit.has-hover ? Theme.ink : Theme.muted);
+            colorize: root.active ? root.active-ink : (segment-hit.has-hover ? Theme.ink : Theme.muted);
         }
         caption-text := Text { visible: root.caption != ""; text: root.caption; color: Theme.text(0, root.active ? 0 : 1, root.active ? Theme.ink : Theme.dim); font-size: Theme.font(11); vertical-alignment: center; }
         if root.count > 0: Text { text: root.count; color: Theme.text(0, 6, Theme.accent); font-size: Theme.font(11); font-weight: 700; vertical-alignment: center; }
@@ -275,7 +286,8 @@ component SegmentTab inherits Rectangle {
     accessible-action-default => { root.clicked(); }
     forward-focus: tab-focus;
     border-radius: 6px * Theme.ui-scale;
-    background: root.active ? Theme.segment : transparent;
+    background: Theme.interactive-fill(root.active, tab-hit.has-hover, tab-hit.pressed, transparent);
+    animate background { duration: Theme.motion-fast; easing: ease-out; }
     drop-shadow-blur: root.active ? 3px * Theme.ui-scale : 0px;
     drop-shadow-offset-y: 1px;
     drop-shadow-color: #00000070;
@@ -529,7 +541,7 @@ component SidebarSectionHeader inherits Rectangle {
     border-radius: 4px * Theme.ui-scale;
     border-width: header-focus.has-focus ? 1px : 0px;
     border-color: Theme.accent;
-    background: header-hit.has-hover ? Theme.hover : transparent;
+    background: Theme.interactive-fill(false, header-hit.has-hover, header-hit.pressed, transparent);
     HorizontalLayout { spacing: 5px * Theme.ui-scale;
         disclosure-icon := Image { width: 12px * Theme.ui-scale; height: 12px * Theme.ui-scale; y: (parent.height - self.height) / 2;
             // The software renderer does not rotate items; select the vector direction directly.
@@ -537,7 +549,7 @@ component SidebarSectionHeader inherits Rectangle {
             colorize: header-hit.has-hover || header-focus.has-focus ? Theme.ink : Theme.dim;
             accessible-role: none;
         }
-        Label { text-module: 1; horizontal-stretch: 1; text: root.label; font-size: Theme.font(10); }
+        Label { text-module: 1; horizontal-stretch: 1; text: root.label; font-size: Theme.font(11); font-weight: 600; }
         Label { text-module: 1; text: root.suffix; font-size: Theme.font(9); color: Theme.text(1, 6, Theme.accent); }
     }
     header-focus := FocusScope {
@@ -3032,7 +3044,12 @@ main-scroll := ScrollView {
                 new-task(index) => { root.ai-action(24,index); }
             }
             if root.ai-quick-rows.length == 0: Rectangle { horizontal-stretch: 1; }
-            Action { text-module: 1; width: 100px * Theme.ui-scale; height: 32px * Theme.ui-scale; enabled: root.menu-ready; label: root.chinese ? "管理音效库" : "Manage library"; clicked => { root.open-library(0); } }
+            manage-library-action := Action { text-module: 1; width: (root.chinese ? 112px : 132px) * Theme.ui-scale; height: 32px * Theme.ui-scale; enabled: root.menu-ready; action-label: root.chinese ? "管理音效库" : "Manage library"; clicked => { root.open-library(0); }
+                HorizontalLayout { alignment: center; spacing: 6px * Theme.ui-scale;
+                    Image { width: 16px * Theme.ui-scale; height: self.width; y: (parent.height - self.height) / 2; source: @image-url("icons/collection.svg"); colorize: Theme.dim; accessible-role: none; }
+                    Text { text: manage-library-action.action-label; color: Theme.text(1, 0, Theme.ink); font-size: Theme.font(12); vertical-alignment: center; }
+                }
+            }
         }
 
         if root.remote-mode && root.remote-notice != "": Rectangle { height: 34px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: root.remote-notice-kind == 1 ? Theme.accent : Theme.warning;
@@ -3063,7 +3080,7 @@ main-scroll := ScrollView {
             changed width => { root.update-task-tabs-overflow(); }
             accessible-role: tab-list; accessible-label: root.chinese ? "搜索任务" : "Search tasks";
             HorizontalLayout { padding-left: 4px * Theme.ui-scale; padding-right: 4px * Theme.ui-scale + root.ai-restore-reserve; padding-top: 2px * Theme.ui-scale; spacing: 3px * Theme.ui-scale; alignment: start;
-                if root.task-tabs-overflow: Action { text-module: 1; width: 36px * Theme.ui-scale; height: (root.short-layout ? 32px : 36px) * Theme.ui-scale; subtle: true; label: "‹";
+                if root.task-tabs-overflow: Action { text-module: 1; width: 36px * Theme.ui-scale; height: (root.short-layout ? 32px : 36px) * Theme.ui-scale; subtle: true; icon: @image-url("icons/chevron-left.svg");
                     action-label: root.chinese ? "向左翻页搜索任务" : "Scroll search tasks left";
                     enabled: !root.background-blocked && root.task-tabs-x < -1px;
                     clicked => { root.scroll-task-tabs(-1); }
@@ -3096,13 +3113,13 @@ main-scroll := ScrollView {
                         }
                     }
                 }
-                if root.task-tabs-overflow: Action { text-module: 1; width: 36px * Theme.ui-scale; height: (root.short-layout ? 32px : 36px) * Theme.ui-scale; subtle: true; label: "›";
+                if root.task-tabs-overflow: Action { text-module: 1; width: 36px * Theme.ui-scale; height: (root.short-layout ? 32px : 36px) * Theme.ui-scale; subtle: true; icon: @image-url("icons/chevron-right.svg");
                     action-label: root.chinese ? "向右翻页搜索任务" : "Scroll search tasks right";
                     enabled: !root.background-blocked && root.task-tabs-x > min(0px, root.task-tabs-visible-width - root.task-tabs-content-width) + 1px;
                     clicked => { root.scroll-task-tabs(1); }
                 }
                 Action { text-module: 1; width: 36px * Theme.ui-scale; height: (root.short-layout ? 30px : 32px) * Theme.ui-scale; subtle: true;
-                    label: "+"; action-label: root.chinese ? "新建搜索任务" : "New search task";
+                    icon: @image-url("icons/plus.svg"); action-label: root.chinese ? "新建搜索任务" : "New search task";
                     enabled: !root.background-blocked && !root.search-workspace-read-only && root.search-tasks.length < root.max-search-tasks;
                     clicked => { root.search-task-created(); }
                     Tooltip { text: @markdown("\{root.search-tasks.length}/\{root.max-search-tasks}"); }
@@ -3137,7 +3154,7 @@ main-scroll := ScrollView {
                     if root.library-sidebar-page == 1 && root.favorites-category == 0: Label { text-module: 1; height: 54px * Theme.ui-scale; text: root.chinese ? "收藏的音频显示在声音列表中。" : "Favorite audio files appear in the sound list."; wrap: word-wrap; }
                     if root.library-sidebar-page == 1 && root.favorites-category == 1: ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
                         VerticalLayout { padding: 0px; spacing: 5px * Theme.ui-scale; alignment: start;
-                            if root.saved-search-tasks.length == 0: Label { text-module: 1; height: 70px * Theme.ui-scale; text: root.chinese ? "点击声音列表右上角的 ☆ 收藏当前搜索任务，之后可在这里重新打开。" : "Star the current search above the sound list to reopen it here later."; wrap: word-wrap; }
+                            if root.saved-search-tasks.length == 0: Label { text-module: 1; height: 70px * Theme.ui-scale; text: root.chinese ? "在任务标签上收藏搜索任务，即可在这里重新打开。" : "Save a search from its task tab to reopen it here."; wrap: word-wrap; }
                             for saved in root.saved-search-tasks: Rectangle { height: 58px * Theme.ui-scale; border-radius: 5px * Theme.ui-scale; background: saved-hit.has-hover ? Theme.hover : Theme.raised;
                                 accessible-role: button; accessible-label: (root.chinese ? "打开搜索任务收藏：" : "Open saved search: ") + saved.name; accessible-enabled: !root.background-blocked && !root.search-workspace-read-only;
                                 accessible-action-default => { if !root.background-blocked && !root.search-workspace-read-only { root.saved-search-opened(saved.id); } }
@@ -3180,7 +3197,7 @@ main-scroll := ScrollView {
                         SidebarSectionHeader {
                             x: 0px; y: 0px;
                             width: parent.width; height: directory-sections.header-height;
-                            label: root.chinese ? "文件夹" : "FOLDERS"; suffix: root.folder-counts-pending ? root.folder-progress : "WAV / FLAC / Ogg";
+                            label: root.chinese ? "文件夹" : "FOLDERS"; suffix: root.folder-counts-pending ? root.folder-progress : "";
                             action-label: root.chinese ? "文件夹分区" : "Folders section";
                             expanded: root.folders-section-expanded; enabled: !root.background-blocked;
                             toggled => { root.folders-section-expanded = !root.folders-section-expanded; root.pane-layout-changed(); }
@@ -3212,13 +3229,16 @@ main-scroll := ScrollView {
                             for folder[index] in root.folders: Rectangle { height: 34px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale; accessible-role: list-item; accessible-label: (root.chinese ? "文件夹：" : "Folder: ") + folder.name;
                                 border-width: folder-focus.has-focus && root.selected-folder == index ? 1px : 0px; border-color: Theme.accent;
                                 // Fluent overlays a fixed 14px scrollbar (not affected by Theme.ui-scale); the 18px * ui-scale padding reserves its track plus a gap and never shrinks below that at scale >= 1.0.
-                                background: root.selected-folder == index ? Theme.selected : (folder-hit.has-hover ? Theme.raised : transparent);
+                                background: Theme.interactive-fill(root.selected-folder == index, folder-hit.has-hover || disclosure-hit.has-hover, folder-hit.pressed || disclosure-hit.pressed, transparent);
                                 HorizontalLayout { spacing: 4px * Theme.ui-scale; padding-right: 18px * Theme.ui-scale;
                                     // Keep a readable name and count even in a narrow, deep folder tree.
                                     folder-indent := Rectangle { width: clamp(folder.depth * 10px * Theme.ui-scale, 0px, max(0px, parent.width - max(28px * Theme.ui-scale, folder-count.preferred-width) - 18px * Theme.ui-scale - 17px * Theme.ui-scale - 12px * Theme.ui-scale - 40px * Theme.ui-scale)); }
                                     Rectangle { width: 17px * Theme.ui-scale;
-                                        Text { text: folder.has-children ? (folder.expanded ? "−" : "+") : "·"; color: Theme.text(1, 1, Theme.dim); vertical-alignment: center; horizontal-alignment: center; }
-                                        TouchArea { mouse-cursor: pointer; clicked => { folder-focus.focus(); root.folder-toggle-requested(index); } }
+                                        Image { width: 15px * Theme.ui-scale; height: self.width; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                            source: folder.has-children ? (folder.expanded ? @image-url("icons/sidebar-chevron-down.svg") : @image-url("icons/sidebar-chevron-right.svg")) : @image-url("icons/folder.svg");
+                                            colorize: disclosure-hit.has-hover || root.selected-folder == index ? Theme.accent : Theme.dim; accessible-role: none;
+                                        }
+                                        disclosure-hit := TouchArea { mouse-cursor: pointer; clicked => { folder-focus.focus(); if folder.has-children { root.folder-toggle-requested(index); } else { root.folder-requested(index); } } }
                                     }
                                     Text { horizontal-stretch: 1; min-width: 0px; text: folder.name; color: Theme.text(1, root.selected-folder == index ? 5 : folder-hit.has-hover ? 4 : 0, Theme.text(1, 0, Theme.ink)); overflow: elide; vertical-alignment: center; font-size: Theme.font(11); }
                                     folder-count := Label { text-module: 1; min-width: 28px * Theme.ui-scale; horizontal-stretch: 0; text: folder.count; horizontal-alignment: right; }
@@ -3256,11 +3276,20 @@ main-scroll := ScrollView {
                             visible: directory-sections.libraries-expanded;
                             viewport-width: self.visible-width; accessible-role: list;
                             for album[index] in root.albums: Rectangle { height: 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
-                                background: !root.album-filter-unavailable && root.album-filter-id == album.id ? Theme.selected : (album-hit.has-hover ? Theme.raised : transparent);
-                                HorizontalLayout { spacing: 6px * Theme.ui-scale; padding-right: 18px * Theme.ui-scale; alignment: start;
-                                    Image { visible: root.artwork-enabled; width: 20px * Theme.ui-scale; height: 20px * Theme.ui-scale; image-fit: cover; source: album.cover; }
+                                background: Theme.interactive-fill(!root.album-filter-unavailable && root.album-filter-id == album.id, album-hit.has-hover, album-hit.pressed, transparent);
+                                HorizontalLayout { spacing: 6px * Theme.ui-scale; padding-right: 18px * Theme.ui-scale;
+                                    Rectangle { width: 20px * Theme.ui-scale;
+                                        property <bool> has-cover: root.artwork-enabled && album.cover.width > 0;
+                                        Image {
+                                            width: (parent.has-cover ? 20px : 16px) * Theme.ui-scale; height: self.width;
+                                            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                            source: parent.has-cover ? album.cover : @image-url("icons/collection.svg");
+                                            image-fit: cover; colorize: parent.has-cover ? transparent : (album-hit.has-hover ? Theme.accent-hover : Theme.muted);
+                                            accessible-role: none;
+                                        }
+                                    }
                                     Text { horizontal-stretch: 1; min-width: 0px; text: album.name; color: Theme.text(1, !root.album-filter-unavailable && root.album-filter-id == album.id ? 5 : album-hit.has-hover ? 4 : 0, Theme.text(1, 0, Theme.ink)); overflow: elide; vertical-alignment: center; font-size: Theme.font(11); }
-                                    Label { text-module: 1; min-width: 34px * Theme.ui-scale; text: album.count; horizontal-alignment: right; }
+                                    Label { text-module: 1; min-width: 28px * Theme.ui-scale; horizontal-stretch: 0; text: album.count; horizontal-alignment: right; }
                                 }
                                 album-hit := TouchArea { enabled: !root.background-blocked; mouse-cursor: pointer; clicked => { root.album-selected(album.id); } }
                             }
@@ -3277,7 +3306,8 @@ main-scroll := ScrollView {
             }
             results-column := VerticalLayout { horizontal-stretch: 1; min-width: 520px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                 HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-                    if root.checked-count <= 1: Text { horizontal-stretch: 1; min-width: 0px; overflow: elide; text: root.favorites-only ? (root.chinese ? "我的收藏" : "Favorites") : (root.chinese ? "声音列表" : "Sounds"); color: Theme.text(2, 0, Theme.ink); font-size: Theme.font(14); font-weight: 600; vertical-alignment: center; }
+                    if root.checked-count <= 1: Image { width: 18px * Theme.ui-scale; height: parent.height; image-fit: contain; source: @image-url("icons/peaks.svg"); colorize: Theme.accent; accessible-role: none; }
+                    if root.checked-count <= 1: Text { horizontal-stretch: 1; min-width: 0px; overflow: elide; text: root.favorites-only ? (root.chinese ? "我的收藏" : "Favorites") : (root.chinese ? "声音列表" : "Sounds"); color: Theme.text(2, 0, Theme.ink); font-size: Theme.font(15); font-weight: 600; vertical-alignment: center; }
                     if root.checked-count <= 1: Label { text-module: 2; width: min(self.preferred-width, (root.wide-layout ? 225px : 190px) * Theme.ui-scale); text: root.result-heading; font-size: Theme.font(11); overflow: elide; Tooltip { text: @markdown("\{root.result-heading}"); } }
                     if root.checked-count > 1: selection-actions := Action { text-module: 2;
                         width: 108px * Theme.ui-scale; active: true; dropdown: true;
@@ -3467,7 +3497,10 @@ main-scroll := ScrollView {
                                 changed viewport-width => { if !Theme.modern-style { if !root.table-empty && abs(self.viewport-width - root.table-content-size) < 1px { root.sync-table-viewport(); } } }
                                 // Fixed child layout widths let ListView measure its horizontal scroll extent.
                                 for row[index] in root.rows: Rectangle { width: root.table-content-size; height: root.classic-result-row-height; accessible-role: list-item; accessible-label: (row.played ? (root.chinese ? "已播放：" : "Played: ") : "") + row.name;
-                                    background: row.checked ? (root.selected-row == index ? Theme.selected : Theme.checked) : (result-hit.has-hover ? Theme.hover : (Math.mod(index, 2) == 0 ? Theme.alternate : Theme.panel));
+                                    property <color> row-surface: root.selected-row == index ? Theme.selected : row.checked ? Theme.checked
+                                        : (Math.mod(index, 2) == 0 ? Theme.alternate : Theme.panel);
+                                    background: result-hit.pressed ? self.row-surface.mix(Theme.accent, 0.78)
+                                        : result-hit.has-hover ? self.row-surface.mix(Theme.hover, 0.32) : self.row-surface;
                                     Rectangle { x: 0px; y: 0px; height: parent.height; width: 3px * Theme.ui-scale; background: root.selected-row == index ? Theme.accent : row.marker; }
                                     if root.list-waveforms-visible: table-wave-cell := Rectangle { x: root.table-wave-x + 12px * Theme.ui-scale; height: parent.height; width: root.table-wave-size - 24px * Theme.ui-scale;
                                         accessible-role: none;
@@ -3484,6 +3517,7 @@ main-scroll := ScrollView {
                                         if row.wave-state == 1: Image {
                                             width: parent.width; height: parent.height - 4px * Theme.ui-scale;
                                             source: row.wave; image-fit: fill; image-rendering: pixelated;
+                                            colorize: root.selected-row == index ? Theme.accent-hover : Theme.muted;
                                         }
                                         // Root offline: the stale copy dimmed under a warning tint.
                                         if row.wave-state == 4: Rectangle {
@@ -3496,7 +3530,7 @@ main-scroll := ScrollView {
                                             }
                                         }
                                     }
-                                    table-name-cell := Text { x: root.table-name-x + 12px * Theme.ui-scale; height: parent.height; width: root.table-name-size - 24px * Theme.ui-scale; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: Theme.text(2, result-hit.pressed ? 14 : result-hit.has-hover ? 4 : -1, row.missing ? Theme.text(2, 12, Theme.warning) : (root.selected-row == index ? Theme.text(2, 5, row.played ? Theme.text(2, 11, Theme.accent) : Theme.text(2, row.favorite ? 13 : 0, Theme.ink)) : (row.played ? Theme.text(2, 11, Theme.accent) : Theme.text(2, row.favorite ? 13 : 0, Theme.ink)))); font-size: Theme.list-font-size; overflow: elide; vertical-alignment: center; }
+                                    table-name-cell := Text { x: root.table-name-x + 12px * Theme.ui-scale; height: parent.height; width: root.table-name-size - 24px * Theme.ui-scale; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: Theme.text(2, result-hit.pressed ? 14 : result-hit.has-hover ? 4 : -1, row.missing ? Theme.text(2, 12, Theme.warning) : (root.selected-row == index ? Theme.text(2, 5, row.played ? Theme.text(2, 11, Theme.accent) : Theme.text(2, row.favorite ? 13 : 0, Theme.ink)) : (row.played ? Theme.text(2, 11, Theme.accent) : Theme.text(2, row.favorite ? 13 : 0, Theme.ink)))); font-weight: root.selected-row == index ? 600 : 400; font-size: Theme.list-font-size; overflow: elide; vertical-alignment: center; }
                                     table-duration-cell := Text { x: root.table-duration-x + 12px * Theme.ui-scale; height: parent.height; width: root.table-duration-size - 24px * Theme.ui-scale; text: row.duration; color: Theme.text(2, 0, Theme.ink); horizontal-alignment: right; vertical-alignment: center; font-size: Theme.list-font(11); overflow: elide; }
                                     HorizontalLayout { alignment: start; padding-left: root.table-state-size + root.table-wave-size + root.table-name-size + root.table-duration-size + 12px * Theme.ui-scale; padding-right: 12px * Theme.ui-scale; spacing: 24px * Theme.ui-scale;
                                         table-format-cell := Text { width: root.table-format-size - 24px * Theme.ui-scale; text: row.format; color: Theme.text(2, 1, Theme.dim); vertical-alignment: center; font-size: Theme.list-font(10); overflow: elide; }
@@ -3532,7 +3566,7 @@ main-scroll := ScrollView {
                                         }
                                     }
                                     IconSegment { x: 2px * Theme.ui-scale; y: (parent.height - self.height) / 2;
-                                        icon: row.favorite ? @image-url("icons/task-star-filled.svg") : @image-url("icons/star.svg"); active: row.favorite;
+                                        icon: row.favorite ? @image-url("icons/task-star-filled.svg") : @image-url("icons/star.svg"); active: row.favorite; active-ink: Theme.text(2, 13, Theme.apricot);
                                         label: (row.favorite ? (root.chinese ? "取消收藏：" : "Unfavorite: ") : (root.chinese ? "收藏：" : "Favorite: ")) + row.name;
                                         enabled: !root.background-blocked && !root.remote-writes-blocked && !root.metadata-writes-blocked;
                                         clicked => { root.favorite-set-requested(row.id, !row.favorite); }
@@ -3580,9 +3614,9 @@ main-scroll := ScrollView {
                                 }
                                 if root.checked-count <= 1: Rectangle { horizontal-stretch: 1; }
                                 if root.checked-count > 1: Label { text-module: 2; horizontal-stretch: 1; min-width: 0px; text: root.result-summary; overflow: elide; font-size: Theme.font(10); }
-                                Action { text-module: 2; width: 30px * Theme.ui-scale; enabled: root.can-previous && !root.searching; label: "‹"; clicked => { root.page-requested(-1); } }
+                                Action { text-module: 2; width: 30px * Theme.ui-scale; enabled: root.can-previous && !root.searching; icon: @image-url("icons/chevron-left.svg"); action-label: root.chinese ? "上一页搜索结果" : "Previous results page"; clicked => { root.page-requested(-1); } }
                                 Label { text-module: 2; width: 72px * Theme.ui-scale; text: root.page-label; horizontal-alignment: center; }
-                                Action { text-module: 2; width: 30px * Theme.ui-scale; enabled: root.can-next && !root.searching; label: "›"; clicked => { root.page-requested(1); } }
+                                Action { text-module: 2; width: 30px * Theme.ui-scale; enabled: root.can-next && !root.searching; icon: @image-url("icons/chevron-right.svg"); action-label: root.chinese ? "下一页搜索结果" : "Next results page"; clicked => { root.page-requested(1); } }
                             }
                         }
                     }
@@ -3941,7 +3975,7 @@ main-scroll := ScrollView {
                     if root.library-sidebar-page == 1 && root.favorites-category == 0: Label { text-module: 1; height: 54px * Theme.ui-scale; text: root.chinese ? "收藏的音频显示在声音列表中。" : "Favorite audio files appear in the sound list."; wrap: word-wrap; }
                     if root.library-sidebar-page == 1 && root.favorites-category == 1: ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
                         VerticalLayout { padding: 0px; spacing: 5px * Theme.ui-scale; alignment: start;
-                            if root.saved-search-tasks.length == 0: Label { text-module: 1; height: 70px * Theme.ui-scale; text: root.chinese ? "点击声音列表右上角的 ☆ 收藏当前搜索任务，之后可在这里重新打开。" : "Star the current search above the sound list to reopen it here later."; wrap: word-wrap; }
+                            if root.saved-search-tasks.length == 0: Label { text-module: 1; height: 70px * Theme.ui-scale; text: root.chinese ? "在任务标签上收藏搜索任务，即可在这里重新打开。" : "Save a search from its task tab to reopen it here."; wrap: word-wrap; }
                             for saved in root.saved-search-tasks: Rectangle { height: 58px * Theme.ui-scale; border-radius: 5px * Theme.ui-scale; background: studio-saved-hit.has-hover ? Theme.hover : Theme.raised;
                                 accessible-role: button; accessible-label: (root.chinese ? "打开搜索任务收藏：" : "Open saved search: ") + saved.name; accessible-enabled: !root.background-blocked && !root.search-workspace-read-only;
                                 accessible-action-default => { if !root.background-blocked && !root.search-workspace-read-only { root.saved-search-opened(saved.id); } }

@@ -1380,9 +1380,12 @@ component ClassicAuditionPanel inherits Rectangle {
             Rectangle { width: 1px; background: Theme.player-border; }
             if root.state != 0 || root.missing || root.busy: Rectangle {
                 width: phase.preferred-width + 14px * Theme.ui-scale; height: 20px * Theme.ui-scale; y: (25px * Theme.ui-scale - self.height) / 2;
-                background: Theme.raised; border-radius: 4px * Theme.ui-scale;
+                property <color> phase-ink: root.missing || root.state == 7 ? Theme.text(4, 9, Theme.danger)
+                    : root.busy || root.buffering || root.state == 1 ? Theme.text(4, 8, Theme.warning)
+                    : root.state == 3 ? Theme.text(4, 7, Theme.mint) : Theme.text(4, 1, Theme.dim);
+                background: Theme.player.mix(self.phase-ink, 0.90); border-radius: 4px * Theme.ui-scale;
                 accessible-role: text; accessible-label: root.chinese ? "播放状态" : "Playback status"; accessible-description: root.state-label;
-                phase := Text { text: root.state-label; color: root.state == 7 || root.missing ? Theme.text(4, 9, Theme.danger) : (root.state == 3 ? Theme.text(4, 4, Theme.accent-hover) : Theme.text(4, 1, Theme.dim)); font-size: Theme.font(10); horizontal-alignment: center; vertical-alignment: center; }
+                phase := Text { text: root.state-label; color: parent.phase-ink; font-size: Theme.font(10); horizontal-alignment: center; vertical-alignment: center; }
             }
             Text { horizontal-stretch: 1; min-width: 0px; height: 25px * Theme.ui-scale; text: root.name == "" ? (root.chinese ? "未加载声音" : "No sound loaded") : root.name; overflow: elide; color: Theme.text(4, 0, Theme.ink); font-size: Theme.font(11); vertical-alignment: center; accessible-role: text; accessible-label: root.chinese ? "当前试听文件" : "Audition filename"; }
             Caption { height: 25px * Theme.ui-scale; text: root.info; font-size: Theme.font(10); }
