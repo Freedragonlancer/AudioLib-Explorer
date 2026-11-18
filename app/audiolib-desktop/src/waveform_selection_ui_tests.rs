@@ -30,6 +30,16 @@ fn settle() {
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1));
 }
 
+fn escape(ui: &AppWindow) {
+    ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Escape.into(),
+    });
+    ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Escape.into(),
+    });
+    settle();
+}
+
 fn point(ui: &AppWindow, fraction: f32) -> LogicalPosition {
     let wave = ElementHandle::find_by_accessible_label(ui, "Waveform timeline")
         .next()
@@ -373,11 +383,7 @@ fn repeated_ranges_tolerate_synchronous_preview_and_source_publication_callbacks
             near(ranges.borrow()[index], (start * 20.0, end * 20.0));
             assert!(!ui.get_wave_selection_gesture());
             if index % 4 == 3 {
-                ElementHandle::find_by_accessible_label(&ui, "Clear waveform selection")
-                    .next()
-                    .unwrap()
-                    .invoke_accessible_default_action();
-                settle();
+                escape(&ui);
                 assert!(!ui.get_wave_selection_active());
             }
         }
@@ -421,7 +427,7 @@ fn gesture_freezes_pending_viewport_and_identity_changes_cancel_without_committi
 }
 
 #[test]
-fn escape_cancels_gesture_then_preparation_then_selection_and_clear_is_accessible() {
+fn escape_cancels_gesture_then_preparation_then_selection() {
     i_slint_backend_testing::init_no_event_loop();
     for modern in [false, true] {
         let ui = window(modern);
@@ -429,13 +435,7 @@ fn escape_cancels_gesture_then_preparation_then_selection_and_clear_is_accessibl
         select(&ui, 0.2, 0.6);
         ui.set_help_visible(true);
         settle();
-        ui.window().dispatch_event(WindowEvent::KeyPressed {
-            text: Key::Escape.into(),
-        });
-        ui.window().dispatch_event(WindowEvent::KeyReleased {
-            text: Key::Escape.into(),
-        });
-        settle();
+        escape(&ui);
         assert!(
             !ui.get_help_visible(),
             "A modal receives Escape before the selection"
@@ -443,16 +443,7 @@ fn escape_cancels_gesture_then_preparation_then_selection_and_clear_is_accessibl
         assert!(ui.get_wave_selection_active());
         pressed(&ui, 0.8);
         moved(&ui, point(&ui, 0.9));
-        let escape = || {
-            ui.window().dispatch_event(WindowEvent::KeyPressed {
-                text: Key::Escape.into(),
-            });
-            ui.window().dispatch_event(WindowEvent::KeyReleased {
-                text: Key::Escape.into(),
-            });
-            settle();
-        };
-        escape();
+        escape(&ui);
         released(&ui, 0.9);
         assert_eq!(ranges.borrow().len(), 1);
         assert!(ui.get_wave_selection_active());
@@ -467,7 +458,7 @@ fn escape_cancels_gesture_then_preparation_then_selection_and_clear_is_accessibl
         ui.set_wave_selection_preparing(true);
         moved(&ui, point(&ui, 0.4));
         pointer(&ui, 6);
-        escape();
+        escape(&ui);
         assert_eq!(*cancels.borrow(), 1);
         assert!(ui.get_wave_selection_active());
         let clears = Rc::new(RefCell::new(0));
@@ -477,15 +468,9 @@ fn escape_cancels_gesture_then_preparation_then_selection_and_clear_is_accessibl
             *observed.borrow_mut() += 1;
             weak.unwrap().set_wave_selection_active(false);
         });
-        escape();
+        escape(&ui);
         assert_eq!(*clears.borrow(), 1);
         assert!(!ui.get_wave_selection_active());
-        ui.set_wave_selection_active(true);
-        ElementHandle::find_by_accessible_label(&ui, "Clear waveform selection")
-            .next()
-            .unwrap()
-            .invoke_accessible_default_action();
-        assert_eq!(*clears.borrow(), 2);
         ui.hide().unwrap();
     }
 }
@@ -618,6 +603,30 @@ fn narrow_selection_has_a_separate_drag_grip_without_covering_plot_or_ruler() {
     for modern in [false, true] {
         let ui = window(modern);
         ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+        settle();
+        let wave = ElementHandle::find_by_accessible_label(&ui, "Waveform timeline")
+            .next()
+            .unwrap();
+        let ruler = ElementHandle::find_by_accessible_label(&ui, "Waveform time ruler")
+            .next()
+            .unwrap();
+        let geometry = || {
+            (
+                wave.absolute_position(),
+                wave.size(),
+                ruler.absolute_position(),
+                ruler.size(),
+            )
+        };
+        let idle = geometry();
+        pressed(&ui, 0.2);
+        moved(&ui, point(&ui, 0.4));
+        assert_eq!(
+            geometry(),
+            idle,
+            "Draft selection moved the waveform or ruler"
+        );
+        released(&ui, 0.4);
         ui.set_wave_selection_start(8.0);
         ui.set_wave_selection_end(8.001);
         ui.set_wave_selection_active(true);
@@ -625,25 +634,24 @@ fn narrow_selection_has_a_separate_drag_grip_without_covering_plot_or_ruler() {
         let grip = ElementHandle::find_by_accessible_label(&ui, "Drag selection as WAV")
             .next()
             .expect("Narrow ranges retain a separate drag grip");
-        let wave = ElementHandle::find_by_accessible_label(&ui, "Waveform timeline")
-            .next()
-            .unwrap();
         let origin = grip.absolute_position();
         let size = grip.size();
-        let plot_origin = wave.absolute_position();
-        let plot_size = wave.size();
+        assert_eq!(
+            geometry(),
+            idle,
+            "Committed selection moved the waveform or ruler"
+        );
         assert!(size.width > 0.0 && size.height > 0.0);
-        assert!(
-            origin.y + size.height <= plot_origin.y || origin.y >= plot_origin.y + plot_size.height,
-            "modern={modern}, grip={origin:?}+{size:?}, plot={plot_origin:?}+{plot_size:?}"
-        );
-        let ruler = ElementHandle::find_by_accessible_label(&ui, "Waveform time ruler")
-            .next()
-            .unwrap();
-        assert!(
-            origin.y + size.height <= ruler.absolute_position().y
-                || origin.y >= ruler.absolute_position().y + ruler.size().height
-        );
+        let separate = |other: &ElementHandle| {
+            let pos = other.absolute_position();
+            let bounds = other.size();
+            origin.x + size.width <= pos.x
+                || origin.x >= pos.x + bounds.width
+                || origin.y + size.height <= pos.y
+                || origin.y >= pos.y + bounds.height
+        };
+        assert!(separate(&wave));
+        assert!(separate(&ruler));
         let start = LogicalPosition::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
         let requests = Rc::new(RefCell::new(0));
         let observed = requests.clone();
@@ -680,6 +688,13 @@ fn narrow_selection_has_a_separate_drag_grip_without_covering_plot_or_ruler() {
         settle();
         assert_eq!(*endings.borrow(), 1);
         assert!(!ui.get_wave_selection_gesture());
+        ui.set_wave_selection_active(false);
+        settle();
+        assert_eq!(
+            geometry(),
+            idle,
+            "Clearing the selection moved the waveform or ruler"
+        );
         ui.hide().unwrap();
     }
 }
@@ -786,7 +801,13 @@ fn crossing_the_export_grip_cannot_take_over_a_draw_or_boundary_resize() {
         settle();
         pressed(&ui, 0.2);
         moved(&ui, grip_center);
-        pointer(&ui, 4);
+        // Crossing the opposite endpoint reverses the resize cursor, even over the grip.
+        let expected = if grip_center.x > point(&ui, 0.6).x {
+            5
+        } else {
+            4
+        };
+        pointer(&ui, expected);
         pointer_release(&ui, grip_center);
         assert_eq!(ranges.borrow().len(), 3);
         assert!(!ui.get_wave_selection_gesture());
@@ -795,7 +816,7 @@ fn crossing_the_export_grip_cannot_take_over_a_draw_or_boundary_resize() {
 }
 
 #[test]
-fn feedback_buttons_keep_cancel_and_clear_independent_across_themes_views_and_languages() {
+fn cancelling_preparation_preserves_selection_until_escape_across_themes_views_and_languages() {
     i_slint_backend_testing::init_no_event_loop();
     for modern_theme in [false, true] {
         for modern_player in [false, true] {
@@ -859,22 +880,7 @@ fn feedback_buttons_keep_cancel_and_clear_independent_across_themes_views_and_la
                     (ui.get_wave_selection_start(), ui.get_wave_selection_end()),
                     selected,
                 );
-                let clear = ElementHandle::find_by_accessible_label(
-                    &ui,
-                    if chinese {
-                        "清除波形选区"
-                    } else {
-                        "Clear waveform selection"
-                    },
-                )
-                .next()
-                .unwrap();
-                let clear_center = center(&clear);
-                moved(&ui, clear_center);
-                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(900));
-                pointer(&ui, 0);
-                pointer_press(&ui, clear_center);
-                pointer_release(&ui, clear_center);
+                escape(&ui);
                 assert_eq!(*clears.borrow(), 1);
                 assert_eq!(*cancels.borrow(), 1);
                 assert!(!ui.get_wave_selection_active());

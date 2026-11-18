@@ -12,11 +12,13 @@ export global Theme {
         if state >= 0 && state < Theme.text-colors.length && Theme.text-colors[state].alpha > 0 { return Theme.text-colors[state]; }
         return fallback;
     }
+    out property <color> played-ink: Theme.dim.mix(Theme.accent, 0.76);
     public pure function role-default(state: int) -> color {
         if state == 1 { return Theme.dim; }
         if state == 2 || state == 3 { return Theme.muted; }
         if state == 4 || state == 14 { return Theme.accent-hover; }
-        if state == 5 || state == 6 || state == 11 { return Theme.accent; }
+        if state == 5 || state == 6 { return Theme.accent; }
+        if state == 11 { return Theme.played-ink; }
         if state == 7 { return Theme.mint; }
         if state == 8 || state == 12 || state == 13 { return Theme.warning; }
         if state == 9 { return Theme.danger; }
