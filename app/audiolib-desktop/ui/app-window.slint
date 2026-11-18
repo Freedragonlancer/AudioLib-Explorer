@@ -209,6 +209,20 @@ component ResultShortcutScope inherits FocusScope {
 component Label inherits Text {
     in property <int> text-module: 0; color: Theme.text(root.text-module, 1, Theme.dim); font-size: Theme.font(11); vertical-alignment: center; }
 
+// Quiet section labels pair a familiar glyph with the localized name.
+component InspectorHeading inherits HorizontalLayout {
+    in property <image> icon;
+    in property <string> title;
+    height: max(18px * Theme.ui-scale, Theme.font(11) * 1.4);
+    spacing: 6px * Theme.ui-scale;
+    Image {
+        source: root.icon; colorize: Theme.dim; width: 14px * Theme.ui-scale; height: self.width;
+        y: (parent.height - self.height) / 2; accessible-role: none;
+    }
+    Label { text-module: 3; text: root.title; font-size: Theme.font(11); font-weight: 600; }
+    Rectangle { horizontal-stretch: 1; }
+}
+
 // The number of active filters on a panel switch.
 component CountBadge inherits Rectangle {
     in property <int> count;
@@ -485,7 +499,9 @@ component PaneDivider inherits Rectangle {
     accessible-enabled: root.enabled;
     forward-focus: divider-focus;
     Rectangle {
-        x: 5px * Theme.ui-scale; width: 2px * Theme.ui-scale; y: 10px * Theme.ui-scale; height: parent.height - 20px * Theme.ui-scale; border-radius: 1px;
+        width: 2px * Theme.ui-scale; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        height: Theme.modern-style ? max(0px, parent.height - 20px * Theme.ui-scale) : min(parent.height, 38px * Theme.ui-scale);
+        border-radius: 1px;
         background: drag-area.pressed || divider-focus.has-focus ? Theme.accent : (drag-area.has-hover ? Theme.dim : Theme.border);
     }
     divider-focus := FocusScope {
@@ -615,6 +631,9 @@ component SidebarSectionDivider inherits Rectangle {
 // Sortable column actions keep the same keyboard behavior as ordinary actions.
 component TableHeader inherits Rectangle {
     in property <string> label;
+    in property <image> icon;
+    // Custom narrow columns keep their full text and sort-indicator budget.
+    property <bool> show-icon: root.icon.width > 0 && root.width >= heading.preferred-width + (root.active ? 44px : 34px) * Theme.ui-scale;
     in property <string> action-label;
     in property <string> help;
     in property <bool> active: false;
@@ -635,8 +654,12 @@ component TableHeader inherits Rectangle {
     background: header-hit.has-hover ? Theme.hover : transparent;
     border-width: header-focus.has-focus ? 1px : 0px;
     border-color: Theme.accent;
-    Text {
-        x: 8px * Theme.ui-scale; width: max(0px, parent.width - (root.active ? 26px * Theme.ui-scale : 16px * Theme.ui-scale)); height: parent.height;
+    if root.show-icon: Image {
+        x: 8px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+        width: 13px * Theme.ui-scale; height: self.width; source: root.icon; colorize: Theme.muted; accessible-role: none;
+    }
+    heading := Text {
+        x: (root.show-icon ? 26px : 8px) * Theme.ui-scale; width: max(0px, parent.width - self.x - (root.active ? 18px : 8px) * Theme.ui-scale); height: parent.height;
         text: root.label; font-size: Theme.font(10); font-weight: root.active ? 600 : 400;
         color: root.active ? Theme.text(2, 0, Theme.ink) : Theme.text(2, 1, Theme.dim); overflow: elide; vertical-alignment: center;
     }
@@ -3137,7 +3160,7 @@ main-scroll := ScrollView {
         workspace := HorizontalLayout { vertical-stretch: 1; min-height: results-column.min-height; spacing: 0px;
             // Invisible layout children still reserve their fixed width. Collapse
             // the allocation too, retaining the native list owners and offsets.
-            library-sidebar := Rectangle { visible: root.sidebar-visible; width: root.sidebar-visible ? root.sidebar-width : 0px; background: Theme.panel; border-radius: 7px * Theme.ui-scale; border-width: 1px; border-color: Theme.border; clip: true;
+            library-sidebar := Rectangle { visible: root.sidebar-visible; width: root.sidebar-visible ? root.sidebar-width : 0px; background: Theme.panel; border-radius: 6px * Theme.ui-scale; clip: true;
                 VerticalLayout { padding: 12px * Theme.ui-scale; padding-top: (root.short-layout ? 8px : 12px) * Theme.ui-scale; padding-bottom: (root.short-layout ? 8px : 12px) * Theme.ui-scale; spacing: (root.short-layout ? 4px : 8px) * Theme.ui-scale;
                     Rectangle { height: 32px * Theme.ui-scale; background: Theme.trough; border-radius: 8px * Theme.ui-scale;
                         accessible-role: tab-list; accessible-label: root.chinese ? "素材库页面" : "Library pages";
@@ -3319,7 +3342,7 @@ main-scroll := ScrollView {
                     if root.checked-count > 1: Rectangle { horizontal-stretch: 1; }
                     // File status lives in the View menu and sorting in the table headers;
 
-                    Rectangle { y: (parent.height - self.height) / 2; height: 30px * Theme.ui-scale; background: Theme.trough; border-radius: 7px * Theme.ui-scale; border-width: 1px; border-color: Theme.border;
+                    Rectangle { y: (parent.height - self.height) / 2; height: 30px * Theme.ui-scale; background: Theme.trough; border-radius: 5px * Theme.ui-scale;
                         accessible-role: none;
                         HorizontalLayout { padding: 2px * Theme.ui-scale; spacing: 2px * Theme.ui-scale;
                             IconSegment { label: root.folder-favorites-label(); caption: root.chinese ? "仅看收藏" : "Favorites only";
@@ -3346,7 +3369,7 @@ main-scroll := ScrollView {
                 }
                 // Above 1.0, keeps the sound list usable; the main view scrolls for the rest. At 1.0 the
                 // compact 1080x700 layout keeps fitting without scrolling; filters live in the sidebar.
-                results-panel := Rectangle { vertical-stretch: 1; min-height: root.results-panel-min-height; clip: true; border-width: 1px; border-color: Theme.border; border-radius: 7px * Theme.ui-scale; background: Theme.panel;
+                results-panel := Rectangle { vertical-stretch: 1; min-height: root.results-panel-min-height; clip: true; border-radius: 6px * Theme.ui-scale; background: Theme.panel;
                     VerticalLayout { spacing: 0px;
                         Rectangle { height: 33px * Theme.ui-scale; background: Theme.raised; clip: true;
                             // Both empty and populated results share the header's horizontal position.
@@ -3366,7 +3389,7 @@ main-scroll := ScrollView {
                                 }
                                 table-name-header := TableHeader {
                                     x: root.table-name-x; width: root.table-name-size - 8px * Theme.ui-scale; height: parent.height;
-                                    label: root.chinese ? "文件名" : "NAME";
+                                    icon: @image-url("icons/details.svg"); label: root.chinese ? "文件名" : "NAME";
                                     action-label: root.chinese ? "按文件名排序" : "Sort by filename";
                                     help: root.chinese ? "按文件名排序；再次点击切换升序 / 降序" : "Sort by filename; click again to reverse ascending / descending";
                                     active: root.sort-index == 1; descending: root.sort-descending; enabled: !root.background-blocked;
@@ -3374,7 +3397,7 @@ main-scroll := ScrollView {
                                 }
                                 table-duration-header := TableHeader {
                                     x: root.table-duration-x; width: root.table-duration-size - 8px * Theme.ui-scale; height: parent.height;
-                                    label: root.chinese ? "时长" : "TIME";
+                                    icon: @image-url("icons/duration.svg"); label: root.chinese ? "时长" : "TIME";
                                     action-label: root.chinese ? "按时长排序" : "Sort by duration";
                                     help: root.chinese ? "按时长排序；再次点击切换升序 / 降序" : "Sort by duration; click again to reverse ascending / descending";
                                     active: root.sort-index == 2; descending: root.sort-descending; enabled: !root.background-blocked;
@@ -3628,7 +3651,7 @@ main-scroll := ScrollView {
                 resized(width) => { root.inspector-preferred-width = clamp(width, 240px * Theme.ui-scale, root.inspector-maximum-width); }
                 finished => { root.pane-layout-changed(); }
             }
-            if root.inspector-visible: details-sidebar := Rectangle { width: root.inspector-width; background: Theme.panel; border-radius: 7px * Theme.ui-scale; border-width: 1px; border-color: Theme.border; clip: true;
+            if root.inspector-visible: details-sidebar := Rectangle { width: root.inspector-width; background: Theme.panel; border-radius: 6px * Theme.ui-scale; clip: true;
                 VerticalLayout { padding: 10px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
                     // The page switch: a recessed track with the selected page raised. Closing
                     // the sidebar is the list header switch (or Ctrl+I); per-sound actions such
@@ -3646,7 +3669,7 @@ main-scroll := ScrollView {
                         changed restore-revision => { if !Theme.modern-style { self.viewport-y = clamp(root.task-filter-viewport-y, min(0px, self.visible-height - self.viewport-height), 0px); } }
                         VerticalLayout { spacing: 14px * Theme.ui-scale; padding-right: 4px * Theme.ui-scale; alignment: start;
                             VerticalLayout { spacing: 6px * Theme.ui-scale;
-                                Label { text-module: 3; height: 16px * Theme.ui-scale; text: root.chinese ? "格式" : "FORMAT"; font-size: Theme.font(10); }
+                                InspectorHeading { icon: @image-url("icons/peaks.svg"); title: root.chinese ? "格式" : "FORMAT"; }
                                 HorizontalLayout { spacing: 8px * Theme.ui-scale;
                                     Label { text-module: 3; width: root.filter-label-width; text: root.chinese ? "采样率" : "Sample rate"; }
                                     ComboBox { horizontal-stretch: 1; min-width: 0px; model: root.chinese ? ["全部", "44.1 kHz", "48 kHz", "88.2 kHz", "96 kHz", "192 kHz"] : ["Any", "44.1 kHz", "48 kHz", "88.2 kHz", "96 kHz", "192 kHz"]; current-index <=> root.sample-filter; selected => { root.filter-requested(); } }
@@ -3668,7 +3691,7 @@ main-scroll := ScrollView {
                             }
                             Rectangle { height: 1px; background: Theme.border; }
                             VerticalLayout { spacing: 6px * Theme.ui-scale;
-                                Label { text-module: 3; height: 16px * Theme.ui-scale; text: root.chinese ? "标注" : "ANNOTATIONS"; font-size: Theme.font(10); }
+                                InspectorHeading { icon: @image-url("icons/tag.svg"); title: root.chinese ? "标注" : "ANNOTATIONS"; }
                                 HorizontalLayout { spacing: 8px * Theme.ui-scale;
                                     // Top-aligned with the tag field rather than the whole block.
                                     Label { text-module: 3; width: root.filter-label-width; height: 32px * Theme.ui-scale; text: root.chinese ? "标签" : "Tags"; }
@@ -3741,7 +3764,7 @@ main-scroll := ScrollView {
                         VerticalLayout { spacing: root.short-layout ? 4px * Theme.ui-scale : 7px * Theme.ui-scale; padding-right: 4px * Theme.ui-scale; alignment: start;
                             // The favorite belongs to this sound, so it sits beside its name.
                             HorizontalLayout { spacing: 6px * Theme.ui-scale;
-                                Text { horizontal-stretch: 1; min-width: 0px; height: root.short-layout ? 22px * Theme.ui-scale : 40px * Theme.ui-scale; text: root.selected-name; color: Theme.text(3, 0, Theme.ink); font-size: Theme.font(13); font-weight: 600; wrap: word-wrap; overflow: elide; }
+                                Text { horizontal-stretch: 1; min-width: 0px; min-height: 22px * Theme.ui-scale; max-height: (root.short-layout ? 22px : 40px) * Theme.ui-scale; vertical-stretch: 0; text: root.selected-name; color: Theme.text(3, 0, Theme.ink); font-size: Theme.font(13); font-weight: 600; wrap: word-wrap; overflow: elide; }
                                 // Sized to the compact name row so short windows lose no detail space.
                                 ChipButton {
                                     width: 24px * Theme.ui-scale; height: 22px * Theme.ui-scale; border-radius: 11px * Theme.ui-scale;
@@ -3754,7 +3777,7 @@ main-scroll := ScrollView {
                             Label { text-module: 3; height: root.short-layout ? 16px * Theme.ui-scale : 28px * Theme.ui-scale; text: root.selected-format; color: Theme.text(3, 6, Theme.accent); wrap: word-wrap; overflow: elide; font-size: Theme.font(10); }
                             // The file's own Library/album, as declared by the pack (Boom-style).
                             if root.selected-album != "": VerticalLayout { spacing: 4px * Theme.ui-scale;
-                                Label { text-module: 3; height: 16px * Theme.ui-scale; text: root.chinese ? "音效库" : "LIBRARY"; font-size: Theme.font(10); }
+                                InspectorHeading { icon: @image-url("icons/collection.svg"); title: root.chinese ? "音效库" : "LIBRARY"; }
                                 Text { text: root.selected-album; color: Theme.text(3, 0, Theme.ink); font-size: Theme.font(11); wrap: word-wrap; overflow: elide; }
                             }
                             // Embedded cover; hidden while the file declares none.
@@ -3770,7 +3793,7 @@ main-scroll := ScrollView {
                                 Text { text: root.chinese ? "原位置找不到此文件。选择移动或改名后的 WAV，保留已有标注。" : "File missing at its original location. Locate the moved or renamed WAV to keep its annotations."; color: Theme.text(3, 8, Theme.warning); font-size: Theme.font(11); wrap: word-wrap; }
                                 Action { text-module: 3; height: 32px * Theme.ui-scale; primary: true; enabled: !root.closing && !root.library-busy; label: root.chinese ? "选择新位置，修复引用…" : "Locate file and repair…"; clicked => { root.file-action-requested(root.selected-id, 20); } }
                             }
-                            Rectangle { height: 1px; background: Theme.border; }
+                            if root.selected-description != "" || root.selected-source-tags != "": Rectangle { height: 1px; background: Theme.border; }
                             if root.selected-description != "": VerticalLayout { spacing: 4px * Theme.ui-scale;
                                 Label { text-module: 3; height: 16px * Theme.ui-scale; text: root.chinese ? "描述" : "DESCRIPTION"; font-size: Theme.font(10); }
                                 source-description := TextEdit {
@@ -3796,7 +3819,7 @@ main-scroll := ScrollView {
                             }
                             Action { text-module: 3; height: 30px * Theme.ui-scale; subtle: true; active: root.notes-visible; label: (root.notes-visible ? "−  " : "+  ") + (root.chinese ? "备注" : "Notes") + (root.edit-notes == "" ? "" : " ·"); clicked => { root.notes-visible = !root.notes-visible; } }
                             if root.notes-visible: TextEdit { height: 62px * Theme.ui-scale; accessible-label: root.chinese ? "备注" : "Notes"; enabled: !root.background-blocked && !root.remote-writes-blocked && !root.metadata-writes-blocked; text <=> root.edit-notes; edited => { root.metadata-dirty = true; root.metadata-edited(); } }
-                            Label { text-module: 3; height: 16px * Theme.ui-scale; text: root.chinese ? "文件路径" : "FILE PATH"; font-size: Theme.font(10); }
+                            InspectorHeading { icon: @image-url("icons/folder.svg"); title: root.chinese ? "文件路径" : "FILE PATH"; }
                             ScrollView { height: root.short-layout ? 36px * Theme.ui-scale : 48px * Theme.ui-scale; viewport-width: self.visible-width;
                                 VerticalLayout { padding: 0px; alignment: start;
                                     TextInput { accessible-label: root.chinese ? "文件路径" : "File path"; read-only: true; single-line: false; wrap: char-wrap; font-size: Theme.font(10); color: Theme.text(3, 1, Theme.dim); selection-background-color: Theme.accent; selection-foreground-color: Theme.on-accent; text: root.selected-path; }

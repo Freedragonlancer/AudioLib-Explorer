@@ -690,10 +690,10 @@ component ClassicTool inherits Rectangle {
         background: root.primary
             ? (root.pressed ? root.primary-tone.darker(0.18) : (root.hovered ? root.primary-hover-tone : root.primary-tone))
             : root.active
-                ? (root.pressed ? Theme.selected : Theme.checked)
+                ? (root.pressed ? Theme.selected : root.hovered ? Theme.hover : Theme.checked)
                 : (root.pressed ? Theme.trough : (root.hovered ? Theme.hover : Theme.raised.mix(Theme.player, 0.3)));
         border-width: 1px;
-        border-color: root.primary ? root.primary-tone : root.active ? Theme.accent : (root.hovered ? Theme.strong-border : Theme.player-border);
+        border-color: root.primary ? root.primary-tone : root.active ? (root.hovered ? Theme.accent-hover : Theme.accent) : (root.hovered ? Theme.strong-border : Theme.player-border);
         animate background, border-color, y { duration: Theme.motion-fast; easing: ease-out; }
         property <color> ink: root.primary ? Theme.on-accent : (root.active ? Theme.accent-hover : Theme.ink);
         property <length> glyph: min(19px * Theme.ui-scale, max(10px * Theme.ui-scale, root.height - 6px * Theme.ui-scale)) - (root.pressed ? 2px * Theme.ui-scale : 0px);
@@ -702,11 +702,12 @@ component ClassicTool inherits Rectangle {
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
             animate width, height, colorize { duration: Theme.motion-fast; easing: ease-out; }
         }
-        if root.icon.width == 0: Text {
+        if root.icon.width == 0 && root.symbol != "": Text {
             text: root.symbol; color: face.ink; font-size: Theme.font(14);
             horizontal-alignment: center; vertical-alignment: center;
             animate color { duration: Theme.motion-fast; }
         }
+        @children
         if root.flashing: Rectangle {
             width: parent.width; height: parent.height; border-radius: 5px * Theme.ui-scale;
             background: Theme.ink.with-alpha(0.18 * (1 - root.flash));
@@ -769,6 +770,31 @@ component ClassicTool inherits Rectangle {
         show: root.tip-ready && !hit.pressed && !root.keyboard-held;
     }
 }
+// Both players show the monitoring mode, independent of the source channel count.
+component MonitorModeButton inherits ClassicTool {
+    in property <bool> chinese;
+    checkable: true;
+    label: root.chinese ? "单声道监听" : "Mono monitoring";
+    hint: root.active
+        ? (root.chinese ? "当前 MONO · 点击恢复 STEREO 监听" : "MONO · Switch to STEREO monitoring")
+        : (root.chinese ? "当前 STEREO · 点击切换到 MONO 合并监听" : "STEREO · Switch to MONO fold-down");
+    width: 28px * Theme.ui-scale + Theme.font(11) * 4.8;
+    HorizontalLayout {
+        alignment: center; spacing: 4px * Theme.ui-scale;
+        Image {
+            width: 17px * Theme.ui-scale; height: self.width; y: (parent.height - self.height) / 2;
+            source: root.active ? @image-url("icons/monitor-mono.svg") : @image-url("icons/monitor-stereo.svg");
+            colorize: root.active ? Theme.accent : Theme.dim; accessible-role: none;
+        }
+        Text {
+            text: root.active ? "MONO" : "STEREO";
+            font-size: Theme.font(11); font-weight: 700; letter-spacing: 0.55px * Theme.ui-scale;
+            color: Theme.text(4, root.active ? 6 : 0, root.active ? Theme.accent-hover : Theme.ink);
+            vertical-alignment: center; accessible-role: none;
+        }
+    }
+}
+
 // One shared SVG vocabulary is used by the native cursor bridge and the
 // paint-only fallback. Cursor size follows system DPI, independently of GUI zoom.
 // Hotspots are expressed in unscaled 20x20 source pixels.
@@ -1221,7 +1247,7 @@ component ClassicAuditionPanel inherits Rectangle {
         HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
             Rectangle {
                 width: 141px * Theme.ui-scale; height: 32px * Theme.ui-scale;
-                background: Theme.trough; border-width: 1px; border-color: Theme.player-border; border-radius: 7px * Theme.ui-scale;
+                background: Theme.trough; border-radius: 5px * Theme.ui-scale;
                 HorizontalLayout { padding: 2px * Theme.ui-scale; spacing: 3px * Theme.ui-scale;
                     ClassicTool {
                         height: 28px * Theme.ui-scale; icon: @image-url("icons/start.svg");
@@ -1287,7 +1313,10 @@ component ClassicAuditionPanel inherits Rectangle {
             Caption { text: root.chinese ? "音量" : "Volume"; }
             volume-control := Slider { input-label: root.chinese ? "音量" : "Volume"; min-width: 76px * Theme.ui-scale; max-width: 160px * Theme.ui-scale; horizontal-stretch: 1; minimum: -60; maximum: 0; step: 0.1; value <=> root.volume-db; changed => { root.volume(self.value); } }
             Caption { width: 66px * Theme.ui-scale; text: root.volume-label; horizontal-alignment: right; }
-            ClassicTool { width: 54px * Theme.ui-scale; symbol: root.chinese ? "单声道" : "Mono"; label: root.chinese ? "单声道监听" : "Mono monitoring"; active: root.mono; checkable: true; hint: root.mono ? (root.chinese ? "单声道监听已开启，点击关闭" : "Mono monitoring is on; click to turn off") : (root.chinese ? "单声道监听已关闭，点击开启" : "Mono monitoring is off; click to turn on"); clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+            MonitorModeButton {
+                chinese: root.chinese; active: root.mono;
+                clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); }
+            }
             Rectangle { horizontal-stretch: 1; }
             OutputPill {
                 chinese: root.chinese; backend: root.output-backend; rate: root.output-rate;
@@ -1707,7 +1736,11 @@ component WorkbenchAuditionPanel inherits Rectangle {
                 Caption { text: root.volume-label; font-size: Theme.font(9); }
                 Rectangle { horizontal-stretch: 1; }
                 Tool { width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; icon-size: 16px * Theme.ui-scale; icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; enabled: pitch-field.modified || rate-field.modified; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
-                Tool { width: 44px * Theme.ui-scale * root.font-factor; height: 24px * Theme.ui-scale; subtle: true; symbol: root.chinese ? "单声道" : "Mono"; symbol-size: Theme.font(10); label: root.chinese ? "单声道监听" : "Mono monitoring"; hint: root.mono ? (root.chinese ? "已开启" : "On") : ""; active: root.mono; checkable: true; clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+                MonitorModeButton {
+                    height: 24px * Theme.ui-scale;
+                    chinese: root.chinese; active: root.mono;
+                    clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); }
+                }
                 Rectangle { width: 1px; height: 14px * Theme.ui-scale; y: (parent.height - self.height) / 2; background: Theme.border; }
                 Tool { width: 22px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; symbol: "−"; symbol-size: Theme.font(14); label: root.chinese ? "缩小波形" : "Zoom out"; enabled: root.ready && root.zoom > 1; clicked => { root.zoom-change(0.5); } }
                 Tool { width: 22px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; symbol: "+"; symbol-size: Theme.font(14); label: root.chinese ? "放大波形" : "Zoom in"; enabled: root.ready && root.zoom < 128; clicked => { root.zoom-change(2); } }
