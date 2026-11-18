@@ -241,6 +241,7 @@ fn ai_skill_settings_render_in_both_languages_and_compact_windows() {
 #[test]
 fn openai_official_form_is_readable_in_both_languages_and_scales() {
     use i_slint_backend_testing::ElementHandle;
+    use slint::platform::WindowEvent;
 
     init_software_backend();
     for chinese in [false, true] {
@@ -254,6 +255,18 @@ fn openai_official_form_is_readable_in_both_languages_and_scales() {
             ui.set_ai_collapsed(false);
             ui.set_ai_settings(true);
             ui.set_ai_settings_page(0);
+            ui.set_ai_providers(ModelRc::new(VecModel::from(vec![
+                if chinese {
+                    "本地词表（离线）"
+                } else {
+                    "Local reference (offline)"
+                }
+                .into(),
+                if chinese { "未保存" } else { "Unsaved" }.into(),
+            ])));
+            ui.set_ai_provider_index(1);
+            ui.set_ai_auto_name("OpenAI Official 1".into());
+            ui.set_ai_dirty(true);
             ui.set_ai_protocol(8);
             ui.set_ai_endpoint(
                 audiolib_ai::config::Protocol::OpenAiOfficial
@@ -265,10 +278,7 @@ fn openai_official_form_is_readable_in_both_languages_and_scales() {
             ui.on_ai_action(move |kind, _| observed.set(kind));
             ui.show().unwrap();
             let language = if chinese { "cn" } else { "en" };
-            save_snapshot(
-                &ui,
-                &format!("openai-official-{language}-x{scale}-1080x700.png"),
-            );
+            ui.window().take_snapshot().unwrap();
             let selector = ElementHandle::find_by_accessible_label(
                 &ui,
                 if chinese {
@@ -287,10 +297,36 @@ fn openai_official_form_is_readable_in_both_languages_and_scales() {
                     "OpenAI Official"
                 })
             );
-            let endpoint = ElementHandle::find_by_accessible_label(&ui, "AI Base URL")
-                .next()
-                .unwrap();
+            // At 200% the fixed footer leaves this field below the fold. Wheel
+            // over the neutral heading above the selector, not the ComboBox.
+            let origin = selector.absolute_position();
+            let position = slint::LogicalPosition::new(origin.x + 8.0, origin.y - 12.0 * scale);
+            let mut endpoint = ElementHandle::find_by_accessible_label(&ui, "AI Base URL").next();
+            for _ in 0..12 {
+                if endpoint.is_some() {
+                    break;
+                }
+                ui.window().dispatch_event(WindowEvent::PointerScrolled {
+                    position,
+                    delta_x: 0.0,
+                    delta_y: -48.0 * scale,
+                });
+                i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+                ui.window().take_snapshot().unwrap();
+                endpoint = ElementHandle::find_by_accessible_label(&ui, "AI Base URL").next();
+            }
+            let endpoint =
+                endpoint.expect("official endpoint reachable by bounded content scrolling");
+            assert_eq!(
+                ui.get_ai_protocol(),
+                8,
+                "scrolling must not change provider"
+            );
             assert_eq!(endpoint.accessible_enabled(), Some(false));
+            save_snapshot(
+                &ui,
+                &format!("openai-official-{language}-x{scale}-1080x700.png"),
+            );
             let save = ElementHandle::find_by_accessible_label(
                 &ui,
                 if chinese {
