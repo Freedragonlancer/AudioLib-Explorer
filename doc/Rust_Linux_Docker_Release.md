@@ -59,6 +59,8 @@ docker compose -p audiolib-server -f server/deploy/docker/docker-compose.release
 
 Linux 使用现有 `tools/build-server-release.ps1`、`tools/package-server.ps1` 和 `tools/validate-server-package.ps1`，显式指定 `x86_64-unknown-linux-gnu` 或内部 Docker 输入所需的 `aarch64-unknown-linux-gnu`。打包及运行验收必须在匹配的 Linux 架构环境中执行；ARM 宿主机上的 amd64 仿真应明确记录，不等同于真实 x86_64 硬件覆盖。
 
+使用 `server-unix.json` 时，从对应运行目录获取 `server-validation.json`，并确认 `accept` 阶段已通过。将该文件传给 `package-server-docker.ps1 -ServerValidation`。`-ServerArchive` 和 `-ServerReport` 指向同一运行的打包阶段产物。
+
 Docker 正式流程使用 `tools/package-server-docker.ps1` 和 `tools/validate-server-docker.ps1`，从已通过原生包验收的归档生成独立平台镜像。构建上下文只包含公开 payload、Dockerfile 和无凭据的默认配置，不传入工作目录、Git 元数据或运行数据。完整 payload 包括版本标记、项目许可和 Rust 依赖许可证。源码 Dockerfile 保留为开发示例，不替代正式镜像的提交、许可及包边界验收。
 
 每个平台分别验证版本和提交、镜像架构、非 root 身份、禁用二进制更新、令牌鉴权、隔离合成库和 WAV 流、卷持久化、健康状态及正常退出。测试只使用独占的临时容器和卷，不操作已有服务，不使用真实资料库或源音频。最终报告、截图和日志保持私有。0.8.4 发布六个正式归档及各自 SHA256，共十二个资产；0.8.5 起新增 Windows x64 服务端 ZIP（`AudioLibServer-<tag>-win-x64.zip`）及其 `.sha256`，发布七个归档及各自 SHA256，共十四个资产。

@@ -8,17 +8,40 @@ param(
     [Parameter(Mandatory)]
     [ValidateSet('x86_64-pc-windows-msvc', 'x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'aarch64-apple-darwin')]
     [string]$Target,
-    [switch]$Asio
+    [switch]$Asio,
+    [ValidateNotNullOrEmpty()][string]$ReportPath
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'dependency-licenses.ps1')
 . (Join-Path $PSScriptRoot 'server-package-layout.ps1')
 . (Join-Path $PSScriptRoot 'console-utf8.ps1')
+$receiptLock = $null
 try {
 Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Server validation requires PowerShell 7.3 or newer.' }
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+function Assert-Within([string]$Path, [string]$Parent) {
+    $full = [IO.Path]::GetFullPath($Path)
+    $boundary = [IO.Path]::GetFullPath($Parent).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    if (!$full.StartsWith($boundary + [IO.Path]::DirectorySeparatorChar, $comparison)) { throw 'Server validation path escaped its owned boundary.' }
+}
+if ($ReportPath) {
+    $receiptRoot = Join-Path $taskRoot '.rust-validation'
+    $ReportPath = [IO.Path]::GetFullPath($ReportPath, $taskRoot)
+    Assert-Within $ReportPath $receiptRoot
+    if ([IO.Path]::GetFileName($ReportPath) -cne 'server-validation.json') {
+        throw 'The receipt file must be named server-validation.json.'
+    }
+    $null = Assert-LicensePath $ReportPath $receiptRoot
+    $lockPath = $ReportPath + '.lock'
+    $null = Assert-LicensePath $lockPath $receiptRoot
+    $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($ReportPath))
+    $receiptLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    # A failed repeat of the acceptance stage must not leave its old success output.
+    $null = Assert-LicensePath $ReportPath $receiptRoot
+    [IO.File]::Delete($ReportPath)
+}
 $tagMatch = [regex]::Match($Tag, '^v(\d+\.\d+\.\d+)(?:-(?:rc|beta)\.(?:0|[1-9]\d*))?$')
 if (!$tagMatch.Success) { throw 'Tag must be vMAJOR.MINOR.PATCH, vMAJOR.MINOR.PATCH-rc.N or vMAJOR.MINOR.PATCH-beta.N.' }
 $version = $tagMatch.Groups[1].Value
@@ -43,11 +66,6 @@ switch ($Target) {
     }
 }
 
-function Assert-Within([string]$Path, [string]$Parent) {
-    $full = [IO.Path]::GetFullPath($Path)
-    $boundary = [IO.Path]::GetFullPath($Parent).TrimEnd([IO.Path]::DirectorySeparatorChar)
-    if (!$full.StartsWith($boundary + [IO.Path]::DirectorySeparatorChar, $comparison)) { throw 'Server validation path escaped its owned boundary.' }
-}
 function Assert-UnlinkedTree([string]$Path) {
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     if ($null -ne $item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Linked server validation path is not supported.' }
@@ -95,8 +113,8 @@ function Read-Endpoint([string]$Path) {
 $latest = Join-Path $taskRoot 'dist/latest'
 $archiveName = "AudioLibServer-$Tag-$suffix.$extension"
 $archive = Join-Path $latest $archiveName
-$reportPath = Join-Path $latest "AudioLibServer-$Tag-$suffix-report.json"
-foreach ($path in @($archive, ($archive + '.sha256'), $reportPath)) {
+$packageReportPath = Join-Path $latest "AudioLibServer-$Tag-$suffix-report.json"
+foreach ($path in @($archive, ($archive + '.sha256'), $packageReportPath)) {
     Assert-Within $path $taskRoot
     Assert-UnlinkedTree $path
     if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw 'Required server release artifact is missing.' }
@@ -104,7 +122,7 @@ foreach ($path in @($archive, ($archive + '.sha256'), $reportPath)) {
 $archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
 $checksum = (Get-Content -LiteralPath ($archive + '.sha256') -Raw).TrimEnd("`r", "`n")
 if ($checksum -cne ($archiveHash + '  ' + $archiveName)) { throw 'Server archive checksum differs from its sidecar.' }
-$report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json -AsHashtable
+$report = Get-Content -LiteralPath $packageReportPath -Raw | ConvertFrom-Json -AsHashtable
 Assert-Keys $report @('success','version','tag','commit','target','binary_sha256','migrator_sha256','archive_sha256','checks','layout_revision','automatic_upgrade_compatible','manual_bootstrap_required','minimum_updater_version','old_updater_policy')
 Assert-ServerLayoutMetadata $report
 Assert-Keys $report.checks @('version', 'allowlist', 'unlinked_paths', 'privacy', 'archive_contents', 'executable_mode')
@@ -344,13 +362,13 @@ try {
         throw 'Extracted server snapshot format differs from the current schema 8 contract.'
     }
     # Safe public result only: neither endpoint responses nor process logs are exported.
-    [ordered]@{
+    $acceptanceResult = [ordered]@{
         success=$true; tag=$Tag; version=$version; target=$Target; commit=$commit
         archive_sha256=$archiveHash; binary_sha256=$report.binary_sha256;migrator_sha256=$report.migrator_sha256
         layout_revision=2;automatic_upgrade_compatible=$false;manual_bootstrap_required=$true;minimum_updater_version='0.9.0';old_updater_policy='refused'
         checks=@('archive checksum/report schema','new layout accepted and frozen old updater genuinely refused','public archive contents','extracted binaries/hash','production migrator excludes test-hooks','owned migrator status/start/status/rollback/status 8/9/8','isolated health API v1/schema 8/commit','schema 8 shared albums/plain Metadata format','synthetic library available')
         shutdown=$(if ($IsWindows) { 'owned test process termination; graceful drain not tested' } else { 'owned test process SIGTERM with bounded termination fallback' })
-    } | ConvertTo-Json -Depth 4
+    }
 } finally {
     $env:AUDIOLIB_UPDATE_DISABLE = $savedUpdateDisable
     if ($null -ne $http) { $http.Dispose() }
@@ -378,6 +396,24 @@ try {
         Remove-Item -LiteralPath $testRoot -Recurse -Force
     }
 }
+$acceptanceJson = $acceptanceResult | ConvertTo-Json -Depth 4
+if ($ReportPath) {
+    $temporaryReceipt = $ReportPath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+    $null = Assert-LicensePath $temporaryReceipt $receiptRoot
+    $stream = [IO.File]::Open($temporaryReceipt, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        try {
+            $bytes = [Text.Encoding]::UTF8.GetBytes($acceptanceJson + [char]10)
+            $stream.Write($bytes, 0, $bytes.Length)
+        } finally { $stream.Dispose() }
+        $null = Assert-LicensePath $ReportPath $receiptRoot
+        [IO.File]::Move($temporaryReceipt, $ReportPath)
+    } finally {
+        if ([IO.File]::Exists($temporaryReceipt)) { [IO.File]::Delete($temporaryReceipt) }
+    }
+}
+$acceptanceJson
 } finally {
+    if ($receiptLock) { $receiptLock.Dispose() }
     Restore-AudioLibConsoleEncoding
 }
