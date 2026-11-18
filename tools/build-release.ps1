@@ -39,7 +39,15 @@ if ($workspaceDrive.DisplayRoot) {
     $mappedRoot = $workspaceDrive.DisplayRoot.TrimEnd('\') + '\' + $taskRoot.Substring(3)
     $pathMappings[$mappedRoot] = '/audiolib/source'
 }
-foreach ($sourcePrefix in ($pathMappings.Keys | Sort-Object Length -Descending)) {
+# Cargo fingerprints the ordered flags. Break equal-length ties independently
+# of this process's hash-table enumeration and locale.
+$orderedPrefixes = [Collections.Generic.List[string]]::new([string[]]$pathMappings.Keys)
+$orderedPrefixes.Sort([Comparison[string]]{
+    param($left, $right)
+    if ($left.Length -ne $right.Length) { return $right.Length.CompareTo($left.Length) }
+    return [StringComparer]::Ordinal.Compare($left, $right)
+})
+foreach ($sourcePrefix in $orderedPrefixes) {
     $releaseFlags.Add('--remap-path-prefix=' + $sourcePrefix + '=' + $pathMappings[$sourcePrefix])
     $releaseFlags.Add('--remap-path-prefix=' + $sourcePrefix.Replace('\', '/') + '=' + $pathMappings[$sourcePrefix])
 }
