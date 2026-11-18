@@ -101,6 +101,52 @@ fn riff_size_including_header_is_accepted_only_with_complete_chunks() {
 }
 
 #[test]
+fn riff_size_four_bytes_short_accepts_only_complete_final_pcm() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("short-riff-size.wav");
+    let mut bytes = riff(&body());
+    let end = bytes.len();
+    set_riff_end(&mut bytes, end - 4);
+    assert_audio(&path, &bytes);
+
+    for invalid in [
+        // Still has some data beyond the parent, but the payload is cut short.
+        bytes[..end - 2].to_vec(),
+        // The parent now agrees with EOF but the data chunk still overflows it.
+        bytes[..end - 4].to_vec(),
+        // The data chunk extends beyond the parent without reaching EOF.
+        [bytes, b"tail".to_vec()].concat(),
+    ] {
+        fs::write(&path, invalid).unwrap();
+        assert!(probe(&path).is_err());
+        assert!(Decoder::open(&path).is_err());
+    }
+
+    let mut contents = fmt();
+    contents.extend(chunk(b"data", &[0; 5]));
+    let mut partial_frame = riff(&contents);
+    let end = partial_frame.len();
+    set_riff_end(&mut partial_frame, end - 4);
+    fs::write(&path, partial_frame).unwrap();
+    assert!(probe(&path).is_err());
+    assert!(Decoder::open(&path).is_err());
+}
+
+#[test]
+fn riff_size_four_bytes_short_can_cross_the_final_data_header() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("one-pcm-frame.wav");
+    let mut contents = fmt();
+    contents.extend(chunk(b"data", &[0, 64]));
+    let mut bytes = riff(&contents);
+    let end = bytes.len();
+    set_riff_end(&mut bytes, end - 4);
+    fs::write(&path, &bytes).unwrap();
+    assert_eq!(probe(&path).unwrap().frames, 1);
+    assert_eq!(Decoder::open(&path).unwrap().read(8).unwrap(), [0.5]);
+}
+
+#[test]
 fn riff_external_trailers_do_not_become_chunks_or_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("tail.wav");
@@ -152,11 +198,13 @@ fn data_or_metadata_crossing_parent_bounds_is_rejected_even_with_physical_bytes(
 
     let mut contents = body();
     contents.extend(chunk(b"LIST", b"INFO"));
-    let mut bytes = riff(&contents);
-    let end = bytes.len();
-    set_riff_end(&mut bytes, end - 2);
-    fs::write(&path, bytes).unwrap();
-    assert!(probe(&path).is_err());
+    for short_by in [2, 4] {
+        let mut bytes = riff(&contents);
+        let end = bytes.len();
+        set_riff_end(&mut bytes, end - short_by);
+        fs::write(&path, bytes).unwrap();
+        assert!(probe(&path).is_err());
+    }
 }
 
 #[test]
