@@ -2581,18 +2581,18 @@ impl Controller {
         cancel: &Arc<AtomicBool>,
         generation: u64,
     ) -> Result<PathBuf, String> {
-        let source_pair = self.playback.lock().unwrap().source_pair;
-        self.playable_path_for_pair(file, cancel, generation, source_pair, false)
+        let playback = self.playback.lock().unwrap().clone();
+        self.playable_path_for_output(file, cancel, generation, &playback, false)
     }
 
     /// Prepare a representation for a specific output source pair. Reconfiguration
     /// retains the current stream until the engine acknowledges its replacement.
-    pub(super) fn playable_path_for_pair(
+    pub(super) fn playable_path_for_output(
         self: &Arc<Self>,
         file: &AudioFile,
         cancel: &Arc<AtomicBool>,
         generation: u64,
-        source_pair: u16,
+        playback: &audiolib_audio::PlaybackConfig,
         retain_current: bool,
     ) -> Result<PathBuf, String> {
         if !self.remote_read_only() {
@@ -2621,10 +2621,30 @@ impl Controller {
                 .unwrap_or_default();
             (refused.0, refused.1 || remote.flac_unavailable)
         };
+        let transcode = settings.audition_transcode();
+        let preserve_channels = transcode && file.channels > 1 && playback.source_pair == 0 && {
+            let current = self.audio.status();
+            let confirmed = current.output_channels > 0
+                && current.active_backend == Some(playback.backend)
+                && playback
+                    .device_id
+                    .as_ref()
+                    .is_none_or(|id| Some(id) == current.active_device_id.as_ref())
+                && current.active_rate_policy == Some(playback.rate_policy)
+                && !retain_current;
+            let outputs = if confirmed {
+                current.output_channels
+            } else {
+                playback.monitor_output_channels()
+            };
+            // Keep the source layout until an unknown device negotiates its actual stream.
+            outputs > 2 || outputs == 0
+        };
         let options = RouteOptions {
-            source_pair,
+            source_pair: playback.source_pair,
+            preserve_channels,
             // The active profile's "transcode auditions" choice; off = always /stream.
-            transcode: settings.audition_transcode(),
+            transcode,
             pcm_unsupported: pcm_refused,
             flac_unavailable: flac_refused,
         };

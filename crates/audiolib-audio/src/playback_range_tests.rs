@@ -198,6 +198,7 @@ fn representation_change_remaps_original_frames_without_changing_selection_or_se
         0,
         AuditionSettings::default(),
         after.playback_range,
+        MonitorOutput::STEREO,
     )
     .unwrap();
     let mut frames = 0;

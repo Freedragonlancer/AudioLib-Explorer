@@ -72,7 +72,7 @@ fn private_bytes() -> usize {
 }
 
 fn process_and_drop(samples: &[f32]) {
-    let mut processor = SoundTouchProcessor::new(48_000, 1.5, 7.0).unwrap();
+    let mut processor = SoundTouchProcessor::new(2, 48_000, 1.5, 7.0).unwrap();
     processor.put_samples(samples).unwrap();
     processor.flush();
     let mut output = [0.0_f32; 512];

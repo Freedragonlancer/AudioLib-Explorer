@@ -434,6 +434,7 @@ fn child_queued_playback_error() {
         pitch_semitones: 3.0,
         rate: 1.25,
         mono: true,
+        stereo_pair: false,
         loop_enabled: true,
     };
     let transformed = controller

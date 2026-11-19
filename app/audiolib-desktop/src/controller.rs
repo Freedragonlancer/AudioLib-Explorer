@@ -1935,6 +1935,10 @@ impl Controller {
                     pitch_semitones,
                     rate,
                     mono,
+                    stereo_pair: c
+                        .ui
+                        .upgrade()
+                        .is_some_and(|ui| ui.get_audition_stereo_pair()),
                     loop_enabled: repeat,
                 });
             if let Some(settings) = settings.filter(|settings| settings.validate().is_ok()) {
@@ -7256,12 +7260,19 @@ impl Controller {
     fn configure_output(self: &Arc<Self>, playback: PlaybackConfig) -> Result<(), String> {
         let _prepare = self.remote_audio_prepare.lock().unwrap();
         let status = self.audio.status();
-        let file = status.file_path.as_deref().and_then(|path| {
-            (self.remote_read_only()
-                && self.playback.lock().unwrap().source_pair != playback.source_pair)
-                .then(|| self.remote_wave_file(path))
-                .flatten()
-        });
+        let previous = self.playback.lock().unwrap().clone();
+        let device_changed = previous.backend != playback.backend
+            || previous.device_id != playback.device_id
+            || previous.rate_policy != playback.rate_policy;
+        let file = status
+            .file_path
+            .as_deref()
+            .filter(|_| self.remote_read_only())
+            .and_then(|path| self.remote_wave_file(path))
+            .filter(|file| {
+                previous.source_pair != playback.source_pair
+                    || (file.channels > 1 && device_changed)
+            });
         let Some(file) = file else {
             self.audio
                 .enqueue_with_ack(AudioCommand::Configure(playback.clone()))
@@ -7279,13 +7290,8 @@ impl Controller {
         .store(true, Ordering::Release);
         let retained = self.remote_stream.lock().unwrap().clone();
         *self.remote_retained_stream.lock().unwrap() = retained.clone();
-        let path = match self.playable_path_for_pair(
-            &file,
-            &cancel,
-            generation,
-            playback.source_pair,
-            true,
-        ) {
+        let path = match self.playable_path_for_output(&file, &cancel, generation, &playback, true)
+        {
             Ok(path) => path,
             Err(error) => {
                 *self.remote_retained_stream.lock().unwrap() = None;
@@ -9001,6 +9007,8 @@ pub(crate) fn publish_player_state(
     buffering: bool,
 ) {
     ui.set_playback_state(playback_state_code(status.state));
+    ui.set_monitor_source_channels(i32::from(status.channels));
+    ui.set_monitor_output_channels(i32::from(status.output_channels));
     let error = status.error.as_deref().unwrap_or_default();
     if ui.get_playback_error().as_str() != error {
         ui.set_playback_error(error.into());
@@ -9043,12 +9051,19 @@ pub(crate) fn publish_wave_target(ui: &AppWindow, view: WaveView, duration: f64)
     ui.set_wave_target_end(end as f32);
     ui.set_wave_zoom(view.zoom as f32);
     ui.set_wave_scroll(view.scroll as f32);
+    let mut label_index = 0;
     let ticks = ruler_marks(start, end)
         .into_iter()
-        .map(|mark| RulerTick {
-            fraction: mark.fraction as f32,
-            major: mark.label.is_some(),
-            label: mark.label.unwrap_or_default().into(),
+        .map(|mark| {
+            let major = mark.label.is_some();
+            let tick = RulerTick {
+                fraction: mark.fraction as f32,
+                major,
+                label: mark.label.unwrap_or_default().into(),
+                label_index,
+            };
+            label_index += i32::from(major);
+            tick
         })
         .collect::<Vec<_>>();
     ui.set_ruler_ticks(ModelRc::new(VecModel::from(ticks)));
@@ -9076,6 +9091,7 @@ fn publish_audition(ui: &AppWindow, settings: AuditionSettings) {
     ui.set_pitch_text(format!("{:.2}", settings.pitch_semitones).into());
     ui.set_speed_text(format!("{:.2}", settings.rate).into());
     ui.set_audition_mono(settings.mono);
+    ui.set_audition_stereo_pair(settings.stereo_pair);
     ui.set_audition_repeat(settings.loop_enabled);
 }
 fn publish_volume(ui: &AppWindow, volume: f32) {
@@ -11566,6 +11582,7 @@ mod tests {
                 pitch_semitones: 3.0,
                 rate: 0.75,
                 mono: true,
+                stereo_pair: false,
                 loop_enabled: true,
             },
         };

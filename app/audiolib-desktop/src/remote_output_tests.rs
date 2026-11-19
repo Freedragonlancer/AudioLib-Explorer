@@ -161,6 +161,7 @@ fn child_remote_source_pair() {
             pitch_semitones: 3.0,
             rate: 0.5,
             mono: true,
+            stereo_pair: false,
             loop_enabled: true,
         };
         engine

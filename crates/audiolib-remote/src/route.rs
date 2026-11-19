@@ -9,8 +9,8 @@
 //! * Non-WAV containers use their original `/stream` bytes and a bundled decoder.
 //! * Transcoding on, WAV: `/audio/{id}/preview?codec=pcm&sr=48000&bits=16` (`sr=44100` for
 //!   the 44.1 kHz family, never above the source rate) and `ch=2` for more than two
-//!   channels. `sr` and `bits` are always sent: `codec=pcm` alone keeps the original 96k/24.
-//! * `codec=flac` (same `sr`, 16-bit, stereo; mono below [`MONO_BELOW_BPS`]) when the
+//!   channels unless discrete monitoring needs the original layout. `sr` and `bits` are always sent: `codec=pcm` alone keeps the original 96k/24.
+//! * `codec=flac` (same `sr`, 16-bit; stereo or, unless retaining channels, mono below [`MONO_BELOW_BPS`]) when the
 //!   rolling throughput is below [`FLAC_BELOW_BPS`] (assumed
 //!   [`CONSERVATIVE_BANDWIDTH_BPS`] before the first measurement), or when `codec=pcm`
 //!   answers `415`; when FLAC fails too (`415`, `503 TRANSCODER_UNAVAILABLE`) the raw
@@ -30,6 +30,8 @@ pub struct RouteOptions {
     /// The player's source channel pair (0-based): a later pair needs every channel, so
     /// no channel fold then.
     pub source_pair: u16,
+    /// Retain discrete channels for a multichannel monitor, including on slow links.
+    pub preserve_channels: bool,
     /// The active server profile transcodes auditions (`/preview`); `false` (the
     /// default) always streams the original.
     pub transcode: bool,
@@ -189,8 +191,8 @@ pub fn choose_route(
         return AudioRoute::Stream;
     }
     let bandwidth = bandwidth_bps.unwrap_or(CONSERVATIVE_BANDWIDTH_BPS);
-    let first_pair = options.source_pair == 0;
-    let stereo = (file.channels > 2 && first_pair).then_some(2);
+    let allow_fold = options.source_pair == 0 && !options.preserve_channels;
+    let stereo = (file.channels > 2 && allow_fold).then_some(2);
     let pcm = AudioRoute::Pcm(PreviewParams {
         sample_rate: Some(preview_rate(file.sample_rate)),
         bits: Some(16),
@@ -199,7 +201,7 @@ pub fn choose_route(
     let flac = AudioRoute::Flac(PreviewParams {
         sample_rate: Some(preview_rate(file.sample_rate)),
         bits: Some(16),
-        channels: if bandwidth < MONO_BELOW_BPS && file.channels > 1 && first_pair {
+        channels: if bandwidth < MONO_BELOW_BPS && file.channels > 1 && allow_fold {
             Some(1)
         } else {
             stereo
@@ -336,6 +338,17 @@ mod tests {
         };
         assert_eq!(choose_route(&six, Some(15e6), later), pcm(48_000, None));
         assert_eq!(route(&six, Some(30e6)), pcm(48_000, Some(2)));
+    }
+
+    #[test]
+    fn multi_monitor_preserves_channels_at_every_preview_quality() {
+        let six = wav(96_000, 24, 6);
+        let options = RouteOptions {
+            preserve_channels: true,
+            ..on()
+        };
+        assert_eq!(choose_route(&six, Some(5e6), options), pcm(48_000, None));
+        assert_eq!(choose_route(&six, Some(0.5e6), options), flac(48_000, None));
     }
 
     #[test]

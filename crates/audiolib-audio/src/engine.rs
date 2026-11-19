@@ -1,5 +1,5 @@
 // crates/audiolib-audio/src/engine.rs
-use crate::audition::{AuditionDecoder, AuditionSettings};
+use crate::audition::{AuditionDecoder, AuditionSettings, MonitorOutput};
 use crate::decoder::Decoder;
 use audiolib_core::{AudioFrameRange, Error, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -77,7 +77,56 @@ impl Default for PlaybackConfig {
         }
     }
 }
+fn suitable_output_channels(
+    device: &cpal::Device,
+    default: &cpal::SupportedStreamConfig,
+    rate: u32,
+) -> u16 {
+    device
+        .supported_output_configs()
+        .ok()
+        .and_then(|configs| {
+            configs
+                .filter(|c| {
+                    c.sample_format() == default.sample_format()
+                        && c.min_sample_rate() <= rate
+                        && c.max_sample_rate() >= rate
+                })
+                .map(|c| c.channels())
+                .max()
+        })
+        .unwrap_or(default.channels())
+}
 impl PlaybackConfig {
+    /// Discover the selected route off the UI/audio callback. Unknown devices cannot enable Multi.
+    pub fn monitor_output_channels(&self) -> u16 {
+        if self.backend == AudioBackend::Asio {
+            return list_devices(self.backend)
+                .ok()
+                .and_then(|devices| {
+                    devices
+                        .into_iter()
+                        .find(|d| self.device_id.as_ref().is_none_or(|id| d.id == *id))
+                })
+                .map_or(0, |d| d.max_output_channels);
+        }
+        let Ok(host) = host(self.backend) else {
+            return 0;
+        };
+        let device = match &self.device_id {
+            Some(id) => host
+                .output_devices()
+                .ok()
+                .and_then(|mut devices| devices.find(|d| identity(d).as_ref().ok() == Some(id))),
+            None => host.default_output_device(),
+        };
+        // WASAPI can accept virtual surround input and downmix it to stereo.
+        // The endpoint mix format describes the actual outputs available to the listener.
+        device
+            .and_then(|d| d.default_output_config().ok())
+            .map_or(0, |config| config.channels())
+    }
+
     fn validate(&self) -> Result<()> {
         self.audition.validate()?;
         if !self.volume.is_finite() || !(0.0..=1.0).contains(&self.volume) {
@@ -134,6 +183,9 @@ pub struct PlaybackStatus {
     pub sample_rate: u32,
     pub device_sample_rate: u32,
     pub channels: u16,
+    /// Channel count of the selected output layout, zero until the device is known.
+    #[serde(default)]
+    pub output_channels: u16,
     pub volume: f32,
     pub underruns: u64,
     pub error: Option<String>,
@@ -527,13 +579,19 @@ impl Drop for AudioEngine {
 // The PCM ring has one producer (control worker) and one consumer (output callback).
 // Atomic payload slots make a seek flush safe even if a driver invokes a late callback.
 struct Ring {
+    output: MonitorOutput,
     slots: Box<[AtomicU32]>,
     read: AtomicUsize,
     write: AtomicUsize,
 }
 impl Ring {
+    #[cfg(test)]
     fn new(capacity: usize) -> Self {
+        Self::with_output(capacity, MonitorOutput::STEREO)
+    }
+    fn with_output(capacity: usize, output: MonitorOutput) -> Self {
         Self {
+            output,
             slots: (0..capacity).map(|_| AtomicU32::new(0)).collect(),
             read: AtomicUsize::new(0),
             write: AtomicUsize::new(0),
@@ -565,6 +623,22 @@ impl Ring {
             .store(write.wrapping_add(count), Ordering::Release);
         count
     }
+    /// Consume an interleaved frame with one acquire/release pair for all lanes.
+    fn pop_frame(&self, dst: &mut [f32]) -> bool {
+        let read = self.read.load(Ordering::Relaxed);
+        if self.write.load(Ordering::Acquire).wrapping_sub(read) < dst.len() {
+            return false;
+        }
+        for (i, sample) in dst.iter_mut().enumerate() {
+            *sample = f32::from_bits(
+                self.slots[read.wrapping_add(i) % self.capacity()].load(Ordering::Relaxed),
+            );
+        }
+        self.read
+            .store(read.wrapping_add(dst.len()), Ordering::Release);
+        true
+    }
+    #[cfg(test)]
     fn pop(&self) -> Option<f32> {
         let read = self.read.load(Ordering::Relaxed);
         if read == self.write.load(Ordering::Acquire) {
@@ -669,19 +743,19 @@ struct SeekEnvelope {
     level: u32,
     /// Envelope length in output frames, fixed for the stream's device rate.
     frames: u32,
-    /// Last real stereo PCM frame, before the volume and seek envelopes. Retained
+    /// Last real PCM frame, before the volume and seek envelopes. Retained
     /// as fallback only during a fade, never across source changes or ordinary silence.
-    last_pcm: [f32; 2],
+    last_pcm: Box<[f32]>,
 }
 
 impl SeekEnvelope {
-    fn new(frames: u32) -> Self {
+    fn new(frames: u32, lanes: usize) -> Self {
         let frames = frames.max(2);
         Self {
             revision: 0,
             level: frames - 1,
             frames,
-            last_pcm: [0.0; 2],
+            last_pcm: vec![0.0; lanes].into_boxed_slice(),
         }
     }
 }
@@ -689,7 +763,7 @@ impl SeekEnvelope {
 #[cfg(test)]
 impl Default for SeekEnvelope {
     fn default() -> Self {
-        Self::new(SEEK_FADE_MIN_FRAMES)
+        Self::new(SEEK_FADE_MIN_FRAMES, 2)
     }
 }
 /// Audio a network source must hold in memory before playback starts or resumes after a
@@ -774,12 +848,14 @@ impl Output {
     /// have the next block in memory yet (it never waits for the network).
     fn fill(&mut self) -> Result<bool> {
         let lookahead = self.lookahead();
-        while self.realtime.ring.len() < self.prefill_frames * 2 && !self.eof {
+        while self.realtime.ring.len() < self.prefill_frames * self.realtime.ring.output.lanes()
+            && !self.eof
+        {
             if self.pending_offset >= self.pending.len() {
                 if !self.decoder.is_buffered(lookahead) {
                     return Ok(true);
                 }
-                let source = self.decoder.next()?;
+                let source = self.decoder.next_output()?;
                 if source.is_empty() {
                     self.eof = true;
                     self.realtime.source_finished.store(true, Ordering::Release);
@@ -789,10 +865,10 @@ impl Output {
                 self.pending = source;
                 self.pending_offset = 0;
             }
-            self.pending_offset += self
-                .realtime
-                .ring
-                .push_aligned(&self.pending[self.pending_offset..], 2);
+            self.pending_offset += self.realtime.ring.push_aligned(
+                &self.pending[self.pending_offset..],
+                self.realtime.ring.output.lanes(),
+            );
             if self.pending_last && self.pending_offset == self.pending.len() {
                 self.eof = true;
                 self.realtime.source_finished.store(true, Ordering::Release);
@@ -811,7 +887,7 @@ impl Output {
             self.realtime.arm_fade_in();
         }
         if self.eof
-            || (self.realtime.ring.len() >= self.prefill_frames * 2
+            || (self.realtime.ring.len() >= self.prefill_frames * self.realtime.ring.output.lanes()
                 && self.decoder.is_buffered(self.frames_for(PREBUFFER_SECONDS)))
         {
             self.realtime
@@ -832,9 +908,10 @@ impl Output {
     /// memory, ramp the gain down and pause (no glitch, no noise); resume with a ramp once
     /// [`REBUFFER_SECONDS`] are buffered. Files are never starved, so this is a no-op.
     fn regulate(&mut self, starved: bool) -> Result<()> {
-        let ordinary_low = (self.sample_rate as usize / 16).max(64) * 2;
+        let ordinary_low =
+            (self.sample_rate as usize / 16).max(64) * self.realtime.ring.output.lanes();
         let low = if self.prefill_frames > self.sample_rate as usize / 8 {
-            ordinary_low.max(self.prefill_frames * 2)
+            ordinary_low.max(self.prefill_frames * self.realtime.ring.output.lanes())
         } else {
             ordinary_low
         };
@@ -862,7 +939,10 @@ impl Output {
             Buffering::Waiting(frames) => {
                 if self.eof || self.decoder.is_buffered(frames) {
                     self.fill()?;
-                    if !self.eof && self.realtime.ring.len() < self.prefill_frames * 2 {
+                    if !self.eof
+                        && self.realtime.ring.len()
+                            < self.prefill_frames * self.realtime.ring.output.lanes()
+                    {
                         return Ok(());
                     }
                     self.realtime
@@ -971,12 +1051,6 @@ impl Output {
             // Opening a WAV (including its headers on a NAS) can block longer than
             // the old PCM ring lasts. Never open it before the callback fades out.
             let decoder = open_decoder()?;
-            let source_channels = usize::from(decoder.info.metadata.channels);
-            if usize::from(source_pair) * 2 >= source_channels {
-                return Err(Error::Audio(
-                    "Source channel pair is outside the loaded WAV channels".into(),
-                ));
-            }
             self.decoder = prepare_audition_decoder(
                 decoder,
                 self.sample_rate,
@@ -984,6 +1058,7 @@ impl Output {
                 source_pair,
                 audition,
                 playback_range,
+                self.realtime.ring.output,
             )?;
             self.realtime.ring.clear_suspended();
             self.realtime.consumed.store(0, Ordering::Relaxed);
@@ -1108,13 +1183,14 @@ impl RenderCallback {
     /// Callback state for a device stream; all buffers are allocated here, never
     /// in [`RenderCallback::render`].
     fn new(realtime: Arc<Realtime>, channels: usize, pair: usize, sample_rate: u32) -> Self {
+        let lanes = realtime.ring.output.lanes();
         Self {
             realtime,
             channels,
             pair,
             ramp_step: 1.0 / (sample_rate as f32 * 0.005).max(1.0),
             gain: 0.0,
-            envelope: SeekEnvelope::new(seek_fade_frames(sample_rate)),
+            envelope: SeekEnvelope::new(seek_fade_frames(sample_rate), lanes),
         }
     }
     fn render<T: cpal::SizedSample + cpal::FromSample<f32>>(&mut self, output: &mut [T]) {
@@ -1138,7 +1214,7 @@ impl RenderCallback {
         if revision != self.envelope.revision {
             self.envelope.revision = revision;
             self.envelope.level = 0;
-            self.envelope.last_pcm = [0.0; 2];
+            self.envelope.last_pcm.fill(0.0);
         }
         let fade_out = self.realtime.transition.fade_out.load(Ordering::Acquire);
         let target = f32::from_bits(self.realtime.gain.load(Ordering::Relaxed));
@@ -1150,43 +1226,33 @@ impl RenderCallback {
             self.gain += (target - self.gain).clamp(-self.ramp_step, self.ramp_step);
             let muted = fade_out && self.envelope.level == 0;
             faded_out |= muted;
-            let complete = running && !muted && self.realtime.ring.len() >= 2;
+            let complete =
+                running && !muted && self.realtime.ring.pop_frame(&mut self.envelope.last_pcm);
             let gain = self.gain * seek_envelope_gain(self.envelope.level, self.envelope.frames);
-            let pcm = if complete {
+            if complete {
                 consumed += 1;
-                let pcm = [
-                    self.realtime.ring.pop().unwrap_or(0.0),
-                    self.realtime.ring.pop().unwrap_or(0.0),
-                ];
-                self.envelope.last_pcm = pcm;
-                pcm
-            } else if running && fade_out && !muted {
-                // A short EOF/network tail can run dry before the fade finishes.
-                // Decay the last real frame instead of jumping straight to zero;
-                // synthesized output never advances the source playback cursor.
-                self.envelope.last_pcm
-            } else {
-                if running && !fade_out {
-                    underrun = true;
-                }
-                self.envelope.last_pcm = [0.0; 2];
-                [0.0; 2]
-            };
-            let [left, right] = pcm.map(|sample| sample * gain);
-            silent &= left == 0.0 && right == 0.0;
+            } else if !(running && fade_out && !muted) {
+                underrun |= running && !fade_out;
+                self.envelope.last_pcm.fill(0.0);
+            }
             if fade_out {
                 self.envelope.level = self.envelope.level.saturating_sub(1);
             } else if complete {
                 self.envelope.level = (self.envelope.level + 1).min(self.envelope.frames - 1);
             }
+            let offset = if self.envelope.last_pcm.len() == 2 {
+                self.pair * 2
+            } else {
+                0
+            };
             for (channel, sample) in frame.iter_mut().enumerate() {
-                let value = if channel == self.pair * 2 {
-                    left
-                } else if channel == self.pair * 2 + 1 {
-                    right
-                } else {
-                    0.0
-                };
+                let value = channel
+                    .checked_sub(offset)
+                    .and_then(|i| self.envelope.last_pcm.get(i))
+                    .copied()
+                    .unwrap_or(0.0)
+                    * gain;
+                silent &= value == 0.0;
                 *sample = T::from_sample(value.clamp(-1.0, 1.0));
             }
         }
@@ -1236,24 +1302,18 @@ fn prepare_audition_decoder(
     pair: u16,
     settings: AuditionSettings,
     range: Option<AudioFrameRange>,
+    output: MonitorOutput,
 ) -> Result<AuditionDecoder> {
     let rate = decoder.info.metadata.sample_rate;
-    if let Some(range) = range {
+    let bounds = if let Some(range) = range {
         let mapped = range.map_inward(rate, decoder.info.metadata.frames)?;
-        let start_frame = ((position * f64::from(rate)).round() as u64)
+        let start = ((position * f64::from(rate)).round() as u64)
             .clamp(mapped.start_frame, mapped.end_frame);
-        AuditionDecoder::new_bounded(
-            decoder,
-            output_rate,
-            start_frame,
-            mapped.end_frame,
-            pair,
-            settings,
-        )
+        start..mapped.end_frame
     } else {
-        let start_frame = (position * f64::from(rate)) as u64;
-        AuditionDecoder::new(decoder, output_rate, start_frame, pair, settings)
-    }
+        (position * f64::from(rate)) as u64..decoder.info.metadata.frames
+    };
+    AuditionDecoder::routed(decoder, output_rate, bounds, pair, settings, output)
 }
 
 struct Worker {
@@ -1534,6 +1594,7 @@ impl Worker {
         self.needs_recovery = false;
         self.update(|status| {
             status.state = PlaybackState::Paused;
+            status.output_channels = 0;
             status.error = Some(format!(
                 "ASIO could not recover ({error}). WASAPI device default with resampling is selected; press Play to resume."
             ));
@@ -1607,13 +1668,12 @@ impl Worker {
         let mut config = default.config();
         config.sample_rate = rate;
         if self.config.backend == AudioBackend::Asio {
-            config.channels = device
-                .supported_output_configs()
-                .map_err(audio_error)?
-                .map(|supported| supported.channels())
-                .max()
-                .unwrap_or(config.channels);
+            config.channels = suitable_output_channels(&device, &default, rate);
         }
+        let monitor = MonitorOutput {
+            channels: config.channels,
+            pair: self.config.output_pair,
+        };
         if usize::from(self.config.output_pair) * 2 >= usize::from(config.channels)
             || (config.channels > 1
                 && usize::from(self.config.output_pair) * 2 + 1 >= usize::from(config.channels))
@@ -1642,12 +1702,6 @@ impl Worker {
             }
             config.buffer_size = cpal::BufferSize::Fixed(self.config.buffer_frames);
         }
-        let source_channels = usize::from(decoder.info.metadata.channels);
-        if usize::from(self.config.source_pair) * 2 >= source_channels {
-            return Err(Error::Audio(
-                "Source channel pair is outside the loaded WAV channels".into(),
-            ));
-        }
         let decoder = prepare_audition_decoder(
             decoder,
             rate,
@@ -1655,9 +1709,10 @@ impl Worker {
             self.config.source_pair,
             self.config.audition,
             status.playback_range,
+            monitor,
         )?;
         let realtime = Arc::new(Realtime {
-            ring: Ring::new(output_ring_capacity(rate)),
+            ring: Ring::with_output(output_ring_capacity(rate) / 2 * monitor.lanes(), monitor),
             running: AtomicBool::new(false),
             gain: AtomicU32::new(self.config.volume.to_bits()),
             consumed: AtomicU64::new(0),
@@ -1788,6 +1843,7 @@ impl Worker {
         self.update_transport(|status| {
             status.position = position;
             status.device_sample_rate = rate;
+            status.output_channels = config.channels;
             status.state = PlaybackState::Playing;
             status.error = None;
             status.active_backend = Some(self.config.backend);
@@ -1806,8 +1862,13 @@ impl Worker {
                 self.suspend_output()?;
                 self.needs_recovery = false;
                 let previous = self.snapshot();
+                if previous.file_path.as_ref() != Some(&path) {
+                    self.config.audition.stereo_pair = false;
+                    self.config.audition.mono = false;
+                }
                 self.update(|status| {
                     *status = PlaybackStatus {
+                        output_channels: previous.output_channels,
                         generation,
                         transport_revision: previous.transport_revision,
                         state: PlaybackState::Loading,
@@ -1843,7 +1904,12 @@ impl Worker {
                 } else {
                     self.close_output();
                 }
-                let prepared = self.snapshot();
+                let mut prepared = self.snapshot();
+                if prepared.output_channels == 0
+                    || (self.output.is_none() && self.config.device_id.is_none())
+                {
+                    prepared.output_channels = self.config.monitor_output_channels();
+                }
                 self.update_transport(|status| {
                     *status = PlaybackStatus {
                         generation,
@@ -1852,6 +1918,7 @@ impl Worker {
                         duration: metadata.duration,
                         sample_rate: metadata.sample_rate,
                         channels: metadata.channels,
+                        output_channels: prepared.output_channels,
                         volume: self.config.volume,
                         audition: self.config.audition,
                         active_backend: prepared.active_backend,
@@ -2077,8 +2144,12 @@ impl Worker {
             AudioCommand::SetAudition(settings) => {
                 settings.validate()?;
                 let old = self.config.audition;
-                let position = if (settings.pitch_semitones, settings.rate, settings.mono)
-                    != (old.pitch_semitones, old.rate, old.mono)
+                let position = if (
+                    settings.pitch_semitones,
+                    settings.rate,
+                    settings.mono,
+                    settings.stereo_pair,
+                ) != (old.pitch_semitones, old.rate, old.mono, old.stereo_pair)
                 {
                     let status = self.snapshot();
                     let position = self
@@ -2121,7 +2192,21 @@ impl Worker {
                 let position = self.output.as_ref().map(|output| output.position());
                 self.close_output();
                 self.config = config;
+                let previous_channels = self.snapshot().output_channels;
+                let mut channels = previous_channels;
+                if previous.backend != self.config.backend
+                    || previous.device_id != self.config.device_id
+                    || previous.rate_policy != self.config.rate_policy
+                {
+                    let status = self.snapshot();
+                    channels = if status.file_path.is_some() {
+                        self.config.monitor_output_channels()
+                    } else {
+                        0
+                    };
+                }
                 self.update(|status| {
+                    status.output_channels = channels;
                     status.volume = self.config.volume;
                     status.audition = self.config.audition;
                 });
@@ -2130,6 +2215,8 @@ impl Worker {
                     self.config = previous;
                     self.update(|status| {
                         status.volume = self.config.volume;
+                        status.output_channels = previous_channels;
+                        status.audition = self.config.audition;
                         if let Some(position) = position {
                             status.position = position.min(status.duration);
                         }
@@ -2181,6 +2268,7 @@ impl Worker {
                 let previous_config = self.config.clone();
                 self.close_output();
                 self.config = config;
+                let channels = self.config.monitor_output_channels();
                 self.needs_recovery = false;
                 // Do not publish Loading/Ready: this is still the same logical
                 // record/session and a paused audition must remain paused.
@@ -2188,6 +2276,7 @@ impl Worker {
                     status.file_path = Some(path);
                     status.sample_rate = metadata.sample_rate;
                     status.channels = metadata.channels;
+                    status.output_channels = channels;
                     status.duration = metadata.duration;
                     status.position = position.min(metadata.duration);
                     status.volume = self.config.volume;
@@ -3085,6 +3174,7 @@ mod tests {
                 rate: 0.5,
                 pitch_semitones: 3.0,
                 mono: true,
+                stereo_pair: false,
                 loop_enabled: true,
             };
             let mut worker = worker(PlaybackStatus {
@@ -3833,6 +3923,70 @@ mod tests {
         assert_eq!(monitor_pair(&[0.1, 0.2], 0), (0.1, 0.2));
         assert_eq!(monitor_pair(&[0.1, 0.2, 0.3, 0.4], 1), (0.3, 0.4));
     }
+    #[test]
+    fn new_source_resets_monitor_override_but_reload_keeps_the_listeners_choice() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first.wav");
+        let second = temp.path().join("second.wav");
+        for file in [&first, &second] {
+            crate::tests::write_wav(file, 48000, 6, 16, 1, &[0; 120], false, false);
+        }
+        let mut worker = worker(PlaybackStatus {
+            output_channels: 8,
+            ..Default::default()
+        });
+        worker.config.device_id = Some("fixture".into());
+        worker.config.audition.mono = true;
+        worker.command(AudioCommand::Load(first.clone())).unwrap();
+        assert!(!worker.snapshot().audition.mono);
+        let selected_pair = AuditionSettings {
+            stereo_pair: true,
+            pitch_semitones: 3.0,
+            ..Default::default()
+        };
+        worker
+            .command(AudioCommand::SetAudition(selected_pair))
+            .unwrap();
+        worker.command(AudioCommand::Load(first)).unwrap();
+        assert_eq!(worker.snapshot().audition, selected_pair);
+        worker.command(AudioCommand::Load(second)).unwrap();
+        let automatic = worker.snapshot().audition;
+        assert!(!automatic.mono && !automatic.stereo_pair);
+        assert_eq!(automatic.pitch_semitones, 3.0);
+    }
+
+    #[test]
+    fn multi_callback_fades_and_counts_complete_discrete_frames() {
+        let mut realtime = stream_error_realtime();
+        realtime.ring = Ring::with_output(
+            24,
+            MonitorOutput {
+                channels: 6,
+                pair: 0,
+            },
+        );
+        realtime.consumed.store(0, Ordering::Relaxed);
+        realtime.running.store(true, Ordering::Release);
+        realtime.gain.store(1.0_f32.to_bits(), Ordering::Relaxed);
+        let realtime = Arc::new(realtime);
+        let frame = [0.1_f32, -0.2, 0.3, -0.4, 0.5, -0.6];
+        realtime.ring.push_aligned(&frame.repeat(3), 6);
+        let mut render = RenderCallback::new(realtime.clone(), 6, 0, 48000);
+        render.gain = 1.0;
+        let mut pcm = [0.0_f32; 6];
+        render.render(&mut pcm);
+        assert_eq!(pcm, frame);
+        realtime.transition.fade_out.store(true, Ordering::Release);
+        for _ in 0..4 {
+            render.render(&mut pcm);
+        }
+        assert_eq!(realtime.consumed.load(Ordering::Relaxed), 3);
+        assert!(pcm[0] > 0.0 && pcm[0] < frame[0]);
+        for i in 1..6 {
+            assert!((pcm[i] / frame[i] - pcm[0] / frame[0]).abs() < 1e-6);
+        }
+    }
+
     #[test]
     fn stereo_ring_routes_to_hardware_pair_and_preserves_frame_alignment() {
         let realtime = Arc::new(Realtime {
