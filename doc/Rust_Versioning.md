@@ -1,8 +1,10 @@
 # AudioLib Explorer 版本规范
 
-当前正式版为 **[1.0.7](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.7)**，于 2026-11-19 07:33:05 UTC（北京时间 2026-11-19 15:33:05）发布。最终 main/tag 为 `5a4604dd36317f77de240a3d6dda53950c1286b5`。API v1、本地写 schema 8、服务端写 schema 9、快照 3..=9。发布、缓存与安装核验见 [1.0.7 发布记录](Rust_Release_1.0.7.md)。
+当前正式版为 **[1.0.8](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.8)**，于 2026-11-19 15:21:14 UTC（北京时间 2026-11-19 23:21:14）发布。最终 main/tag 为 `54377f7d9a60b7d12e01e28bb01178d2c25977f9`。API v1、本地写 schema 8、服务端写 schema 9、快照 3..=9。发布、缓存与安装核验见 [1.0.8 发布记录](Rust_Release_1.0.8.md)。
 
-上一正式版为 **[1.0.6](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.6)**，于 2026-11-19 02:19:43 UTC（北京时间 2026-11-19 10:19:43）发布。最终 main/tag 为 `f28e61a5de386ffe684c1b912f2f4621ed19c39d`。API v1、本地写 schema 8、服务端写 schema 9、快照 3..=9。发布、缓存与安装核验见 [1.0.6 发布记录](Rust_Release_1.0.6.md)。
+上一正式版为 **[1.0.7](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.7)**，于 2026-11-19 07:33:05 UTC（北京时间 2026-11-19 15:33:05）发布。最终 main/tag 为 `5a4604dd36317f77de240a3d6dda53950c1286b5`。API v1、本地写 schema 8、服务端写 schema 9、快照 3..=9。发布、缓存与安装核验见 [1.0.7 发布记录](Rust_Release_1.0.7.md)。
+
+历史正式版为 **[1.0.6](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.6)**，于 2026-11-19 02:19:43 UTC（北京时间 2026-11-19 10:19:43）发布。最终 main/tag 为 `f28e61a5de386ffe684c1b912f2f4621ed19c39d`。API v1、本地写 schema 8、服务端写 schema 9、快照 3..=9。发布、缓存与安装核验见 [1.0.6 发布记录](Rust_Release_1.0.6.md)。
 
 历史正式版为 **[1.0.5](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.5)**，于 2026-11-18 17:44:08 UTC（北京时间 2026-11-19 01:44:08）发布。最终 main/tag 为 `f3fd17df2771e1a3aaa68b21b928ce17d4777f7e`。API v1、本地写 schema 8、服务端写 schema 9、快照 3..=9。发布、缓存与安装核验见 [1.0.5 发布记录](Rust_Release_1.0.5.md)。
 
@@ -29,15 +31,15 @@ Search Metadata v2 的 0.9.0 发布记录见[0.9.0 迁移方案](Rust_Release_0.
 
 0.9.4 范围为新音频源 MP3、AIFF/BWF、RIFF/RF64/BW64 边界与解码修正、原始非 WAV 远程试听、搜索任务标签自适应与关键词优先，以及隐藏缓存所有权标记的工具修正。上述 0.9.3 替换历史保持原样。
 
-程序、API、schema 和派生 feature 各有版本，兼容性由[共享契约与完整格式目录](api/Library_Migration_Compatibility.md)共同判断，不能互相推导。1.0.7 相对 v1.0.6、1.0.6 相对 v1.0.5、1.0.5 相对 v1.0.4、1.0.4 相对 v1.0.3、1.0.3 相对 v1.0.2、1.0.2 相对 v1.0.1 均为 PATCH；1.0.0 为首次 1.x 正式版，API 和资料库格式沿用 0.9.6。0.9.6 相对 v0.9.5、0.9.5 相对 v0.9.4、0.9.4 相对 v0.9.3、0.9.3 相对 v0.9.2 均为 PATCH；0.9.2 相对 `v0.9.1`、0.9.1 相对 `v0.9.0` 均为 PATCH；0.9.0 相对 `v0.8.7` 已完成 MINOR 升版。历史记录保留原来的身份。
+程序、API、schema 和派生 feature 各有版本，兼容性由[共享契约与完整格式目录](api/Library_Migration_Compatibility.md)共同判断，不能互相推导。1.0.8 相对 v1.0.7、1.0.7 相对 v1.0.6、1.0.6 相对 v1.0.5、1.0.5 相对 v1.0.4、1.0.4 相对 v1.0.3、1.0.3 相对 v1.0.2、1.0.2 相对 v1.0.1 均为 PATCH；1.0.0 为首次 1.x 正式版，API 和资料库格式沿用 0.9.6。0.9.6 相对 v0.9.5、0.9.5 相对 v0.9.4、0.9.4 相对 v0.9.3、0.9.3 相对 v0.9.2 均为 PATCH；0.9.2 相对 `v0.9.1`、0.9.1 相对 `v0.9.0` 均为 PATCH；0.9.0 相对 `v0.8.7` 已完成 MINOR 升版。历史记录保留原来的身份。
 
-| 版本 | 来源（唯一事实） | v0.9.3 基线 | 0.9.4 | 0.9.5 | 0.9.6 | 1.0.0 | 1.0.1 | 1.0.2 | 1.0.3 | 1.0.4 | 1.0.5 | 1.0.6 | 1.0.7 | 含义 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version` | 0.9.3 | 0.9.4 | 0.9.5 | 0.9.6 | 1.0.0 | 1.0.1 | 1.0.2 | 1.0.3 | 1.0.4 | 1.0.5 | 1.0.6 | 1.0.7 | 客户端、CLI、服务端共用，发布时一起升 |
-| API 版本 | URL 路径前缀 `/api/v1/` | v1 | v1 | v1 | v1 | v1 | v1 | v1 | v1 | v1 | v1 | v1 | v1 | 不兼容改动才换成 `/api/v2/` |
-| 普通本地写目标 | DB `SCHEMA_VERSION` 与 Core `compatibility::TARGET_SCHEMA` | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 常规本地写者仍拒绝s9写入 |
-| 专用服务端写目标 | Core `compatibility::SERVER_TARGET_SCHEMA`，由 `LibraryFormat::server_schema9()` 使用 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 显式服务端迁移及专用s9写者，不从本地常量推导 |
-| 客户端快照读取范围 | DB `MIN_SNAPSHOT_SCHEMA_VERSION` 至 Core `compatibility::SNAPSHOT_SCHEMA_MAX` | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 还须校验完整格式、feature、结构与身份 |
+| 版本 | 来源（唯一事实） | v0.9.3 基线 | 0.9.4 | 0.9.5 | 0.9.6 | 1.0.0 | 1.0.1 | 1.0.2 | 1.0.3 | 1.0.4 | 1.0.5 | 1.0.6 | 1.0.7 | 1.0.8 | 含义 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version` | 0.9.3 | 0.9.4 | 0.9.5 | 0.9.6 | 1.0.0 | 1.0.1 | 1.0.2 | 1.0.3 | 1.0.4 | 1.0.5 | 1.0.6 | 1.0.7 | 1.0.8 | 客户端、CLI、服务端共用，发布时一起升 |
+| API 版本 | URL 路径前缀 `/api/v1/` | v1 | v1 | v1 | v1 | v1 | v1 | v1 | v1 | v1 | v1 | v1 | v1 | v1 | 不兼容改动才换成 `/api/v2/` |
+| 普通本地写目标 | DB `SCHEMA_VERSION` 与 Core `compatibility::TARGET_SCHEMA` | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 常规本地写者仍拒绝s9写入 |
+| 专用服务端写目标 | Core `compatibility::SERVER_TARGET_SCHEMA`，由 `LibraryFormat::server_schema9()` 使用 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 显式服务端迁移及专用s9写者，不从本地常量推导 |
+| 客户端快照读取范围 | DB `MIN_SNAPSHOT_SCHEMA_VERSION` 至 Core `compatibility::SNAPSHOT_SCHEMA_MAX` | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 3..=9 | 还须校验完整格式、feature、结构与身份 |
 
 普通本地 base 格式仍为 `ale-s8-cld1-t3-m2-p1-a1`，服务端 schema-9 base 格式为 `ale-s9-cld1-t3-m2-p1-a1-sd1`。0.9.4 同时支持必需 feature `audio_sources:1` 对应的 `ale-s8-cld1-t3-m2-p1-a1-af1` / `ale-s9-cld1-t3-m2-p1-a1-sd1-af1`；该 feature 只在首次成功发布扩展源记录的同一事务中启用，原格式库和空库保持原 ID。必需 feature、目录结构和身份按实际完整格式校验，不从程序 PATCH 或 schema 数字推导。
 
