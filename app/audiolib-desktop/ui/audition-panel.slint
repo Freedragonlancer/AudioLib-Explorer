@@ -1,6 +1,6 @@
 // app/audiolib-desktop/ui/audition-panel.slint
 import { ComboBox } from "std-widgets.slint";
-import { Theme, ThemedSlider as Slider, ThemedLineEdit as LineEdit } from "theme.slint";
+import { Theme, ThemedSlider as Slider } from "theme.slint";
 
 /// One time-ruler tick: its position as a fraction of the visible range and, on
 /// major ticks, the time label drawn beside it.
@@ -297,6 +297,7 @@ component TransformField inherits Rectangle {
     private property <float> maximum: root.pitch ? 2400 : 4;
     private property <float> current: root.pitch ? round(root.text.to-float() * 100) : root.text.to-float();
     private property <string> unit: root.pitch ? "ct" : "×";
+    private property <string> title: root.pitch ? (root.chinese ? "音高" : "Pitch") : (root.chinese ? "速度" : "Rate");
     out property <bool> modified: root.current != (root.pitch ? 0 : 1);
     private property <string> label: root.pitch ? (root.chinese ? "调整音高" : "Adjust pitch") : (root.chinese ? "调整速度" : "Adjust speed");
     private property <string> draft;
@@ -331,11 +332,12 @@ component TransformField inherits Rectangle {
         }
     }
     changed enabled => { if !root.enabled { popup.close(); } }
-    width: (root.pitch ? 20px : 14px) * Theme.ui-scale + Theme.font(12) * (root.pitch ? 4.3 : 3.3);
-    height: max(24px * Theme.ui-scale, Theme.font(12) + 8px * Theme.ui-scale);
-    border-radius: 4px * Theme.ui-scale; border-width: 1px;
-    border-color: trigger.has-focus ? Theme.accent : hit.has-hover ? Theme.strong-border : Theme.player-border;
-    background: hit.pressed ? Theme.trough : hit.has-hover ? Theme.hover : Theme.raised;
+    // Reserve enough space for the full range while the value is changing.
+    width: title-text.preferred-width + widest-number.preferred-width + unit-text.preferred-width + 19px * Theme.ui-scale;
+    height: max(22px * Theme.ui-scale, Theme.font(12) + 8px * Theme.ui-scale);
+    border-radius: 3px * Theme.ui-scale; border-width: 1phx;
+    border-color: trigger.has-focus ? Theme.accent : transparent;
+    background: hit.pressed ? Theme.trough : hit.has-hover ? Theme.hover : transparent;
     opacity: root.enabled ? 1 : 0.45;
     animate border-color, background { duration: Theme.motion-fast; }
     accessible-role: button; accessible-label: root.label; accessible-value: root.formatted(root.current) + " " + root.unit;
@@ -344,39 +346,61 @@ component TransformField inherits Rectangle {
     trigger := ActionKeyScope {
         enabled: root.enabled; activated => { root.open(); }
     }
-    Text {
-        text: root.formatted(root.current) + " " + root.unit;
-        horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(11);
+    widest-number := Text { visible: false; text: root.pitch ? "-8888" : "8.88"; font-size: Theme.font(12); font-weight: 600; }
+    title-text := Caption { x: 6px * Theme.ui-scale; width: self.preferred-width; text: root.title; }
+    number := Text {
+        x: title-text.x + title-text.width + 5px * Theme.ui-scale;
+        width: widest-number.preferred-width; text: root.formatted(root.current);
+        horizontal-alignment: right; vertical-alignment: center; font-size: Theme.font(12); font-weight: 600;
         color: root.modified ? Theme.accent-hover : Theme.ink;
+    }
+    unit-text := Caption {
+        x: number.x + number.width + 2px * Theme.ui-scale; width: self.preferred-width;
+        text: root.unit; font-size: Theme.font(10);
     }
     hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.open(); } }
     popup := PopupWindow {
         close-policy: close-on-click-outside;
         x: 0px; y: -self.height - 4px * Theme.ui-scale;
-        width: 260px * Theme.ui-scale; height: max(65px * Theme.ui-scale, Theme.font(12) * 2.4 + 35px * Theme.ui-scale);
+        width: 160px * Theme.ui-scale + max(48px * Theme.ui-scale, widest-number.preferred-width + 16px * Theme.ui-scale);
+        height: max(54px * Theme.ui-scale, Theme.font(11) + Theme.font(12) + 29px * Theme.ui-scale);
         editor-surface := Rectangle {
-            background: Theme.panel; border-width: 1px; border-color: Theme.strong-border; border-radius: 6px * Theme.ui-scale;
+            background: Theme.panel; border-width: 1phx; border-color: Theme.strong-border; border-radius: 5px * Theme.ui-scale;
             FocusScope {
                 capture-key-pressed(event) => { if event.text == Key.Escape { popup.close(); return accept; } reject }
                 VerticalLayout {
-                    padding: 8px * Theme.ui-scale; spacing: 3px * Theme.ui-scale;
-                    Caption {
-                        text: root.pitch ? (root.chinese ? "音高  ·  −2400 至 +2400 音分" : "Pitch  ·  −2400 to +2400 cents")
-                            : (root.chinese ? "速度  ·  0.25 至 4.00 ×" : "Rate  ·  0.25 to 4.00 ×");
-                        color: root.invalid ? Theme.warning : Theme.dim;
+                    padding-left: 8px * Theme.ui-scale; padding-right: 8px * Theme.ui-scale;
+                    padding-top: 5px * Theme.ui-scale; padding-bottom: 5px * Theme.ui-scale; spacing: 2px * Theme.ui-scale;
+                    HorizontalLayout {
+                        Caption { text: root.title; font-weight: 600; color: Theme.ink; }
+                        Caption {
+                            text: root.pitch ? "−2400 … +2400 ct" : "0.25 … 4.00 ×"; horizontal-alignment: right;
+                            color: root.invalid ? Theme.warning : Theme.dim; font-size: Theme.font(10);
+                        }
                     }
-                    HorizontalLayout { spacing: 8px * Theme.ui-scale;
+                    HorizontalLayout { spacing: 6px * Theme.ui-scale;
                         Slider {
                             input-label: root.label; surface: Theme.panel; minimum: root.minimum; maximum: root.maximum; step: root.pitch ? 1 : 0.01;
                             value: root.preview;
                             changed(value) => { root.draft = root.formatted(value); root.invalid = false; }
                             released(value) => { root.apply(root.formatted(value)); }
                         }
-                        LineEdit {
-                            width: 70px * Theme.ui-scale; text <=> root.draft;
-                            input-label: root.pitch ? (root.chinese ? "精确音分" : "Exact cents") : (root.chinese ? "精确速度" : "Exact speed");
-                            edited => { root.invalid = false; }
-                            accepted => { root.apply(self.text); if !root.invalid { popup.close(); } }
+                        Rectangle {
+                            width: max(48px * Theme.ui-scale, widest-number.preferred-width + 16px * Theme.ui-scale);
+                            height: max(24px * Theme.ui-scale, Theme.font(12) + 8px * Theme.ui-scale);
+                            y: (parent.height - self.height) / 2;
+                            background: Theme.trough; border-radius: 3px * Theme.ui-scale; border-width: 1phx;
+                            border-color: root.invalid ? Theme.warning : exact.has-focus ? Theme.accent : Theme.border;
+                            exact := TextInput {
+                                width: parent.width; height: parent.height; single-line: true;
+                                text <=> root.draft; color: Theme.ink; font-size: Theme.font(12);
+                                horizontal-alignment: center; vertical-alignment: center;
+                                selection-foreground-color: Theme.on-accent; selection-background-color: Theme.accent;
+                                accessible-role: text-input; accessible-label: root.pitch ? (root.chinese ? "精确音分" : "Exact cents") : (root.chinese ? "精确速度" : "Exact speed");
+                                accessible-value: self.text; accessible-action-set-value(v) => { self.text = v; root.invalid = false; }
+                                edited => { root.invalid = false; }
+                                accepted => { root.apply(self.text); if !root.invalid { popup.close(); } }
+                            }
                         }
                     }
                 }
@@ -384,6 +408,36 @@ component TransformField inherits Rectangle {
         }
     }
 }
+
+component TransformPair inherits Rectangle {
+    in property <bool> chinese;
+    in property <bool> enabled;
+    in-out property <string> pitch-text;
+    in-out property <string> rate-text;
+    out property <bool> modified: pitch-field.modified || rate-field.modified;
+    callback submit(string, string);
+    public function reject-input(fields: int) {
+        if Math.mod(fields, 2) == 1 { pitch-field.refuse(); }
+        if fields >= 2 { rate-field.refuse(); }
+    }
+    width: self.preferred-width;
+    height: pitch-field.height + 4px * Theme.ui-scale;
+    border-radius: 5px * Theme.ui-scale; border-width: 1phx; border-color: Theme.player-border;
+    background: Theme.raised.mix(Theme.player, 0.55);
+    HorizontalLayout {
+        padding: 2px * Theme.ui-scale; spacing: 0px;
+        pitch-field := TransformField {
+            pitch: true; chinese: root.chinese; enabled: root.enabled; text <=> root.pitch-text;
+            submit(value) => { root.submit(value, root.rate-text); }
+        }
+        Rectangle { width: 1phx; height: parent.height / 2; y: (parent.height - self.height) / 2; background: Theme.player-border; }
+        rate-field := TransformField {
+            chinese: root.chinese; enabled: root.enabled; text <=> root.rate-text;
+            submit(value) => { root.submit(root.pitch-text, value); }
+        }
+    }
+}
+
 
 component VolumeSlider inherits Rectangle {
     in property <float> minimum: -60;
@@ -1359,17 +1413,10 @@ component ClassicAuditionPanel inherits Rectangle {
                 clicked => { root.repeat = !root.repeat; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); }
             }
             Rectangle { width: 1px; background: Theme.player-border; }
-            Caption { text: root.chinese ? "音高" : "Pitch"; }
-            TransformField {
-                y: (parent.height - self.height) / 2;
-                pitch: true; chinese: root.chinese; enabled: root.ready; text <=> root.pitch-text;
-                submit(value) => { root.transform(value, root.rate-text, root.mono, root.repeat); }
-            }
-            Caption { text: root.chinese ? "速度" : "Rate"; }
-            TransformField {
-                y: (parent.height - self.height) / 2;
-                chinese: root.chinese; enabled: root.ready; text <=> root.rate-text;
-                submit(value) => { root.transform(root.pitch-text, value, root.mono, root.repeat); }
+            TransformPair {
+                y: (parent.height - self.height) / 2; chinese: root.chinese; enabled: root.ready;
+                pitch-text <=> root.pitch-text; rate-text <=> root.rate-text;
+                submit(pitch, rate) => { root.transform(pitch, rate, root.mono, root.repeat); }
             }
             ClassicTool { icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; hint: root.chinese ? "恢复 0 音分与 1× 速度" : "Restore 0 cents and 1× speed"; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
             Rectangle { width: 1px; background: Theme.player-border; }
@@ -1603,8 +1650,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
     callback retry(); callback relink();
     /// The controller rejected typed transform input: bit 1 Pitch, bit 2 Rate.
     public function reject-input(fields: int) {
-        if Math.mod(fields, 2) == 1 { pitch-field.refuse(); }
-        if fields >= 2 { rate-field.refuse(); }
+        transforms.reject-input(fields);
     }
     in property <int> rejection-fields;
     in property <int> rejection-revision;
@@ -1774,21 +1820,10 @@ component WorkbenchAuditionPanel inherits Rectangle {
         }
         Rectangle { row: 0; col: 3; width: (root.narrow ? 398px : 440px) * Theme.ui-scale * root.font-factor; vertical-stretch: 1; min-height: max(64px * Theme.ui-scale, Theme.font(20) + 40px * Theme.ui-scale);
             transform-controls := HorizontalLayout { width: parent.width; height: max(32px * Theme.ui-scale, Theme.font(20) + 12px * Theme.ui-scale); y: max(0px, min((parent.height - self.height) / 2, parent.height - self.height - 24px * Theme.ui-scale)); spacing: 8px * Theme.ui-scale;
-                HorizontalLayout { spacing: 4px * Theme.ui-scale; horizontal-stretch: 0;
-                    Caption { text: root.chinese ? "音高" : "Pitch"; color: pitch-field.modified ? Theme.text(4, 4, Theme.accent-hover) : Theme.text(4, 1, Theme.dim); animate color { duration: Theme.motion-base; } }
-                    pitch-field := TransformField {
-                        y: (parent.height - self.height) / 2;
-                        pitch: true; chinese: root.chinese; enabled: root.ready; text <=> root.pitch-text;
-                        submit(value) => { root.transform(value, root.rate-text, root.mono, root.repeat); }
-                    }
-                }
-                HorizontalLayout { spacing: 4px * Theme.ui-scale; horizontal-stretch: 0;
-                    Caption { text: root.chinese ? "速度" : "Rate"; color: rate-field.modified ? Theme.text(4, 4, Theme.accent-hover) : Theme.text(4, 1, Theme.dim); animate color { duration: Theme.motion-base; } }
-                    rate-field := TransformField {
-                        y: (parent.height - self.height) / 2;
-                        chinese: root.chinese; enabled: root.ready; text <=> root.rate-text;
-                        submit(value) => { root.transform(root.pitch-text, value, root.mono, root.repeat); }
-                    }
+                transforms := TransformPair {
+                    y: (parent.height - self.height) / 2; chinese: root.chinese; enabled: root.ready;
+                    pitch-text <=> root.pitch-text; rate-text <=> root.rate-text;
+                    submit(pitch, rate) => { root.transform(pitch, rate, root.mono, root.repeat); }
                 }
                 Tool {
                     width: 28px * Theme.ui-scale; height: 32px * Theme.ui-scale; subtle: true; icon-size: 18px * Theme.ui-scale;
@@ -1813,7 +1848,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                     clicked => { root.output-settings(); }
                 }
                 Rectangle { horizontal-stretch: 1; }
-                Tool { width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; icon-size: 16px * Theme.ui-scale; icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; enabled: pitch-field.modified || rate-field.modified; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+                Tool { width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; icon-size: 16px * Theme.ui-scale; icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; enabled: transforms.modified; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
                 MonitorModeButton {
                     height: 24px * Theme.ui-scale;
                     chinese: root.chinese; mono: root.mono; stereo-pair: root.stereo-pair;

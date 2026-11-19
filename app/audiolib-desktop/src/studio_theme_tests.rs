@@ -759,7 +759,10 @@ fn transform_popups_apply_integer_cents_and_speed_in_both_themes() {
         edit.set_accessible_value("-123.5");
         key(&ui, Key::Return.into());
         assert!(submissions.borrow().is_empty());
-        edit.set_accessible_value("-123");
+        edit.set_accessible_value("");
+        for digit in ["-", "1", "2", "3"] {
+            key(&ui, digit.into());
+        }
         key(&ui, Key::Return.into());
         assert_eq!(ui.get_pitch_text().as_str(), "-1.23");
         assert_eq!(pitch.accessible_value().as_deref(), Some("-123 ct"));
@@ -796,6 +799,24 @@ fn transform_popups_apply_integer_cents_and_speed_in_both_themes() {
         edit.set_accessible_value("3.00");
         key(&ui, Key::Escape.into());
         assert_eq!(ui.get_speed_text().as_str(), "1.37");
+        ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+        ui.set_chinese(true);
+        ui.set_pitch_text("0.00".into());
+        ui.set_speed_text("1.00".into());
+        frame(&ui, &format!("{snapshot}-compact-transport"));
+        let rate_pos = rate.absolute_position();
+        let pitch_width = pitch.size().width;
+        ui.set_pitch_text("-24.00".into());
+        ui.set_speed_text("4.00".into());
+        rate.mock_single_click(PointerEventButton::Left);
+        frame(&ui, &format!("{snapshot}-compact-rate-popup"));
+        assert_eq!(pitch.size().width, pitch_width);
+        assert_eq!(rate.absolute_position(), rate_pos);
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "精确速度")
+                .next()
+                .is_some()
+        );
         ui.hide().unwrap();
     }
 }
