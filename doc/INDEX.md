@@ -4,7 +4,7 @@ AudioLib Explorer is a Rust + Slint Windows desktop application with SQLite FTS5
 
 ## Current implementation
 
-当前 1.0.5 的 AI 智能搜索、可编辑 Skill 与设置使用见 [Rust AI Search](Rust_AI_Search.md)，正式发布、验收与安装记录见 [1.0.5 发布记录](Rust_Release_1.0.5.md)；历史 1.0.0 的五标签指南保留在 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/v1.0.0/doc/Rust_AI_Search.md)。研究、Agent skill、补全词表及概念设计见 [AI Keyword Search](AI_Keyword_Search_Design.md)。
+当前 1.0.6 的 AI 智能搜索、可编辑 Skill 与设置使用见 [Rust AI Search](Rust_AI_Search.md)，正式发布、验收与安装记录见 [1.0.6 发布记录](Rust_Release_1.0.6.md)；历史 1.0.0 的五标签指南保留在 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/v1.0.0/doc/Rust_AI_Search.md)。研究、Agent skill、补全词表及概念设计见 [AI Keyword Search](AI_Keyword_Search_Design.md)。
 
 | Document | Purpose |
 |----------|---------|
@@ -37,6 +37,7 @@ AudioLib Explorer is a Rust + Slint Windows desktop application with SQLite FTS5
 | [Scan and Search Performance](Rust_Scan_Search_Performance.md) | Bounded Metadata workers, batch writes and measured scan/search latency |
 | [Large-library GUI Search](Rust_GUI_Search_Performance.md) | Query cancellation, directory facet reuse, virtualized tree models and GUI benchmark |
 | [Release Notes](Rust_Release_Notes.md) | Candidate changes and published client/server release history |
+| [1.0.6 release record](Rust_Release_1.0.6.md) | Published payload identity, Jade Classic and Waveform updates, native cache measurements and fixed installation |
 | [1.0.5 release record](Rust_Release_1.0.5.md) | Published f3fd17d payloads, WAV and player updates, native caches, staged uploads, fourteen verified assets and fixed installation |
 | [1.0.4 release record](Rust_Release_1.0.4.md) | Published 1a80e75 payloads, Classic and OpenAI Official, beta/native evidence, fourteen verified assets and fixed installation |
 | [1.0.3 release record](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_1.0.3.md) | Final 130a644 payloads, appearance and editable AI skills, beta/native evidence, fourteen release assets, fixed-install synchronization and platform limits |
