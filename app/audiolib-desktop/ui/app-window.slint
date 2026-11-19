@@ -2467,7 +2467,6 @@ export component AppWindow inherits Window {
     in-out property <bool> album-show-cover: true;
     in-out property <bool> album-show-name: true;
     in-out property <bool> album-show-count: true;
-    private property <bool> album-cover-only: root.album-show-cover && !root.album-show-name && !root.album-show-count;
     in-out property <float> folders-section-ratio: 0.55;
     private property <length> sidebar-budget: root.content-width - 520px * Theme.ui-scale - root.pane-dividers-width;
     // The outer ScrollView supplies extra room when scaled minimums cannot fit.
@@ -3373,30 +3372,40 @@ main-scroll := ScrollView {
                             width: parent.width; height: directory-sections.libraries-expanded ? directory-sections.list-budget - directory-sections.folder-height : 0px;
                             visible: directory-sections.libraries-expanded;
                             viewport-width: self.visible-width; accessible-role: list;
-                            for album[index] in root.albums: album-row := Rectangle { height: root.album-cover-only ? clamp(self.width - 24px * Theme.ui-scale, 100px * Theme.ui-scale, 180px * Theme.ui-scale) + 12px * Theme.ui-scale : 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
+                            for album[index] in root.albums: album-row := Rectangle {
+                                property <length> cover-size: clamp(
+                                    min(self.width - 36px * Theme.ui-scale,
+                                        album-list.height - (root.album-show-name ? 22px * Theme.ui-scale : 0px)
+                                            - (root.album-show-count ? 20px * Theme.ui-scale : 0px) - 14px * Theme.ui-scale),
+                                    64px * Theme.ui-scale, 180px * Theme.ui-scale);
+                                height: (root.album-show-cover ? self.cover-size + 10px * Theme.ui-scale : 4px * Theme.ui-scale)
+                                    + (root.album-show-name ? 22px * Theme.ui-scale : 0px)
+                                    + (root.album-show-count ? 20px * Theme.ui-scale : 0px)
+                                    + 4px * Theme.ui-scale;
+                                border-radius: 4px * Theme.ui-scale;
                                 accessible-role: list-item; accessible-label: album.name + " (" + album.count + ")";
                                 background: Theme.interactive-fill(!root.album-filter-unavailable && root.album-filter-id == album.id, album-hit.has-hover, album-hit.pressed, transparent);
-                                if root.album-cover-only: Rectangle { x: (parent.width - self.width) / 2; y: 6px * Theme.ui-scale; width: parent.height - 12px * Theme.ui-scale; height: parent.height - 12px * Theme.ui-scale; background: Theme.raised;
-                                    if album.cover.width > 0 && album.cover.height > 0: Image { width: parent.width; height: parent.height; image-fit: cover; source: album.cover; }
-                                    if album.cover.width == 0 || album.cover.height == 0: album-cover-name := Text {
+                                if root.album-show-cover: album-cover := Rectangle {
+                                    x: (parent.width - 18px * Theme.ui-scale - self.width) / 2; y: 6px * Theme.ui-scale;
+                                    width: album-row.cover-size; height: self.width; background: Theme.raised;
+                                    if root.artwork-enabled && album.cover.width > 0 && album.cover.height > 0: Image { width: parent.width; height: parent.height; image-fit: cover; source: album.cover; }
+                                    if !root.artwork-enabled || album.cover.width == 0 || album.cover.height == 0: album-cover-name := Text {
                                         x: 10px * Theme.ui-scale; width: parent.width - 20px * Theme.ui-scale; height: parent.height;
                                         text: album.name; color: Theme.text(1, 0, Theme.ink); font-size: Theme.font(12); font-weight: 600;
                                         wrap: word-wrap; overflow: elide; horizontal-alignment: center; vertical-alignment: center;
                                     }
                                 }
-                                if !root.album-cover-only: HorizontalLayout { spacing: 6px * Theme.ui-scale; padding-right: 18px * Theme.ui-scale; alignment: start;
-                                    if root.album-show-cover: Rectangle { width: 20px * Theme.ui-scale;
-                                        property <bool> has-cover: root.artwork-enabled && album.cover.width > 0;
-                                        Image {
-                                            width: (parent.has-cover ? 20px : 16px) * Theme.ui-scale; height: self.width;
-                                            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-                                            source: parent.has-cover ? album.cover : @image-url("icons/collection.svg");
-                                            image-fit: cover; colorize: parent.has-cover ? transparent : (album-hit.has-hover ? Theme.accent-hover : Theme.muted);
-                                            accessible-role: none;
-                                        }
-                                    }
-                                    if root.album-show-name: Text { horizontal-stretch: 1; min-width: 0px; text: album.name; color: Theme.text(1, !root.album-filter-unavailable && root.album-filter-id == album.id ? 5 : album-hit.has-hover ? 4 : 0, Theme.text(1, 0, Theme.ink)); overflow: elide; vertical-alignment: center; font-size: Theme.font(11); }
-                                    if root.album-show-count: Label { text-module: 1; min-width: 28px * Theme.ui-scale; horizontal-stretch: 0; text: album.count; horizontal-alignment: right; }
+                                if root.album-show-name: album-card-name := Text {
+                                    x: 10px * Theme.ui-scale; y: (root.album-show-cover ? album-row.cover-size + 8px * Theme.ui-scale : 4px * Theme.ui-scale);
+                                    width: parent.width - 38px * Theme.ui-scale; height: 22px * Theme.ui-scale;
+                                    text: album.name; color: Theme.text(1, !root.album-filter-unavailable && root.album-filter-id == album.id ? 5 : album-hit.has-hover ? 4 : 0, Theme.text(1, 0, Theme.ink));
+                                    overflow: elide; horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(11); font-weight: 600;
+                                }
+                                if root.album-show-count: album-card-count := Label {
+                                    x: 10px * Theme.ui-scale;
+                                    y: (root.album-show-cover ? album-row.cover-size + 8px * Theme.ui-scale : 4px * Theme.ui-scale) + (root.album-show-name ? 22px * Theme.ui-scale : 0px);
+                                    width: parent.width - 38px * Theme.ui-scale; height: 20px * Theme.ui-scale;
+                                    text-module: 1; text: album.count; horizontal-alignment: center;
                                 }
                                 Tooltip { text: @markdown("\{album.name}"); }
                                 album-hit := TouchArea { enabled: !root.background-blocked; mouse-cursor: pointer; clicked => { root.album-selected(album.id); } }
@@ -4229,21 +4238,40 @@ main-scroll := ScrollView {
                             width: parent.width; height: studio-directory-sections.libraries-expanded ? studio-directory-sections.list-budget - studio-directory-sections.folder-height : 0px;
                             visible: studio-directory-sections.libraries-expanded;
                             viewport-width: self.visible-width; accessible-role: list;
-                            for album[index] in root.albums: studio-album-row := Rectangle { height: root.album-cover-only ? clamp(self.width - 24px * Theme.ui-scale, 100px * Theme.ui-scale, 180px * Theme.ui-scale) + 12px * Theme.ui-scale : 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
+                            for album[index] in root.albums: studio-album-row := Rectangle {
+                                property <length> cover-size: clamp(
+                                    min(self.width - 36px * Theme.ui-scale,
+                                        studio-album-list.height - (root.album-show-name ? 22px * Theme.ui-scale : 0px)
+                                            - (root.album-show-count ? 20px * Theme.ui-scale : 0px) - 14px * Theme.ui-scale),
+                                    64px * Theme.ui-scale, 180px * Theme.ui-scale);
+                                height: (root.album-show-cover ? self.cover-size + 10px * Theme.ui-scale : 4px * Theme.ui-scale)
+                                    + (root.album-show-name ? 22px * Theme.ui-scale : 0px)
+                                    + (root.album-show-count ? 20px * Theme.ui-scale : 0px)
+                                    + 4px * Theme.ui-scale;
+                                border-radius: 4px * Theme.ui-scale;
                                 accessible-role: list-item; accessible-label: album.name + " (" + album.count + ")";
                                 background: !root.album-filter-unavailable && root.album-filter-id == album.id ? Theme.selected : (studio-album-hit.has-hover ? Theme.raised : transparent);
-                                if root.album-cover-only: Rectangle { x: (parent.width - self.width) / 2; y: 6px * Theme.ui-scale; width: parent.height - 12px * Theme.ui-scale; height: parent.height - 12px * Theme.ui-scale; background: Theme.raised;
-                                    if album.cover.width > 0 && album.cover.height > 0: Image { width: parent.width; height: parent.height; image-fit: cover; source: album.cover; }
-                                    if album.cover.width == 0 || album.cover.height == 0: studio-album-cover-name := Text {
+                                if root.album-show-cover: studio-album-cover := Rectangle {
+                                    x: (parent.width - 18px * Theme.ui-scale - self.width) / 2; y: 6px * Theme.ui-scale;
+                                    width: studio-album-row.cover-size; height: self.width; background: Theme.raised;
+                                    if root.artwork-enabled && album.cover.width > 0 && album.cover.height > 0: Image { width: parent.width; height: parent.height; image-fit: cover; source: album.cover; }
+                                    if !root.artwork-enabled || album.cover.width == 0 || album.cover.height == 0: studio-album-cover-name := Text {
                                         x: 10px * Theme.ui-scale; width: parent.width - 20px * Theme.ui-scale; height: parent.height;
                                         text: album.name; color: Theme.text(1, 0, Theme.ink); font-size: Theme.font(12); font-weight: 600;
                                         wrap: word-wrap; overflow: elide; horizontal-alignment: center; vertical-alignment: center;
                                     }
                                 }
-                                if !root.album-cover-only: HorizontalLayout { spacing: 6px * Theme.ui-scale; padding-right: 18px * Theme.ui-scale; alignment: start;
-                                    if root.album-show-cover && root.artwork-enabled: Image { width: 20px * Theme.ui-scale; height: 20px * Theme.ui-scale; image-fit: cover; source: album.cover; }
-                                    if root.album-show-name: Text { horizontal-stretch: 1; min-width: 0px; text: album.name; color: Theme.text(1, !root.album-filter-unavailable && root.album-filter-id == album.id ? 5 : studio-album-hit.has-hover ? 4 : 0, Theme.text(1, 0, Theme.ink)); overflow: elide; vertical-alignment: center; font-size: Theme.font(11); }
-                                    if root.album-show-count: Label { text-module: 1; min-width: 34px * Theme.ui-scale; text: album.count; horizontal-alignment: right; }
+                                if root.album-show-name: studio-album-card-name := Text {
+                                    x: 10px * Theme.ui-scale; y: (root.album-show-cover ? studio-album-row.cover-size + 8px * Theme.ui-scale : 4px * Theme.ui-scale);
+                                    width: parent.width - 38px * Theme.ui-scale; height: 22px * Theme.ui-scale;
+                                    text: album.name; color: Theme.text(1, !root.album-filter-unavailable && root.album-filter-id == album.id ? 5 : studio-album-hit.has-hover ? 4 : 0, Theme.text(1, 0, Theme.ink));
+                                    overflow: elide; horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(11); font-weight: 600;
+                                }
+                                if root.album-show-count: studio-album-card-count := Label {
+                                    x: 10px * Theme.ui-scale;
+                                    y: (root.album-show-cover ? studio-album-row.cover-size + 8px * Theme.ui-scale : 4px * Theme.ui-scale) + (root.album-show-name ? 22px * Theme.ui-scale : 0px);
+                                    width: parent.width - 38px * Theme.ui-scale; height: 20px * Theme.ui-scale;
+                                    text-module: 1; text: album.count; horizontal-alignment: center;
                                 }
                                 Tooltip { text: @markdown("\{album.name}"); }
                                 studio-album-hit := TouchArea { enabled: !root.background-blocked; mouse-cursor: pointer; clicked => { root.album-selected(album.id); } }
