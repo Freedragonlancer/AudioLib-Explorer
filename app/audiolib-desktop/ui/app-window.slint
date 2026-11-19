@@ -580,6 +580,47 @@ component SidebarSectionHeader inherits Rectangle {
     header-hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { header-focus.focus(); root.toggled(); } }
 }
 
+// Keep display choices visually attached to the library header instead of
+// opening a native context menu at a platform-dependent screen position.
+component AlbumDisplayPopup inherits PopupWindow {
+    in property <bool> chinese;
+    in property <bool> enabled: true;
+    in property <bool> show-cover;
+    in property <bool> show-name;
+    in property <bool> show-count;
+    callback field-toggled(int);
+    width: 160px * Theme.ui-scale;
+    height: 112px * Theme.ui-scale;
+    close-policy: close-on-click-outside;
+    Rectangle {
+        width: parent.width; height: parent.height;
+        background: Theme.panel;
+        border-width: 1px;
+        border-color: Theme.strong-border;
+        border-radius: 5px * Theme.ui-scale;
+        VerticalLayout { width: parent.width; height: parent.height; padding: 8px * Theme.ui-scale; spacing: 2px * Theme.ui-scale;
+            CheckBox { height: 30px * Theme.ui-scale; surface: Theme.panel;
+                text: root.chinese ? "封面" : "Cover";
+                checked: root.show-cover;
+                enabled: root.enabled && (root.show-name || root.show-count);
+                toggled => { root.field-toggled(0); }
+            }
+            CheckBox { height: 30px * Theme.ui-scale; surface: Theme.panel;
+                text: root.chinese ? "厂牌名字" : "Library name";
+                checked: root.show-name;
+                enabled: root.enabled && (root.show-cover || root.show-count);
+                toggled => { root.field-toggled(1); }
+            }
+            CheckBox { height: 30px * Theme.ui-scale; surface: Theme.panel;
+                text: root.chinese ? "匹配数量" : "Match count";
+                checked: root.show-count;
+                enabled: root.enabled && (root.show-cover || root.show-name);
+                toggled => { root.field-toggled(2); }
+            }
+        }
+    }
+}
+
 // Use absolute coordinates so the horizontal divider can move during its drag.
 component SidebarSectionDivider inherits Rectangle {
     in property <length> pane-height;
@@ -1641,7 +1682,12 @@ export component AppWindow inherits Window {
     in property <string> artwork-message: "";
     in property <string> artwork-cache-stats: "";
     in property <bool> artwork-cache-stats-busy: false;
+    in-out property <bool> artwork-precache-enabled: false;
+    in property <bool> artwork-precache-busy: false;
+    in property <string> artwork-precache-status: "";
     callback artwork-cache-refresh-requested();
+    callback artwork-precache-changed(bool);
+    callback artwork-precache-cancel-requested();
     in-out property <bool> artwork-management-expanded: false;
     callback artwork-enabled-requested(bool);
     // 0 refresh, 1 clear thumbnails, 2 choose custom, 3 hide, 4 restore embedded.
@@ -1715,6 +1761,9 @@ export component AppWindow inherits Window {
     in-out property <string> pitch-text: "0.00";
     in-out property <string> speed-text: "1.00";
     in-out property <bool> audition-mono: false;
+    in-out property <bool> audition-stereo-pair;
+    in property <int> monitor-source-channels;
+    in property <int> monitor-output-channels;
     in-out property <bool> audition-repeat: false;
     in-out property <bool> audition-play-on-single-click: false;
     callback single-click-play-requested(bool);
@@ -2418,6 +2467,10 @@ export component AppWindow inherits Window {
     // The saved ratio survives collapsing a section and temporary window constraints.
     in-out property <bool> folders-section-expanded: true;
     in-out property <bool> libraries-section-expanded: true;
+    in-out property <bool> album-show-cover: true;
+    in-out property <bool> album-show-name: true;
+    in-out property <bool> album-show-count: true;
+    private property <bool> album-cover-only: root.album-show-cover && !root.album-show-name && !root.album-show-count;
     in-out property <float> folders-section-ratio: 0.55;
     private property <length> sidebar-budget: root.content-width - 520px * Theme.ui-scale - root.pane-dividers-width;
     // The outer ScrollView supplies extra room when scaled minimums cannot fit.
@@ -3286,22 +3339,56 @@ main-scroll := ScrollView {
                         // filters the results; clicking the active one clears the filter.
                         libraries-header := SidebarSectionHeader {
                             visible: directory-sections.has-libraries;
-                            width: parent.width; height: directory-sections.has-libraries ? directory-sections.header-height : 0px;
+                            width: parent.width - (directory-sections.has-libraries ? 36px * Theme.ui-scale : 0px); height: directory-sections.has-libraries ? directory-sections.header-height : 0px;
                             y: folder-focus.y + folder-focus.height + directory-sections.divider-height;
                             label: root.chinese ? "音效库" : "LIBRARIES";
                             action-label: root.chinese ? "音效库分区" : "Libraries section";
                             expanded: root.libraries-section-expanded; enabled: !root.background-blocked && directory-sections.has-libraries;
                             toggled => { root.libraries-section-expanded = !root.libraries-section-expanded; root.pane-layout-changed(); }
                         }
+                        if directory-sections.has-libraries: album-display-action := Action {
+                            x: parent.width - 36px * Theme.ui-scale;
+                            y: libraries-header.y;
+                            width: 36px * Theme.ui-scale; height: directory-sections.header-height;
+                            label: ""; subtle: true;
+                            action-label: root.chinese ? "选择音效库显示内容" : "Choose library display fields";
+                            enabled: !root.background-blocked;
+                            clicked => { album-display-popup.show(); }
+                            Image { source: @image-url("icons/chevron-down.svg"); colorize: Theme.ink;
+                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                width: 12px * Theme.ui-scale; height: 8px * Theme.ui-scale; image-fit: contain; accessible-role: none;
+                            }
+                            Tooltip { text: @markdown("\{album-display-action.action-label}"); }
+                        }
+                        album-display-popup := AlbumDisplayPopup {
+                            x: parent.width - self.width; y: libraries-header.y + libraries-header.height;
+                            chinese: root.chinese; enabled: !root.background-blocked;
+                            show-cover: root.album-show-cover; show-name: root.album-show-name; show-count: root.album-show-count;
+                            field-toggled(field) => {
+                                if field == 0 { root.album-show-cover = !root.album-show-cover; }
+                                if field == 1 { root.album-show-name = !root.album-show-name; }
+                                if field == 2 { root.album-show-count = !root.album-show-count; }
+                                root.pane-layout-changed();
+                            }
+                        }
                         album-list := ListView {
                             x: 0px; y: libraries-header.y + libraries-header.height + (directory-sections.libraries-expanded ? directory-sections.list-gap : 0px);
                             width: parent.width; height: directory-sections.libraries-expanded ? directory-sections.list-budget - directory-sections.folder-height : 0px;
                             visible: directory-sections.libraries-expanded;
                             viewport-width: self.visible-width; accessible-role: list;
-                            for album[index] in root.albums: Rectangle { height: 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
+                            for album[index] in root.albums: album-row := Rectangle { height: root.album-cover-only ? clamp(self.width - 24px * Theme.ui-scale, 100px * Theme.ui-scale, 180px * Theme.ui-scale) + 12px * Theme.ui-scale : 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
+                                accessible-role: list-item; accessible-label: album.name + " (" + album.count + ")";
                                 background: Theme.interactive-fill(!root.album-filter-unavailable && root.album-filter-id == album.id, album-hit.has-hover, album-hit.pressed, transparent);
-                                HorizontalLayout { spacing: 6px * Theme.ui-scale; padding-right: 18px * Theme.ui-scale;
-                                    Rectangle { width: 20px * Theme.ui-scale;
+                                if root.album-cover-only: Rectangle { x: (parent.width - self.width) / 2; y: 6px * Theme.ui-scale; width: parent.height - 12px * Theme.ui-scale; height: parent.height - 12px * Theme.ui-scale; background: Theme.raised;
+                                    if album.cover.width > 0 && album.cover.height > 0: Image { width: parent.width; height: parent.height; image-fit: cover; source: album.cover; }
+                                    if album.cover.width == 0 || album.cover.height == 0: album-cover-name := Text {
+                                        x: 10px * Theme.ui-scale; width: parent.width - 20px * Theme.ui-scale; height: parent.height;
+                                        text: album.name; color: Theme.text(1, 0, Theme.ink); font-size: Theme.font(12); font-weight: 600;
+                                        wrap: word-wrap; overflow: elide; horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+                                if !root.album-cover-only: HorizontalLayout { spacing: 6px * Theme.ui-scale; padding-right: 18px * Theme.ui-scale; alignment: start;
+                                    if root.album-show-cover: Rectangle { width: 20px * Theme.ui-scale;
                                         property <bool> has-cover: root.artwork-enabled && album.cover.width > 0;
                                         Image {
                                             width: (parent.has-cover ? 20px : 16px) * Theme.ui-scale; height: self.width;
@@ -3311,14 +3398,14 @@ main-scroll := ScrollView {
                                             accessible-role: none;
                                         }
                                     }
-                                    Text { horizontal-stretch: 1; min-width: 0px; text: album.name; color: Theme.text(1, !root.album-filter-unavailable && root.album-filter-id == album.id ? 5 : album-hit.has-hover ? 4 : 0, Theme.text(1, 0, Theme.ink)); overflow: elide; vertical-alignment: center; font-size: Theme.font(11); }
-                                    Label { text-module: 1; min-width: 28px * Theme.ui-scale; horizontal-stretch: 0; text: album.count; horizontal-alignment: right; }
+                                    if root.album-show-name: Text { horizontal-stretch: 1; min-width: 0px; text: album.name; color: Theme.text(1, !root.album-filter-unavailable && root.album-filter-id == album.id ? 5 : album-hit.has-hover ? 4 : 0, Theme.text(1, 0, Theme.ink)); overflow: elide; vertical-alignment: center; font-size: Theme.font(11); }
+                                    if root.album-show-count: Label { text-module: 1; min-width: 28px * Theme.ui-scale; horizontal-stretch: 0; text: album.count; horizontal-alignment: right; }
                                 }
+                                Tooltip { text: @markdown("\{album.name}"); }
                                 album-hit := TouchArea { enabled: !root.background-blocked; mouse-cursor: pointer; clicked => { root.album-selected(album.id); } }
                             }
                         }
                     }
-                    if root.library-sidebar-page == 0: Label { text-module: 1; height: (root.short-layout ? 24px : 34px) * Theme.ui-scale; text: root.chinese ? "方向键浏览目录 · 右键管理素材库" : "Right-click folders to manage"; wrap: word-wrap; font-size: Theme.font(10); }
                 }
             }
             if root.sidebar-visible: PaneDivider {
@@ -3876,7 +3963,8 @@ main-scroll := ScrollView {
             position: root.play-position; duration: root.play-duration; time: root.play-time; end-time: root.play-end;
             view-start: root.view-start; view-end: root.view-end; zoom: root.wave-zoom; ruler-ticks: root.ruler-ticks;
             scroll <=> root.wave-scroll; volume-db <=> root.volume-db; volume-label: root.volume-label;
-            pitch-text <=> root.pitch-text; rate-text <=> root.speed-text; mono <=> root.audition-mono; repeat <=> root.audition-repeat;
+            pitch-text <=> root.pitch-text; rate-text <=> root.speed-text; mono <=> root.audition-mono; stereo-pair <=> root.audition-stereo-pair;
+            monitor-source-channels: root.monitor-source-channels; monitor-output-channels: root.monitor-output-channels; repeat <=> root.audition-repeat;
             play => { root.start-requested(); } pause => { root.pause-requested(); } stop => { root.stop-requested(); }
             seek(value) => { root.seek-requested(value); }
             seek-play(value) => { root.seek-play-requested(value); }
@@ -4108,25 +4196,60 @@ main-scroll := ScrollView {
                         // filters the results; clicking the active one clears the filter.
                         studio-libraries-header := SidebarSectionHeader {
                             visible: studio-directory-sections.has-libraries;
-                            width: parent.width; height: studio-directory-sections.has-libraries ? studio-directory-sections.header-height : 0px;
+                            width: parent.width - (studio-directory-sections.has-libraries ? 36px * Theme.ui-scale : 0px); height: studio-directory-sections.has-libraries ? studio-directory-sections.header-height : 0px;
                             y: studio-folder-focus.y + studio-folder-focus.height + studio-directory-sections.divider-height;
                             label: root.chinese ? "音效库" : "LIBRARIES";
                             action-label: root.chinese ? "音效库分区" : "Libraries section";
                             expanded: root.libraries-section-expanded; enabled: !root.background-blocked && studio-directory-sections.has-libraries;
                             toggled => { root.libraries-section-expanded = !root.libraries-section-expanded; root.pane-layout-changed(); }
                         }
+                        if studio-directory-sections.has-libraries: studio-album-display-action := StudioAction {
+                            x: parent.width - 36px * Theme.ui-scale;
+                            y: studio-libraries-header.y;
+                            width: 36px * Theme.ui-scale; height: studio-directory-sections.header-height;
+                            label: ""; subtle: true;
+                            action-label: root.chinese ? "选择音效库显示内容" : "Choose library display fields";
+                            enabled: !root.background-blocked;
+                            clicked => { studio-album-display-popup.show(); }
+                            Image { source: @image-url("icons/chevron-down.svg"); colorize: Theme.ink;
+                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                width: 12px * Theme.ui-scale; height: 8px * Theme.ui-scale; image-fit: contain; accessible-role: none;
+                            }
+                            Tooltip { text: @markdown("\{studio-album-display-action.action-label}"); }
+                        }
+                        studio-album-display-popup := AlbumDisplayPopup {
+                            x: parent.width - self.width; y: studio-libraries-header.y + studio-libraries-header.height;
+                            chinese: root.chinese; enabled: !root.background-blocked;
+                            show-cover: root.album-show-cover; show-name: root.album-show-name; show-count: root.album-show-count;
+                            field-toggled(field) => {
+                                if field == 0 { root.album-show-cover = !root.album-show-cover; }
+                                if field == 1 { root.album-show-name = !root.album-show-name; }
+                                if field == 2 { root.album-show-count = !root.album-show-count; }
+                                root.pane-layout-changed();
+                            }
+                        }
                         studio-album-list := ListView {
                             x: 0px; y: studio-libraries-header.y + studio-libraries-header.height + (studio-directory-sections.libraries-expanded ? studio-directory-sections.list-gap : 0px);
                             width: parent.width; height: studio-directory-sections.libraries-expanded ? studio-directory-sections.list-budget - studio-directory-sections.folder-height : 0px;
                             visible: studio-directory-sections.libraries-expanded;
                             viewport-width: self.visible-width; accessible-role: list;
-                            for album[index] in root.albums: Rectangle { height: 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
+                            for album[index] in root.albums: studio-album-row := Rectangle { height: root.album-cover-only ? clamp(self.width - 24px * Theme.ui-scale, 100px * Theme.ui-scale, 180px * Theme.ui-scale) + 12px * Theme.ui-scale : 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
+                                accessible-role: list-item; accessible-label: album.name + " (" + album.count + ")";
                                 background: !root.album-filter-unavailable && root.album-filter-id == album.id ? Theme.selected : (studio-album-hit.has-hover ? Theme.raised : transparent);
-                                HorizontalLayout { spacing: 6px * Theme.ui-scale; padding-right: 18px * Theme.ui-scale; alignment: start;
-                                    Image { visible: root.artwork-enabled; width: 20px * Theme.ui-scale; height: 20px * Theme.ui-scale; image-fit: cover; source: album.cover; }
-                                    Text { horizontal-stretch: 1; min-width: 0px; text: album.name; color: Theme.text(1, !root.album-filter-unavailable && root.album-filter-id == album.id ? 5 : studio-album-hit.has-hover ? 4 : 0, Theme.text(1, 0, Theme.ink)); overflow: elide; vertical-alignment: center; font-size: Theme.font(11); }
-                                    Label { text-module: 1; min-width: 34px * Theme.ui-scale; text: album.count; horizontal-alignment: right; }
+                                if root.album-cover-only: Rectangle { x: (parent.width - self.width) / 2; y: 6px * Theme.ui-scale; width: parent.height - 12px * Theme.ui-scale; height: parent.height - 12px * Theme.ui-scale; background: Theme.raised;
+                                    if album.cover.width > 0 && album.cover.height > 0: Image { width: parent.width; height: parent.height; image-fit: cover; source: album.cover; }
+                                    if album.cover.width == 0 || album.cover.height == 0: studio-album-cover-name := Text {
+                                        x: 10px * Theme.ui-scale; width: parent.width - 20px * Theme.ui-scale; height: parent.height;
+                                        text: album.name; color: Theme.text(1, 0, Theme.ink); font-size: Theme.font(12); font-weight: 600;
+                                        wrap: word-wrap; overflow: elide; horizontal-alignment: center; vertical-alignment: center;
+                                    }
                                 }
+                                if !root.album-cover-only: HorizontalLayout { spacing: 6px * Theme.ui-scale; padding-right: 18px * Theme.ui-scale; alignment: start;
+                                    if root.album-show-cover && root.artwork-enabled: Image { width: 20px * Theme.ui-scale; height: 20px * Theme.ui-scale; image-fit: cover; source: album.cover; }
+                                    if root.album-show-name: Text { horizontal-stretch: 1; min-width: 0px; text: album.name; color: Theme.text(1, !root.album-filter-unavailable && root.album-filter-id == album.id ? 5 : studio-album-hit.has-hover ? 4 : 0, Theme.text(1, 0, Theme.ink)); overflow: elide; vertical-alignment: center; font-size: Theme.font(11); }
+                                    if root.album-show-count: Label { text-module: 1; min-width: 34px * Theme.ui-scale; text: album.count; horizontal-alignment: right; }
+                                }
+                                Tooltip { text: @markdown("\{album.name}"); }
                                 studio-album-hit := TouchArea { enabled: !root.background-blocked; mouse-cursor: pointer; clicked => { root.album-selected(album.id); } }
                             }
                         }
@@ -4749,7 +4872,8 @@ main-scroll := ScrollView {
             position: root.play-position; duration: root.play-duration; time: root.play-time; end-time: root.play-end;
             view-start: root.view-start; view-end: root.view-end; zoom: root.wave-zoom; ruler-ticks: root.ruler-ticks;
             scroll <=> root.wave-scroll; volume-db <=> root.volume-db; volume-label: root.volume-label;
-            pitch-text <=> root.pitch-text; rate-text <=> root.speed-text; mono <=> root.audition-mono; repeat <=> root.audition-repeat;
+            pitch-text <=> root.pitch-text; rate-text <=> root.speed-text; mono <=> root.audition-mono; stereo-pair <=> root.audition-stereo-pair;
+            monitor-source-channels: root.monitor-source-channels; monitor-output-channels: root.monitor-output-channels; repeat <=> root.audition-repeat;
             play => { root.start-requested(); } pause => { root.pause-requested(); } stop => { root.stop-requested(); }
             seek(value) => { root.seek-requested(value); }
             seek-play(value) => { root.seek-play-requested(value); }
@@ -5089,6 +5213,12 @@ main-scroll := ScrollView {
                 Rectangle { height: 1px; background: Theme.border; }
                 Text { text: root.chinese ? "封面缩略图" : "Cover thumbnails"; color: Theme.text(5, 0, Theme.ink); font-size: Theme.font(15); font-weight: 600; }
                 Label { text-module: 5; text: root.artwork-cache-stats-busy ? (root.chinese ? "正在统计封面缓存…" : "Counting cover cache…") : root.artwork-cache-stats; wrap: word-wrap; }
+                CheckBox { text-module: 5; text: root.chinese ? "启动时在后台补齐本地厂牌库封面" : "Fill local library covers in the background at startup"; checked <=> root.artwork-precache-enabled; enabled: root.settings-page == 4 && !root.settings-busy && !root.settings-close-confirm && !root.closing; toggled => { root.artwork-precache-changed(self.checked); } }
+                Label { text-module: 5; text: root.chinese ? "默认关闭。每个厂牌库取一个目录，优先使用已有封面；只读取音频内嵌图片，源文件不会改动。没有内嵌图片的库仍会留空。封面缓存上限 256 MiB。" : "Off by default. Checks one folder per library, reuses existing covers and reads embedded pictures without changing source files. Libraries without pictures stay blank. Cover cache limit: 256 MiB."; wrap: word-wrap; }
+                if root.artwork-precache-status != "": HorizontalLayout { spacing: 8px * Theme.ui-scale;
+                    Label { text-module: 5; horizontal-stretch: 1; text: root.artwork-precache-status; wrap: word-wrap; }
+                    if root.artwork-precache-busy: Action { text-module: 5; label: root.chinese ? "取消" : "Cancel"; clicked => { root.artwork-precache-cancel-requested(); } }
+                }
                 Action { text-module: 5; width: 160px * Theme.ui-scale; enabled: root.settings-page == 4 && !root.settings-busy && !root.settings-close-confirm && !root.artwork-cache-stats-busy && !root.artwork-busy && !root.library-busy && !root.ds-applying && !root.closing; label: root.chinese ? "刷新封面统计" : "Refresh cover stats"; clicked => { root.artwork-cache-refresh-requested(); } }
                 if root.artwork-busy: Label { text-module: 5; text: root.chinese ? "正在更新封面缓存…" : "Updating cover cache…"; wrap: word-wrap; color: Theme.text(5, 6, Theme.accent); }
                 if !root.settings-cover-cache-confirm: Action { text-module: 5; enabled: root.settings-page == 4 && !root.settings-busy && !root.settings-close-confirm && !root.artwork-busy && !root.library-busy && !root.ds-applying && !root.closing; label: root.chinese ? "清理本机封面缓存…" : "Clear cover thumbnails"; clicked => { root.settings-cover-cache-confirm = true; } }

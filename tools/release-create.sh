@@ -4,21 +4,24 @@
 #   title = "AudioLib Explorer <tag>"; suffixed tags (-beta.N / -rc.N) are --prerelease --latest=false.
 # Drafts stay unpublished and are explicitly excluded from Latest. Resume uploads
 # only missing, verified assets. Stage pairs can add accepted packages as they
-# become available. --publish is a separate, explicit full-set finalization.
+# become available. Independent workers can stage disjoint pairs on one draft.
+# --publish-staged verifies the complete draft without uploading any assets.
 # The tag's X.Y.Z must equal the Cargo.toml [workspace.package] version.
 #   tools/release-create.sh <tag> [--notes-file <file>] [--draft] [--dry-run] [--] [asset ...]
 #   tools/release-create.sh <tag> --resume-draft [--publish] [--dry-run] [--notes-file <file>] <all-assets...>
 #   tools/release-create.sh <tag> --resume-draft --stage-pairs [--dry-run] [--notes-file <file>] <cumulative-pairs...>
+#   tools/release-create.sh <tag> --resume-draft --stage-independent --draft-id <id> [--dry-run] [--notes-file <file>] <archive> <sha256>
+#   tools/release-create.sh <tag> --resume-draft --publish-staged --draft-id <id> [--dry-run] [--notes-file <file>] <all-assets...>
 set -euo pipefail
 die() { echo "release-create: $*" >&2; exit 1; }
-[ $# -ge 1 ] || die "usage: $0 <tag> [--notes-file <file>] [--draft] [--dry-run] [--resume-draft [--publish|--stage-pairs]] [--] [asset ...]"
+[ $# -ge 1 ] || die "usage: $0 <tag> [--notes-file <file>] [--draft] [--dry-run] [--resume-draft [--publish|--stage-pairs|--stage-independent|--publish-staged] [--draft-id <id>]] [--] [asset ...]"
 tag=$1; shift
 [[ $tag =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-(rc|beta)\.[0-9]+)?$ ]] || die "tag '$tag' must be vX.Y.Z, vX.Y.Z-rc.N or vX.Y.Z-beta.N"
 core=${BASH_REMATCH[1]}; suffix=${BASH_REMATCH[2]}
 root=$(cd "$(dirname "$0")/.." && pwd)
 cargo_ver=$(awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f&&/^version *=/{gsub(/[" ]/,"");sub("version=","");print;exit}' "$root/Cargo.toml")
 [ "$core" = "$cargo_ver" ] || die "tag $tag does not match Cargo.toml workspace version $cargo_ver"
-notes=(--notes-file "$root/doc/Rust_Release_Notes.md"); dry=0; draft=0; resume=0; publish=0; stage_pairs=0; assets=()
+notes=(--notes-file "$root/doc/Rust_Release_Notes.md"); dry=0; draft=0; resume=0; publish=0; stage_pairs=0; independent=0; publish_staged=0; draft_id=''; assets=()
 while [ $# -gt 0 ]; do
   case $1 in
     --notes-file)
@@ -30,6 +33,12 @@ while [ $# -gt 0 ]; do
     --resume-draft) resume=1; shift ;;
     --publish) publish=1; shift ;;
     --stage-pairs) stage_pairs=1; shift ;;
+    --stage-independent) independent=1; shift ;;
+    --publish-staged) publish_staged=1; shift ;;
+    --draft-id)
+      [ $# -ge 2 ] && [[ $2 =~ ^[1-9][0-9]*$ ]] || die 'Option --draft-id requires a positive numeric release ID'
+      [ -z "$draft_id" ] || die 'Option --draft-id may only be supplied once'
+      draft_id=$2; shift 2 ;;
     --) shift; assets+=("$@"); break ;;
     -*) die "unknown option: $1" ;;
     *) assets+=("$1"); shift ;;
@@ -40,6 +49,19 @@ done
 [ "$stage_pairs" = 0 ] || [ "$resume" = 1 ] || die '--stage-pairs requires --resume-draft'
 [ "$stage_pairs" = 0 ] || [ "$publish" = 0 ] || die '--stage-pairs conflicts with --publish'
 [ "$stage_pairs" = 0 ] || [ "$draft" = 0 ] || die '--stage-pairs conflicts with --draft'
+api=(gh api)
+if [ "$independent" = 1 ] || [ "$publish_staged" = 1 ]; then
+  [ "$resume" = 1 ] || die 'Independent staging and staged publication require --resume-draft'
+  [ -n "$draft_id" ] || die 'Independent staging and staged publication require --draft-id'
+  [ "$((independent + publish_staged + publish + stage_pairs + draft))" = 1 ] || die 'Independent staging and staged publication conflict with other draft modes'
+  api+=(--hostname github.com)
+else
+  [ -z "$draft_id" ] || die '--draft-id requires --stage-independent or --publish-staged'
+fi
+run_github() {
+  # Bind repository discovery to the checkout whose tag we verify.
+  if [ -n "$draft_id" ]; then (cd "$root" && "$@"); else "$@"; fi
+}
 args=("$tag" --verify-tag --title "AudioLib Explorer $tag" "${notes[@]}")
 [ -n "$suffix" ] && args+=(--prerelease)
 if [ -n "$suffix" ] || [ "$draft" = 1 ]; then args+=(--latest=false); fi
@@ -50,7 +72,7 @@ if [ "${assets[*]+set}" = set ]; then args+=(--); fi
 # existing draft's read-only identity to distinguish matching/missing assets.
 if [ "$dry" = 1 ] && [ "$resume" = 0 ]; then printf '%q ' gh release create "${args[@]}" ${assets[@]+"${assets[@]}"}; echo; exit 0; fi
 
-matches=$(gh api --paginate 'repos/{owner}/{repo}/releases?per_page=100' --jq ".[] | select(.tag_name == \"$tag\") | [.id, .draft] | @tsv") || die 'Cannot inspect authenticated releases/drafts; absence is unproven'
+matches=$(run_github "${api[@]}" --paginate 'repos/{owner}/{repo}/releases?per_page=100' --jq ".[] | select(.tag_name == \"$tag\") | [.id, .draft] | @tsv") || die 'Cannot inspect authenticated releases/drafts; absence is unproven'
 release_id=''; release_draft=''; release_count=0
 while IFS=$'\t' read -r candidate_id candidate_draft extra; do
   [ -n "$candidate_id" ] || continue
@@ -64,8 +86,11 @@ if [ "$resume" = 0 ]; then
   exit $?
 fi
 [ "$release_count" = 1 ] && [ "$release_draft" = true ] || die '--resume-draft requires one existing unpublished draft'
+[ -z "$draft_id" ] || [ "$release_id" = "$draft_id" ] || die 'Existing draft ID differs from --draft-id'
+release_path="repos/{owner}/{repo}/releases/$release_id"
+upload_url="https://uploads.github.com/$release_path/assets"
 if [ "${assets[*]+set}" != set ]; then
-  [ "$stage_pairs" = 0 ] || die 'Stage pairs requires at least one archive and checksum pair'
+  [ "$stage_pairs" = 0 ] && [ "$independent" = 0 ] || die 'Stage pairs requires at least one archive and checksum pair'
   die 'Resume requires the complete expected local asset set'
 fi
 [ -f "${notes[1]}" ] && [ ! -L "${notes[1]}" ] || die 'Resume notes must be a regular, unlinked file'
@@ -79,6 +104,13 @@ while IFS= read -r expected_name; do
   expected_names+=("$expected_name"); expected_count=$((expected_count+1))
 done <<< "$expected_text"
 [ "$expected_count" -gt 0 ] || die 'Official expected asset set is empty'
+is_expected_asset() {
+  local candidate
+  for candidate in "${expected_names[@]}"; do
+    if [ "$candidate" = "$1" ]; then return 0; fi
+  done
+  return 1
+}
 
 sha256_file() {
   local value
@@ -108,9 +140,7 @@ for asset in "${assets[@]}"; do
   [ -f "$asset" ] && [ ! -L "$asset" ] || die "Resume asset must be a regular, unlinked file: $asset"
   asset_dir=$(cd "$(dirname "$asset")" && pwd -P) || die 'Cannot resolve local artifact directory'
   asset_name=$(basename "$asset"); asset_path="$asset_dir/$asset_name"
-  expected=0
-  for ((index=0; index<expected_count; index++)); do [ "${expected_names[index]}" != "$asset_name" ] || expected=1; done
-  [ "$expected" = 1 ] || die "Unexpected local asset: $asset_name"
+  is_expected_asset "$asset_name" || die "Unexpected local asset: $asset_name"
   find_local "$asset_name"; [ "$found_index" = -1 ] || die "Duplicate local asset: $asset_name"
   asset_size=$(file_size "$asset_path") || die 'Cannot read local artifact size'
   [[ $asset_size =~ ^[0-9]+$ ]] && [ "$asset_size" -gt 0 ] || die "Empty or invalid local asset: $asset_name"
@@ -118,7 +148,8 @@ for asset in "${assets[@]}"; do
   local_names+=("$asset_name"); local_paths+=("$asset_path"); local_sizes+=("$asset_size"); local_hashes+=("$asset_hash"); local_count=$((local_count+1))
 done
 upload_order=()
-if [ "$stage_pairs" = 1 ]; then
+[ "$independent" = 0 ] || [ "$local_count" = 2 ] || die 'Independent staging requires exactly one archive and checksum pair'
+if [ "$stage_pairs" = 1 ] || [ "$independent" = 1 ]; then
   paired_count=0
   for ((index=0; index<local_count; index++)); do
     archive_name=${local_names[index]}
@@ -153,7 +184,7 @@ tag_object=$(git -C "$root" rev-parse --verify "refs/tags/$tag") || die 'Resume 
 [[ $tag_object =~ ^[a-f0-9]{40,64}$ ]] || die 'Invalid local tag object'
 verify_tag() {
   local remote_object
-  remote_object=$(gh api "repos/{owner}/{repo}/git/ref/tags/$tag" --jq '.object.sha') || die 'Cannot verify the remote tag'
+  remote_object=$(run_github "${api[@]}" "repos/{owner}/{repo}/git/ref/tags/$tag" --jq '.object.sha') || die 'Cannot verify the remote tag'
   [ "$remote_object" = "$tag_object" ] || die 'Remote tag object differs from the frozen local tag'
 }
 verify_tag
@@ -169,27 +200,35 @@ cleanup() {
 }
 trap cleanup EXIT
 snapshot="$resume_root/snapshot"; body_boundary='release-create-body-boundary'
-remote_names=(); remote_sizes=(); remote_hashes=(); remote_ids=(); remote_count=0
+remote_names=(); remote_ids=(); remote_count=0; remote_local_count=0
 fetch_snapshot() {
   local kind rid rtag title is_draft is_pre extra name state size digest boundary_seen=0 index
-  gh api "repos/{owner}/{repo}/releases/$release_id" --jq '(["release", .id, .tag_name, .name, .draft, .prerelease] | @tsv), (.assets[] | ["asset", .id, .name, .state, .size, (.digest // "")] | @tsv), "release-create-body-boundary", (.body // "")' > "$snapshot" || die 'Cannot inspect draft identity/assets'
+  run_github "${api[@]}" "$release_path" --jq '(["release", .id, .tag_name, .name, .draft, .prerelease] | @tsv), (.assets[] | ["asset", .id, .name, .state, .size, (.digest // "")] | @tsv), "release-create-body-boundary", (.body // "")' > "$snapshot" || die 'Cannot inspect draft identity/assets'
   IFS=$'\t' read -r kind rid rtag title is_draft is_pre extra < "$snapshot"
   [ "$kind" = release ] && [ "$rid" = "$release_id" ] && [ "$rtag" = "$tag" ] && [ "$title" = "AudioLib Explorer $tag" ] && [ -z "$extra" ] || die 'Existing release tag/title/ID differs'
   [ "$is_draft" = "$expected_draft" ] || die 'Existing release is not in the expected draft/public state'
   [ "$is_pre" = "$expected_prerelease" ] || die 'Existing release prerelease flag differs'
-  remote_names=(); remote_sizes=(); remote_hashes=(); remote_ids=(); remote_count=0
+  remote_names=(); remote_ids=(); remote_count=0; remote_local_count=0
   while IFS=$'\t' read -r kind rid name state size digest extra; do
     if [ "$kind" = "$body_boundary" ]; then boundary_seen=1; break; fi
     [ "$kind" = asset ] && [[ $rid =~ ^[1-9][0-9]*$ && $size =~ ^[0-9]+$ && -z $extra ]] || die 'Invalid remote asset metadata'
-    [ "$state" = uploaded ] || die 'Remote asset is incomplete; inspect the original uploader before recovery'
+    is_expected_asset "$name" || die "Unexpected remote asset: $name"
     for ((index=0; index<remote_count; index++)); do
       [ "${remote_names[index]}" != "$name" ] && [ "${remote_ids[index]}" != "$rid" ] || die 'Duplicate remote asset name/ID'
     done
-    find_local "$name"; [ "$found_index" -ge 0 ] || die "Unexpected remote asset: $name"
-    [[ $digest =~ ^sha256:[A-Fa-f0-9]{64}$ ]] || die "Remote asset lacks a trustworthy SHA256 digest: $name"
-    digest=$(printf '%s' "${digest#sha256:}" | tr 'A-F' 'a-f')
-    [ "$size" = "${local_sizes[found_index]}" ] && [ "$digest" = "${local_hashes[found_index]}" ] || die "Remote asset size/SHA256 conflicts: $name"
-    remote_names+=("$name"); remote_ids+=("$rid"); remote_sizes+=("$size"); remote_hashes+=("$digest"); remote_count=$((remote_count+1))
+    find_local "$name"
+    if [ "$found_index" -ge 0 ]; then
+      [ "$state" = uploaded ] || die 'Remote asset is incomplete; inspect the original uploader before recovery'
+      [[ $digest =~ ^sha256:[A-Fa-f0-9]{64}$ ]] || die "Remote asset lacks a trustworthy SHA256 digest: $name"
+      digest=$(printf '%s' "${digest#sha256:}" | tr 'A-F' 'a-f')
+      [ "$size" = "${local_sizes[found_index]}" ] && [ "$digest" = "${local_hashes[found_index]}" ] || die "Remote asset size/SHA256 conflicts: $name"
+      remote_local_count=$((remote_local_count+1))
+    else
+      [ "$independent" = 1 ] || die "Unexpected remote asset: $name"
+      # Another worker may still be uploading its own official asset.
+      [[ $state = uploaded || ( $state = starter && $size = 0 && -z $digest ) ]] || die "Invalid foreign asset state: $name"
+    fi
+    remote_names+=("$name"); remote_ids+=("$rid"); remote_count=$((remote_count+1))
   done < <(sed '1d' "$snapshot")
   [ "$boundary_seen" = 1 ] || die 'Remote release body is missing'
   remote_notes=$(sed "1,/^$body_boundary\$/d" "$snapshot")
@@ -206,35 +245,68 @@ verify_local() {
 expected_draft=true; expected_prerelease=false; [ -z "$suffix" ] || expected_prerelease=true
 verify_notes
 fetch_snapshot
+[ "$publish_staged" = 0 ] || [ "$remote_local_count" = "$local_count" ] || die 'Staged publication requires the complete verified draft; stage missing assets first'
+publish_command=()
+if [ "$publish" = 1 ] || [ "$publish_staged" = 1 ]; then
+  if [ -n "$suffix" ]; then latest=false; else latest=true; fi
+  if [ "$publish_staged" = 1 ]; then
+    publish_command=("${api[@]}" --method PATCH "$release_path" -F draft=false -f "make_latest=$latest" --silent)
+  else
+    publish_command=(gh release edit "$tag" --draft=false "--latest=$latest")
+  fi
+fi
 missing=0
 for index in "${upload_order[@]}"; do
   find_remote "${local_names[index]}"
   [ "$remote_found" = 0 ] || continue
   missing=$((missing+1)); verify_local "$index"
-  if [ "$dry" = 1 ]; then printf '%q ' gh release upload "$tag" -- "${local_paths[index]}"; echo
-  else gh release upload "$tag" -- "${local_paths[index]}" || exit $?; fi
+  if [ "$independent" = 1 ]; then
+    upload_command=("${api[@]}" --method POST "$upload_url" -f "name=${local_names[index]}" -H 'Content-Type: application/octet-stream' --input "${local_paths[index]}" --silent)
+    if [ "$dry" = 1 ]; then printf '%q ' "${upload_command[@]}"; echo; continue; fi
+    verify_notes; verify_tag
+    upload_status=0
+    run_github "${upload_command[@]}" || upload_status=$?
+    # A transport error can arrive after GitHub stored the entire asset.
+    fetch_snapshot
+    find_remote "${local_names[index]}"
+    if [ "$remote_found" = 0 ]; then
+      [ "$upload_status" = 0 ] || exit "$upload_status"
+      die "Uploaded asset not yet verified; inspect before retrying: ${local_names[index]}"
+    fi
+  elif [ "$dry" = 1 ]; then
+    printf '%q ' gh release upload "$tag" -- "${local_paths[index]}"; echo
+  else
+    gh release upload "$tag" -- "${local_paths[index]}" || exit $?
+  fi
 done
 if [ "$dry" = 1 ]; then
-  if [ "$publish" = 1 ]; then
+  if [ "$publish_staged" = 1 ]; then
+    echo 'Complete staged draft verified before this publication command:'
+    printf '%q ' "${publish_command[@]}"; echo
+  elif [ "$publish" = 1 ]; then
     echo 'After upload, re-verify the complete draft before this publication command:'
-    if [ -n "$suffix" ]; then latest=false; else latest=true; fi
-    printf '%q ' gh release edit "$tag" --draft=false "--latest=$latest"; echo
+    printf '%q ' "${publish_command[@]}"; echo
   fi
-  printf 'Draft resume preview: existing=%s missing=%s; no mutations performed.\n' "$remote_count" "$missing"
+  printf 'Draft resume preview: existing=%s missing=%s; no mutations performed.\n' "$remote_local_count" "$missing"
   exit 0
 fi
 for ((index=0; index<local_count; index++)); do verify_local "$index"; done
 verify_notes
 fetch_snapshot
-[ "$remote_count" = "$local_count" ] || die 'Draft asset set remains incomplete after uploads'
+[ "$remote_local_count" = "$local_count" ] || die 'Draft asset set remains incomplete after uploads'
 verify_tag
-if [ "$publish" = 1 ]; then
-  if [ -n "$suffix" ]; then latest=false; else latest=true; fi
-  gh release edit "$tag" --draft=false "--latest=$latest" || exit $?
+if [ "$publish" = 1 ] || [ "$publish_staged" = 1 ]; then
+  if [ "$publish_staged" = 1 ]; then
+    run_github "${publish_command[@]}" || echo 'Publication response failed; verifying the pinned release before any retry.' >&2
+  else
+    "${publish_command[@]}" || exit $?
+  fi
   verify_tag; verify_notes
   expected_draft=false; fetch_snapshot
-  [ "$remote_count" = "$local_count" ] || die 'Published asset set differs'
-  printf 'Published resumed release %s (%s verified assets).\n' "$tag" "$remote_count"
+  [ "$remote_local_count" = "$local_count" ] || die 'Published asset set differs'
+  printf 'Published resumed release %s (%s verified assets).\n' "$tag" "$remote_local_count"
+elif [ "$independent" = 1 ]; then
+  printf 'Draft %s independently staged and verified pair %s; left unpublished.\n' "$release_id" "${local_names[${upload_order[0]}]}"
 elif [ "$stage_pairs" = 1 ]; then
   printf 'Draft %s staged and verified (%s assets); left unpublished. Use --resume-draft --publish with the complete asset set to finalize.\n' "$release_id" "$remote_count"
 else

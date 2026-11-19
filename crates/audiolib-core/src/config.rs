@@ -427,6 +427,9 @@ pub struct AppConfig {
     /// Show embedded album artwork in local and server mode. Images stay outside libraries.
     #[serde(default = "default_true")]
     pub show_album_artwork: bool,
+    /// Opt-in local cover cache warmup on launch. Existing settings stay off.
+    #[serde(default)]
+    pub pregenerate_album_artwork: bool,
     /// Optional user-selected directory for durable Waveform WAV slices.
     /// `None` selects the platform Documents/AudioLib Explorer/Exports directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -508,6 +511,8 @@ struct SavedPreferences {
     play_history_limit: u32,
     #[serde(default = "default_true")]
     show_album_artwork: bool,
+    #[serde(default)]
+    pregenerate_album_artwork: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     slice_export_directory: Option<PathBuf>,
     #[serde(default)]
@@ -873,6 +878,7 @@ impl AppConfig {
             stop_playback_on_focus_loss: false,
             play_history_limit: PLAY_HISTORY_LIMIT_PER_LIBRARY,
             show_album_artwork: true,
+            pregenerate_album_artwork: false,
             slice_export_directory: None,
             pregenerate_list_waveforms: true,
             hold_list_waveform_batches_after_audition: false,
@@ -935,6 +941,7 @@ impl AppConfig {
             config.stop_playback_on_focus_loss = saved.stop_playback_on_focus_loss;
             config.play_history_limit = saved.play_history_limit;
             config.show_album_artwork = saved.show_album_artwork;
+            config.pregenerate_album_artwork = saved.pregenerate_album_artwork;
             config.slice_export_directory = saved.slice_export_directory;
             config.pregenerate_list_waveforms = saved.pregenerate_list_waveforms;
             config.hold_list_waveform_batches_after_audition =
@@ -995,6 +1002,7 @@ impl AppConfig {
             stop_playback_on_focus_loss: self.stop_playback_on_focus_loss,
             play_history_limit: self.play_history_limit,
             show_album_artwork: self.show_album_artwork,
+            pregenerate_album_artwork: self.pregenerate_album_artwork,
             slice_export_directory: self.slice_export_directory.clone(),
             pregenerate_list_waveforms: self.pregenerate_list_waveforms,
             hold_list_waveform_batches_after_audition: self
@@ -1489,11 +1497,14 @@ mod tests {
         .unwrap();
         let mut config = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
         assert!(config.show_album_artwork);
+        assert!(!config.pregenerate_album_artwork);
         for enabled in [false, true] {
             config.show_album_artwork = enabled;
+            config.pregenerate_album_artwork = enabled;
             config.save().unwrap();
             let loaded = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
             assert_eq!(loaded.show_album_artwork, enabled);
+            assert_eq!(loaded.pregenerate_album_artwork, enabled);
             assert_eq!(loaded.language, "cn");
             assert_eq!(loaded.playback["volume"], serde_json::json!(0.35));
             assert_eq!(loaded.data_root(), root);
@@ -1721,6 +1732,9 @@ mod tests {
             filters_visible: Some(true),
             folders_section_expanded: Some(false),
             libraries_section_expanded: Some(true),
+            album_show_cover: Some(true),
+            album_show_name: Some(false),
+            album_show_count: Some(false),
             folders_section_ratio: Some(0.7),
         };
         config.save().unwrap();
