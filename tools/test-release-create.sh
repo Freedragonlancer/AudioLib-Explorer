@@ -17,8 +17,39 @@ mkdir "$test_root/bin"
 cat > "$test_root/bin/gh" <<'FAKE_GH'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\0' "$@" > "$AUDIOLIB_RELEASE_CREATE_CAPTURE"
 state=$AUDIOLIB_RELEASE_CREATE_STATE
+locked=0
+lock_state() {
+  local attempt
+  for ((attempt=0; attempt<400; attempt++)); do
+    if mkdir "$state/lock" 2>/dev/null; then locked=1; return; fi
+    sleep 0.05
+  done
+  echo 'Timed out acquiring fake GitHub state lock' >&2
+  exit 96
+}
+unlock_state() {
+  if [ "$locked" = 1 ]; then
+    rmdir "$state/lock"
+    locked=0
+  fi
+}
+await_marker() {
+  local file=$1 attempt
+  for ((attempt=0; attempt<400; attempt++)); do
+    [ ! -f "$file" ] || return 0
+    sleep 0.05
+  done
+  printf 'Timed out waiting for mock upload barrier: %s\n' "$file" >&2
+  exit 96
+}
+require_pinned=${AUDIOLIB_REQUIRE_API_HOST:-0}
+if [ "$require_pinned" = 1 ]; then
+  [ "$(pwd -P)" = "$AUDIOLIB_EXPECT_API_CWD" ] || exit 97
+  lock_state
+  trap unlock_state EXIT
+fi
+printf '%s\0' "$@" > "$AUDIOLIB_RELEASE_CREATE_CAPTURE"
 record_mutation() {
   local count=0
   [ ! -f "$state/mutations" ] || count=$(cat "$state/mutations")
@@ -26,7 +57,58 @@ record_mutation() {
   printf '%s\n' "$((count+1))" > "$state/mutations"
 }
 if [ "$1" = api ]; then
-  shift; [ "${1:-}" != --paginate ] || shift
+  argv=("$@")
+  shift
+  pinned=0
+  if [ "${1:-}" = --hostname ]; then
+    [ "${2:-}" = github.com ] || exit 97
+    pinned=1
+    shift 2
+  fi
+  [ "$pinned" = "$require_pinned" ] || exit 97
+  if [ "${1:-}" = --method ]; then
+    [ "$pinned" = 1 ] || exit 97
+    case $2 in
+      POST)
+        [ "$#" = 10 ] && [ "$3" = "https://uploads.github.com/repos/{owner}/{repo}/releases/$(cat "$state/id")/assets" ] &&
+          [ "$4" = -f ] && [ "$5" = "name=$(basename "$9")" ] && [ "$6" = -H ] &&
+          [ "$7" = 'Content-Type: application/octet-stream' ] && [ "$8" = --input ] && [ "${10}" = --silent ] || exit 97
+        [ "$(cat "$state/draft")" = true ] || exit 97
+        record_mutation "${argv[@]}"
+        asset=$9; name=${5#name=}
+        grep -Fqx -- "$name" "$state/expected" || exit 97
+        [ "${AUDIOLIB_INDEPENDENT_FAIL_BEFORE:-}" != "$name" ] || exit 41
+        if awk -F '\t' -v name="$name" '$3 == name { found=1 } END { exit !found }' "$state/assets"; then exit 42; fi
+        bytes=$(wc -c < "$asset" | tr -d '[:space:]')
+        if command -v sha256sum >/dev/null 2>&1; then hash=$(sha256sum "$asset"); else hash=$(shasum -a 256 "$asset"); fi
+        hash=${hash%% *}; rows=$(wc -l < "$state/assets" | tr -d '[:space:]')
+        id=$((1000+rows))
+        if [ -n "${AUDIOLIB_INDEPENDENT_PEER:-}" ] && [[ $name != *.sha256 ]]; then
+          printf 'asset\t%s\t%s\tstarter\t0\t\n' "$id" "$name" >> "$state/assets"
+          : > "$state/arrived-$name"
+          unlock_state
+          await_marker "$state/arrived-$AUDIOLIB_INDEPENDENT_PEER"
+          if [ "${AUDIOLIB_INDEPENDENT_HOLD:-0}" = 1 ]; then await_marker "$state/release-held-upload"; fi
+          lock_state
+          awk -F '\t' -v name="$name" '$3 != name' "$state/assets" > "$state/assets-next"
+          mv "$state/assets-next" "$state/assets"
+        fi
+        printf 'asset\t%s\t%s\tuploaded\t%s\tsha256:%s\n' "$id" "$name" "$bytes" "$hash" >> "$state/assets"
+        [ "${AUDIOLIB_INDEPENDENT_FAIL_AFTER:-}" != "$name" ] || exit 43
+        ;;
+      PATCH)
+        [ "$#" = 8 ] && [ "$3" = "repos/{owner}/{repo}/releases/$(cat "$state/id")" ] &&
+          [ "$4" = -F ] && [ "$5" = draft=false ] && [ "$6" = -f ] && [ "$8" = --silent ] || exit 97
+        latest=true; if [ "$(cat "$state/prerelease")" = true ]; then latest=false; fi
+        [ "$7" = "make_latest=$latest" ] && [ "$(cat "$state/draft")" = true ] || exit 97
+        record_mutation "${argv[@]}"
+        printf 'false\n' > "$state/draft"
+        ;;
+      *) exit 97 ;;
+    esac
+    exit 0
+  fi
+  [ "${1:-}" != --paginate ] || shift
   endpoint=$1
   case $endpoint in
     'repos/{owner}/{repo}/releases?per_page=100')
@@ -40,9 +122,12 @@ if [ "$1" = api ]; then
       ;;
     repos/\{owner\}/\{repo\}/releases/*)
       [ -f "$state/id" ] || exit 44
+      [ "$pinned" = 0 ] || [ "$endpoint" = "repos/{owner}/{repo}/releases/$(cat "$state/id")" ] || exit 97
       snapshot_count=0; [ ! -f "$state/snapshots" ] || snapshot_count=$(cat "$state/snapshots")
       snapshot_count=$((snapshot_count+1)); printf '%s\n' "$snapshot_count" > "$state/snapshots"
-      printf 'release\t%s\t%s\t%s\t%s\t%s\n' "$(cat "$state/id")" "$(cat "$state/tag")" "$(cat "$state/title")" "$(cat "$state/draft")" "$(cat "$state/prerelease")"
+      is_draft=$(cat "$state/draft")
+      if [ "$pinned" = 1 ] && [ "$is_draft" = false ]; then : > "$state/published-snapshot"; fi
+      printf 'release\t%s\t%s\t%s\t%s\t%s\n' "$(cat "$state/id")" "$(cat "$state/tag")" "$(cat "$state/title")" "$is_draft" "$(cat "$state/prerelease")"
       cat "$state/assets"
       printf 'release-create-body-boundary\n'
       if [ "$snapshot_count" -ge 2 ] && [ "${AUDIOLIB_RESUME_NOTES_FILE_RACE:-0}" = 1 ]; then
@@ -54,7 +139,7 @@ if [ "$1" = api ]; then
   esac
   exit 0
 fi
-[ "$1" = release ] || exit 97
+[ "$1" = release ] && [ "$require_pinned" = 0 ] || exit 97
 case $2 in
   create)
     record_mutation "$@"
@@ -98,6 +183,7 @@ export AUDIOLIB_RELEASE_CREATE_CAPTURE="$test_root/gh.argv"
 export AUDIOLIB_RELEASE_CREATE_STATE="$test_root/state"
 mkdir "$AUDIOLIB_RELEASE_CREATE_STATE"
 export AUDIOLIB_RELEASE_CREATE_EXIT=0
+export AUDIOLIB_EXPECT_API_CWD=$(cd "$root" && pwd -P)
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 run() {
@@ -256,10 +342,14 @@ reject_draft() {
   [ "$after" = "$before" ] || fail 'invalid draft reached a mutation'
 }
 reject_resume() { local message=$1; shift; reject_draft "$message" resume_command "$@"; }
-assert_mutation() {
-  local number=$1 verb=$2
+read_mutation() {
+  local number=$1 argument
   mutation=()
   while IFS= read -r -d '' argument; do mutation+=("$argument"); done < "$state/mutation-$number.argv"
+}
+assert_mutation() {
+  local number=$1 verb=$2
+  read_mutation "$number"
   [ "${mutation[0]}" = release ] && [ "${mutation[1]}" = "$verb" ] || fail 'wrong resume mutation'
   for argument in "${mutation[@]}"; do [ "$argument" != --clobber ] || fail 'resume clobbered an asset'; done
 }
@@ -418,4 +508,118 @@ if "$here/release-create.sh" "$tag" --notes-file "$notes" >/dev/null 2>&1; then 
 reject '--publish requires --resume-draft' "$tag" --publish
 reject '--publish conflicts with --draft' "$tag" --resume-draft --draft --publish
 
-echo 'release-create tests passed (offline fake gh/pwsh/git; legacy create, draft discovery, exact-set resume, cumulative pairs, conflicts, partial retry, explicit publish)'
+independent_command() {
+  (cd "$test_root" && AUDIOLIB_REQUIRE_API_HOST=1 "$here/release-create.sh" "$tag" --resume-draft --stage-independent --draft-id 12345 --notes-file "$notes" "$@")
+}
+publish_staged_command() {
+  (cd "$test_root" && AUDIOLIB_REQUIRE_API_HOST=1 "$here/release-create.sh" "$tag" --resume-draft --publish-staged --draft-id 12345 --notes-file "$notes" "$@")
+}
+assert_independent_upload() {
+  local number=$1 asset=$2
+  read_mutation "$number"
+  [ "${mutation[0]}" = api ] && [ "${mutation[1]}" = --hostname ] &&
+    [ "${mutation[2]}" = github.com ] && [ "${mutation[4]}" = POST ] &&
+    [ "${mutation[7]}" = "name=$(basename "$asset")" ] && [ "${mutation[11]}" = "$asset" ] ||
+    fail "unexpected independent upload at mutation $number"
+}
+
+# Both Docker uploads start before either archive finishes. Leave ARM64 in
+# starter state until the AMD64 process has completed its final verification.
+reset_draft
+amd64=${all_assets[8]}; arm64=${all_assets[10]}
+amd_name=$(basename "$amd64"); arm_name=$(basename "$arm64")
+out=$(independent_command --dry-run -- "$amd64.sha256" "$amd64")
+[[ $out == *'gh api --hostname github.com --method POST'* && $out == *'no mutations performed'* ]] ||
+  fail 'independent preview did not show a pinned upload'
+[ "$(mutation_count)" = 0 ] || fail 'independent preview mutated the draft'
+AUDIOLIB_INDEPENDENT_PEER=$arm_name AUDIOLIB_INDEPENDENT_FAIL_AFTER=$amd_name \
+  independent_command -- "$amd64.sha256" "$amd64" > "$test_root/amd64.log" 2>&1 &
+amd_pid=$!
+AUDIOLIB_INDEPENDENT_PEER=$amd_name AUDIOLIB_INDEPENDENT_HOLD=1 \
+  independent_command -- "$arm64" "$arm64.sha256" > "$test_root/arm64.log" 2>&1 &
+arm_pid=$!
+amd_status=0; wait "$amd_pid" || amd_status=$?
+foreign_starter=0
+if awk -F '\t' -v name="$arm_name" '$3 == name && $4 == "starter" { found=1 } END { exit !found }' "$state/assets"; then
+  foreign_starter=1
+fi
+: > "$state/release-held-upload"
+arm_status=0; wait "$arm_pid" || arm_status=$?
+if [ "$amd_status" != 0 ] || [ "$arm_status" != 0 ]; then
+  cat "$test_root/amd64.log" "$test_root/arm64.log" >&2
+  fail 'overlapping independent Docker uploads failed'
+fi
+[ "$foreign_starter" = 1 ] && [ -f "$state/arrived-$amd_name" ] && [ -f "$state/arrived-$arm_name" ] ||
+  fail 'Docker uploads did not overlap through verification'
+[ "$(mutation_count)" = 4 ] && [ "$(wc -l < "$state/assets" | tr -d '[:space:]')" = 4 ] &&
+  [ "$(cat "$state/draft")" = true ] || fail 'concurrent stage changed the draft or retransmitted an archive'
+read_mutation 0
+if [ "${mutation[11]}" = "$amd64" ]; then
+  assert_independent_upload 0 "$amd64"; assert_independent_upload 1 "$arm64"
+else
+  assert_independent_upload 0 "$arm64"; assert_independent_upload 1 "$amd64"
+fi
+assert_independent_upload 2 "$amd64.sha256"
+assert_independent_upload 3 "$arm64.sha256"
+
+# Recover a checksum request GitHub did not store. The existing ARM64 pair and
+# the successfully stored AMD64 archive, including their remote IDs, survive.
+reset_draft
+independent_command -- "$arm64" "$arm64.sha256" >/dev/null
+status=0
+AUDIOLIB_INDEPENDENT_FAIL_BEFORE="$amd_name.sha256" \
+  independent_command -- "$amd64" "$amd64.sha256" > "$test_root/interrupted.log" 2>&1 || status=$?
+[ "$status" = 41 ] && [ "$(mutation_count)" = 4 ] && [ "$(wc -l < "$state/assets" | tr -d '[:space:]')" = 3 ] ||
+  fail 'independent checksum request did not fail with only the archive stored'
+assert_independent_upload 2 "$amd64"
+assert_independent_upload 3 "$amd64.sha256"
+cp "$state/assets" "$state/before-retry"
+reject_draft 'complete verified draft' publish_staged_command -- "${all_assets[@]}"
+independent_command -- "$amd64" "$amd64.sha256" >/dev/null
+[ "$(mutation_count)" = 5 ] && [ "$(cat "$state/draft")" = true ] || fail 'independent retry retransmitted or published'
+assert_independent_upload 4 "$amd64.sha256"
+while IFS= read -r row; do
+  grep -Fqx -- "$row" "$state/assets" || fail 'retry changed an already stored asset'
+done < "$state/before-retry"
+independent_command -- "$amd64" "$amd64.sha256" >/dev/null
+[ "$(mutation_count)" = 5 ] || fail 'complete independent pair was retransmitted'
+
+# Reject ambiguous scope, conflicting assets and a still-uploading owned asset.
+reset_draft
+reject_draft 'exactly one archive and checksum pair' independent_command -- "$amd64"
+reject_draft 'exactly one archive and checksum pair' independent_command -- "$amd64" "$amd64.sha256" "$arm64" "$arm64.sha256"
+reject_draft 'archive and checksum' independent_command -- "$amd64" "$arm64.sha256"
+reject_draft 'draft ID differs' env AUDIOLIB_REQUIRE_API_HOST=1 "$here/release-create.sh" "$tag" --resume-draft --stage-independent --draft-id 54321 --notes-file "$notes" -- "$amd64" "$amd64.sha256"
+printf 'asset\t9000\t%s\tstarter\t0\t\n' "$amd_name" > "$state/assets"
+reject_draft 'Remote asset is incomplete' independent_command -- "$amd64" "$amd64.sha256"
+printf 'asset\t9000\tunknown.zip\tstarter\t0\t\n' > "$state/assets"
+reject_draft 'Unexpected remote' independent_command -- "$amd64" "$amd64.sha256"
+printf 'asset\t9000\t%s\tuploaded\t%s\tsha256:%064d\n' "$amd_name" "$(wc -c < "$amd64" | tr -d '[:space:]')" 0 > "$state/assets"
+reject_draft 'size/SHA256 conflicts' independent_command -- "$amd64" "$amd64.sha256"
+
+# Finalization alone may mutate a fully staged, verified draft, once.
+for suffix in '' '-rc.2'; do
+  reset_draft "$suffix"; seed_remote 14
+  reject_draft 'complete expected local asset set' publish_staged_command -- "${all_assets[@]:8:4}"
+  if [ -z "$suffix" ]; then
+    cp "$state/assets" "$state/all-uploaded"
+    awk 'BEGIN { FS=OFS="\t" } NR == 1 { $4="starter"; $5=0; $6="" } { print }' "$state/all-uploaded" > "$state/assets"
+    reject_draft 'Remote asset is incomplete' publish_staged_command -- "${all_assets[@]}"
+    mv "$state/all-uploaded" "$state/assets"
+  fi
+  out=$(publish_staged_command --dry-run -- "${all_assets[@]}")
+  [[ $out == *'gh api --hostname github.com --method PATCH'* && $out != *' --method POST '* && $out == *'no mutations performed'* ]] ||
+    fail 'staged publication preview did not verify without uploading'
+  [ "$(mutation_count)" = 0 ] || fail 'staged publication preview mutated the draft'
+  publish_staged_command -- "${all_assets[@]}" >/dev/null
+  [ "$(cat "$state/draft")" = false ] && [ "$(mutation_count)" = 1 ] &&
+    [ -f "$state/published-snapshot" ] || fail 'finalization did not publish and reverify the existing draft exactly once'
+  read_mutation 0
+  latest=true; if [ -n "$suffix" ]; then latest=false; fi
+  [ "${mutation[0]}" = api ] && [ "${mutation[2]}" = github.com ] && [ "${mutation[4]}" = PATCH ] &&
+    [ "${mutation[5]}" = 'repos/{owner}/{repo}/releases/12345' ] &&
+    [ "${mutation[9]}" = "make_latest=$latest" ] || fail 'wrong staged finalization mutation'
+  reject_draft 'unpublished draft' publish_staged_command -- "${all_assets[@]}"
+done
+
+echo 'release-create tests passed (offline fake gh/pwsh/git; legacy resume, cumulative and independent pairs, interrupted retry, exact staged publication)'
