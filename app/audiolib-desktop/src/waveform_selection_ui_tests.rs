@@ -147,6 +147,103 @@ fn pointer_release(ui: &AppWindow, position: LogicalPosition) {
 }
 
 #[test]
+fn monitor_mode_cycles_only_through_available_routes_in_both_players() {
+    i_slint_backend_testing::init_no_event_loop();
+    for modern in [false, true] {
+        let ui = window(modern);
+        for (source, output) in [(6, 8), (2, 8), (6, 2), (1, 2), (8, 1)] {
+            ui.set_monitor_source_channels(source);
+            ui.set_monitor_output_channels(output);
+            ui.set_audition_stereo_pair(false);
+            ui.set_audition_mono(false);
+            settle();
+            let multi = source > 2 && output > 2;
+            let stereo_only = source == 2 && output > 2;
+            let button = ElementHandle::find_by_accessible_label(
+                &ui,
+                if multi || stereo_only {
+                    "Monitor mode"
+                } else {
+                    "Mono monitoring"
+                },
+            )
+            .next()
+            .unwrap();
+            let cycle = if output == 1 || stereo_only {
+                Vec::new()
+            } else if multi {
+                vec!["MULTI", "STEREO", "MONO", "MULTI"]
+            } else if source == 1 {
+                vec!["MONO", "STEREO", "MONO"]
+            } else {
+                vec!["STEREO", "MONO", "STEREO"]
+            };
+            for name in cycle {
+                assert!(button.accessible_description().unwrap().starts_with(name));
+                button.invoke_accessible_default_action();
+                settle();
+            }
+            if output == 1 || stereo_only {
+                assert_eq!(button.accessible_enabled(), Some(false));
+            }
+        }
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
+fn compact_studio_ruler_leaves_space_between_visible_timestamps() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = window(true);
+    ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+    for duration in [1.0, 0.05, 3900.0] {
+        crate::controller::publish_wave_target(&ui, Default::default(), duration);
+        settle();
+        let ruler = ElementHandle::find_by_accessible_label(&ui, "Waveform time ruler")
+            .next()
+            .unwrap();
+        let mut spans: Vec<_> = ruler
+            .query_descendants()
+            .match_inherits("Text")
+            .find_all()
+            .into_iter()
+            .filter_map(|label| {
+                label.accessible_label()?.split_once(':')?;
+                let x = label.absolute_position().x;
+                Some((x, x + label.size().width))
+            })
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert!(spans.len() >= 2);
+        assert!(spans.windows(2).all(|pair| pair[0].1 < pair[1].0));
+    }
+    ui.hide().unwrap();
+}
+
+#[test]
+fn hover_guide_uses_the_visible_audio_time_without_starting_a_gesture() {
+    i_slint_backend_testing::init_no_event_loop();
+    for modern in [false, true] {
+        let ui = window(modern);
+        ui.set_view_start(4.0);
+        ui.set_view_end(12.0);
+        moved(&ui, point(&ui, 0.5));
+        let stamp = ElementHandle::find_by_element_id(&ui, "WaveHoverGuide::stamp")
+            .next()
+            .unwrap();
+        assert_eq!(stamp.accessible_value().as_deref(), Some("00:08.000"));
+        assert!(!ui.get_wave_selection_gesture());
+        moved(&ui, LogicalPosition::new(1.0, 1.0));
+        assert!(
+            ElementHandle::find_by_element_id(&ui, "WaveHoverGuide::stamp")
+                .next()
+                .is_none()
+        );
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
 fn both_players_create_reverse_ranges_resize_and_drag_exactly_once() {
     i_slint_backend_testing::init_no_event_loop();
     for modern in [false, true] {
