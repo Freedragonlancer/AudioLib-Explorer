@@ -10,7 +10,7 @@
 #   tools/release-create.sh <tag> [--notes-file <file>] [--draft] [--dry-run] [--] [asset ...]
 #   tools/release-create.sh <tag> --resume-draft [--publish] [--dry-run] [--notes-file <file>] <all-assets...>
 #   tools/release-create.sh <tag> --resume-draft --stage-pairs [--dry-run] [--notes-file <file>] <cumulative-pairs...>
-#   tools/release-create.sh <tag> --resume-draft --stage-independent --draft-id <id> [--dry-run] [--notes-file <file>] <archive> <sha256>
+#   tools/release-create.sh <tag> --resume-draft --stage-independent --draft-id <id> [--timings [--intake-read-hash-ms <ms>]] [--dry-run] [--notes-file <file>] <archive> <sha256>
 #   tools/release-create.sh <tag> --resume-draft --publish-staged --draft-id <id> [--dry-run] [--notes-file <file>] <all-assets...>
 set -euo pipefail
 die() { echo "release-create: $*" >&2; exit 1; }
@@ -22,6 +22,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cargo_ver=$(awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f&&/^version *=/{gsub(/[" ]/,"");sub("version=","");print;exit}' "$root/Cargo.toml")
 [ "$core" = "$cargo_ver" ] || die "tag $tag does not match Cargo.toml workspace version $cargo_ver"
 notes=(--notes-file "$root/doc/Rust_Release_Notes.md"); dry=0; draft=0; resume=0; publish=0; stage_pairs=0; independent=0; publish_staged=0; draft_id=''; assets=()
+upload_timings=0; intake_read_hash_ms=''
 while [ $# -gt 0 ]; do
   case $1 in
     --notes-file)
@@ -35,6 +36,11 @@ while [ $# -gt 0 ]; do
     --stage-pairs) stage_pairs=1; shift ;;
     --stage-independent) independent=1; shift ;;
     --publish-staged) publish_staged=1; shift ;;
+    --timings) upload_timings=1; shift ;;
+    --intake-read-hash-ms)
+      [ $# -ge 2 ] && [[ $2 =~ ^(0|[1-9][0-9]{0,11})$ ]] || die 'Option --intake-read-hash-ms requires an integer number of milliseconds'
+      [ -z "$intake_read_hash_ms" ] || die 'Option --intake-read-hash-ms may only be supplied once'
+      intake_read_hash_ms=$2; shift 2 ;;
     --draft-id)
       [ $# -ge 2 ] && [[ $2 =~ ^[1-9][0-9]*$ ]] || die 'Option --draft-id requires a positive numeric release ID'
       [ -z "$draft_id" ] || die 'Option --draft-id may only be supplied once'
@@ -58,6 +64,10 @@ if [ "$independent" = 1 ] || [ "$publish_staged" = 1 ]; then
 else
   [ -z "$draft_id" ] || die '--draft-id requires --stage-independent or --publish-staged'
 fi
+[ "$upload_timings" = 0 ] || [ "$independent" = 1 ] || die '--timings requires --stage-independent'
+[ -z "$intake_read_hash_ms" ] || [ "$upload_timings" = 1 ] || die '--intake-read-hash-ms requires --timings'
+[ "$dry" = 0 ] || upload_timings=0
+upload_archive=''; post_attempts=0; post_failures=0
 run_github() {
   # Bind repository discovery to the checkout whose tag we verify.
   if [ -n "$draft_id" ]; then (cd "$root" && "$@"); else "$@"; fi
@@ -72,7 +82,59 @@ if [ "${assets[*]+set}" = set ]; then args+=(--); fi
 # existing draft's read-only identity to distinguish matching/missing assets.
 if [ "$dry" = 1 ] && [ "$resume" = 0 ]; then printf '%q ' gh release create "${args[@]}" ${assets[@]+"${assets[@]}"}; echo; exit 0; fi
 
-matches=$(run_github "${api[@]}" --paginate 'repos/{owner}/{repo}/releases?per_page=100' --jq ".[] | select(.tag_name == \"$tag\") | [.id, .draft] | @tsv") || die 'Cannot inspect authenticated releases/drafts; absence is unproven'
+time_upload_phase() {
+  local phase=$1
+  shift
+  if [ "$upload_timings" = 0 ]; then
+    "$@"
+    return
+  fi
+  # Keep the command's stdout and stderr intact and capture Bash's elapsed time.
+  local TIMEFORMAT='%3R' LC_ALL=C
+  { time "$@" 2>&3; } 3>&2 2>> "$resume_root/$phase"
+}
+phase_milliseconds() {
+  local log="$resume_root/$1"
+  if [ -s "$log" ]; then
+    LC_ALL=C awk '{ seconds += $1 } END { printf "%.0f", 1000 * seconds }' "$log"
+  else
+    printf '0'
+  fi
+}
+report_upload_timing() {
+  local status=$1 local_ms intake_ms archive_ms checksum_ms remote_ms
+  local_ms=$(phase_milliseconds read_hash) || return
+  intake_ms=${intake_read_hash_ms:-0}
+  archive_ms=$(phase_milliseconds post_archive) || return
+  checksum_ms=$(phase_milliseconds post_checksum) || return
+  remote_ms=$(phase_milliseconds remote_verify) || return
+  printf 'RELEASE_UPLOAD_TIMING {"schema_version":1,"tag":"%s","draft_id":"%s","archive":"%s",'\
+'"read_hash_ms":%s,"intake_read_hash_ms":%s,"local_read_hash_ms":%s,'\
+'"post_ms":%s,"post_archive_ms":%s,"post_checksum_ms":%s,"remote_verify_ms":%s,'\
+'"post_attempts":%s,"post_failures":%s,"exit_code":%s}\n' \
+    "$tag" "$draft_id" "$upload_archive" "$((intake_ms+local_ms))" "$intake_ms" "$local_ms" \
+    "$((archive_ms+checksum_ms))" "$archive_ms" "$checksum_ms" "$remote_ms" "$post_attempts" "$post_failures" "$status"
+}
+cleanup() {
+  local status=$?
+  if [ "$upload_timings" = 1 ]; then
+    report_upload_timing "$status" || echo 'release-create: could not write upload timing receipt' >&2
+  fi
+  case $resume_root in
+    "$temp_parent"/audiolib-release-resume.*)
+      rm -f -- "$resume_root/snapshot" "$resume_root/read_hash" "$resume_root/post_archive" "$resume_root/post_checksum" "$resume_root/remote_verify"
+      rmdir -- "$resume_root" ;;
+    *) echo 'Refusing resume temporary cleanup outside owned root' >&2 ;;
+  esac
+}
+init_resume_evidence() {
+  umask 077
+  temp_parent=$(cd "${TMPDIR:-/tmp}" && pwd -P) || die 'Cannot resolve temporary parent'
+  resume_root=$(mktemp -d "$temp_parent/audiolib-release-resume.XXXXXX") || die 'Cannot create owned resume evidence'
+  trap cleanup EXIT
+}
+if [ "$upload_timings" = 1 ]; then init_resume_evidence; fi
+matches=$(time_upload_phase remote_verify run_github "${api[@]}" --paginate 'repos/{owner}/{repo}/releases?per_page=100' --jq ".[] | select(.tag_name == \"$tag\") | [.id, .draft] | @tsv") || die 'Cannot inspect authenticated releases/drafts; absence is unproven'
 release_id=''; release_draft=''; release_count=0
 while IFS=$'\t' read -r candidate_id candidate_draft extra; do
   [ -n "$candidate_id" ] || continue
@@ -114,15 +176,15 @@ is_expected_asset() {
 
 sha256_file() {
   local value
-  if command -v sha256sum >/dev/null 2>&1; then value=$(sha256sum "$1") || return
-  elif command -v shasum >/dev/null 2>&1; then value=$(shasum -a 256 "$1") || return
+  if command -v sha256sum >/dev/null 2>&1; then value=$(time_upload_phase read_hash sha256sum "$1") || return
+  elif command -v shasum >/dev/null 2>&1; then value=$(time_upload_phase read_hash shasum -a 256 "$1") || return
   else die 'Resume requires sha256sum or shasum'; fi
   value=${value%% *}; value=$(printf '%s' "$value" | tr 'A-F' 'a-f')
   [[ $value =~ ^[a-f0-9]{64}$ ]] || die 'Invalid local SHA256 result'
   printf '%s' "$value"
 }
-file_size() { wc -c < "$1" | tr -d '[:space:]'; }
-reviewed_notes=$(cat "${notes[1]}")
+file_size() { time_upload_phase read_hash wc -c < "$1" | tr -d '[:space:]'; }
+reviewed_notes=$(time_upload_phase read_hash cat "${notes[1]}")
 reviewed_notes_hash=$(sha256_file "${notes[1]}") || die 'Cannot hash reviewed notes'
 verify_notes() {
   [ -f "${notes[1]}" ] && [ ! -L "${notes[1]}" ] && [ "$(sha256_file "${notes[1]}")" = "$reviewed_notes_hash" ] || die 'Reviewed local notes changed during resume'
@@ -164,10 +226,15 @@ else
   [ "$local_count" = "$expected_count" ] || die 'Resume requires the complete expected local asset set'
   for ((index=0; index<local_count; index++)); do upload_order+=("$index"); done
 fi
+if [ "$upload_timings" = 1 ]; then
+  archive_for_report=${local_names[${upload_order[0]}]}
+  [[ $archive_for_report =~ ^[A-Za-z0-9._-]+$ ]] || die 'Invalid archive name for timing report'
+  upload_archive=$archive_for_report
+fi
 for ((index=0; index<local_count; index++)); do
   case ${local_names[index]} in
     *.sha256)
-      checksum=$(cat "${local_paths[index]}"); checksum=${checksum%$'\r'}
+      checksum=$(time_upload_phase read_hash cat "${local_paths[index]}"); checksum=${checksum%$'\r'}
       [[ $checksum != *$'\n'* && $checksum != *$'\r'* ]] || die 'Checksum must contain one archive/hash line'
       IFS=$' \t' read -r declared_hash declared_name extra <<< "$checksum"
       [[ $declared_hash =~ ^[A-Fa-f0-9]{64}$ && -z $extra ]] || die 'Malformed local checksum sidecar'
@@ -184,26 +251,16 @@ tag_object=$(git -C "$root" rev-parse --verify "refs/tags/$tag") || die 'Resume 
 [[ $tag_object =~ ^[a-f0-9]{40,64}$ ]] || die 'Invalid local tag object'
 verify_tag() {
   local remote_object
-  remote_object=$(run_github "${api[@]}" "repos/{owner}/{repo}/git/ref/tags/$tag" --jq '.object.sha') || die 'Cannot verify the remote tag'
+  remote_object=$(time_upload_phase remote_verify run_github "${api[@]}" "repos/{owner}/{repo}/git/ref/tags/$tag" --jq '.object.sha') || die 'Cannot verify the remote tag'
   [ "$remote_object" = "$tag_object" ] || die 'Remote tag object differs from the frozen local tag'
 }
 verify_tag
-
-umask 077
-temp_parent=$(cd "${TMPDIR:-/tmp}" && pwd -P) || die 'Cannot resolve temporary parent'
-resume_root=$(mktemp -d "$temp_parent/audiolib-release-resume.XXXXXX") || die 'Cannot create owned resume evidence'
-cleanup() {
-  case $resume_root in
-    "$temp_parent"/audiolib-release-resume.*) rm -f -- "$resume_root/snapshot"; rmdir -- "$resume_root" ;;
-    *) echo 'Refusing resume temporary cleanup outside owned root' >&2 ;;
-  esac
-}
-trap cleanup EXIT
+if [ "$upload_timings" = 0 ]; then init_resume_evidence; fi
 snapshot="$resume_root/snapshot"; body_boundary='release-create-body-boundary'
 remote_names=(); remote_ids=(); remote_count=0; remote_local_count=0
 fetch_snapshot() {
   local kind rid rtag title is_draft is_pre extra name state size digest boundary_seen=0 index
-  run_github "${api[@]}" "$release_path" --jq '(["release", .id, .tag_name, .name, .draft, .prerelease] | @tsv), (.assets[] | ["asset", .id, .name, .state, .size, (.digest // "")] | @tsv), "release-create-body-boundary", (.body // "")' > "$snapshot" || die 'Cannot inspect draft identity/assets'
+  time_upload_phase remote_verify run_github "${api[@]}" "$release_path" --jq '(["release", .id, .tag_name, .name, .draft, .prerelease] | @tsv), (.assets[] | ["asset", .id, .name, .state, .size, (.digest // "")] | @tsv), "release-create-body-boundary", (.body // "")' > "$snapshot" || die 'Cannot inspect draft identity/assets'
   IFS=$'\t' read -r kind rid rtag title is_draft is_pre extra < "$snapshot"
   [ "$kind" = release ] && [ "$rid" = "$release_id" ] && [ "$rtag" = "$tag" ] && [ "$title" = "AudioLib Explorer $tag" ] && [ -z "$extra" ] || die 'Existing release tag/title/ID differs'
   [ "$is_draft" = "$expected_draft" ] || die 'Existing release is not in the expected draft/public state'
@@ -265,7 +322,13 @@ for index in "${upload_order[@]}"; do
     if [ "$dry" = 1 ]; then printf '%q ' "${upload_command[@]}"; echo; continue; fi
     verify_notes; verify_tag
     upload_status=0
-    run_github "${upload_command[@]}" || upload_status=$?
+    post_phase=post_archive
+    [[ ${local_names[index]} != *.sha256 ]] || post_phase=post_checksum
+    post_attempts=$((post_attempts+1))
+    time_upload_phase "$post_phase" run_github "${upload_command[@]}" || {
+      upload_status=$?
+      post_failures=$((post_failures+1))
+    }
     # A transport error can arrive after GitHub stored the entire asset.
     fetch_snapshot
     find_remote "${local_names[index]}"
