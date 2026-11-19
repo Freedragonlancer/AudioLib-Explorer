@@ -6,6 +6,9 @@ use audiolib_remote::ArtworkReply;
 
 /// Busy replies retried after the first. Four cover reads at most.
 const ARTWORK_BUSY_RETRIES: u32 = 3;
+// The sidebar can show covers at up to 180 logical pixels. A 40px thumbnail
+// becomes visibly blocky there, while 256px keeps the per-row memory bounded.
+const SIDEBAR_COVER_SIDE: u32 = 256;
 
 #[cfg(test)]
 #[path = "shared_album_artwork_migration_tests.rs"]
@@ -95,7 +98,7 @@ impl Controller {
         self.directory_artwork_identity(album, &self.artwork_folder_context(file))
     }
 
-    fn artwork_folder_context_for(
+    pub(super) fn artwork_folder_context_for(
         provider: &SqliteProvider,
         file: &AudioFile,
     ) -> ArtworkFolderContext {
@@ -180,7 +183,7 @@ impl Controller {
 
     // Caller serializes cache/preference access. An explicit directory receipt
     // means "use this directory's embedded artwork", so it also stops inheritance.
-    fn directory_artwork_choice(
+    pub(super) fn directory_artwork_choice(
         &self,
         album: &Album,
         folder: &ArtworkFolderContext,
@@ -205,7 +208,9 @@ impl Controller {
         album: &Album,
         index: usize,
     ) -> Option<(Vec<u8>, u32, u32)> {
-        if index >= ALBUM_THUMBNAILS || !self.show_album_artwork.load(Ordering::Acquire) {
+        if (index >= ALBUM_THUMBNAILS && !self.pregenerate_album_artwork.load(Ordering::Acquire))
+            || !self.show_album_artwork.load(Ordering::Acquire)
+        {
             return None;
         }
         let context = self.hinted_album_context(provider, album).or_else(|| {
@@ -214,17 +219,26 @@ impl Controller {
         });
         let _cache = self.artwork_cache_lock.try_lock().ok()?;
         let pixels = if let Some(folder) = context {
-            match self.directory_artwork_choice(album, &folder, 40).ok()? {
+            match self
+                .directory_artwork_choice(album, &folder, SIDEBAR_COVER_SIDE)
+                .ok()?
+            {
                 Some(Choice::Hidden) => return None,
                 Some(Choice::Pixels(pixels)) => pixels,
                 Some(Choice::Embedded) | None => crate::artwork::read_thumbnail(
                     &self.directory_cached_artwork_path(album, &folder)?,
-                    40,
+                    SIDEBAR_COVER_SIDE,
                 )?,
             }
         } else {
             let (directory, key) = self.album_artwork_identity(album)?;
-            match crate::directory_artwork_choices::read_choice(&directory, &key, 40).ok()? {
+            match crate::directory_artwork_choices::read_choice(
+                &directory,
+                &key,
+                SIDEBAR_COVER_SIDE,
+            )
+            .ok()?
+            {
                 Some(Choice::Pixels(pixels)) => pixels,
                 _ => return None,
             }

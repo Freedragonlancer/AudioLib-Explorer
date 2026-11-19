@@ -17,6 +17,98 @@ fn wait_albums(fixture: &Fixture, count: usize) {
 }
 
 #[test]
+fn enlarged_sidebar_cover_keeps_enough_cached_pixels() {
+    isolated("album_review::child_enlarged_sidebar_cover");
+}
+
+#[test]
+#[ignore = "isolated sidebar cover resolution regression"]
+fn child_enlarged_sidebar_cover() {
+    let fixture = fixture();
+    let file = fixture
+        .provider
+        .search(&SearchRequest::default())
+        .unwrap()
+        .results
+        .remove(0);
+    let connection = rusqlite::Connection::open(fixture.provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&connection).unwrap();
+    connection.execute(
+        "UPDATE audio_files SET metadata_json=json_set(audiolib_metadata_json(metadata_json),'$.wav_metadata.fields.library','Large cover') WHERE id=?1",
+        [file.id],
+    ).unwrap();
+    drop(connection);
+
+    let album = fixture
+        .provider
+        .album_facets_cancellable(&SearchRequest::default(), Arc::new(AtomicBool::new(false)))
+        .unwrap()
+        .into_iter()
+        .find(|facet| facet.album.name == "Large cover")
+        .unwrap()
+        .album;
+    let representative = fixture
+        .provider
+        .get_audio(album.representative_audio_id.unwrap())
+        .unwrap();
+    let folder = Controller::artwork_folder_context_for(&fixture.provider, &representative);
+    let path = fixture
+        .controller
+        .directory_cached_artwork_path(&album, &folder)
+        .unwrap();
+    crate::artwork::save_thumbnail(
+        &path,
+        &image::RgbaImage::from_pixel(512, 512, image::Rgba([80, 120, 160, 255])),
+    )
+    .unwrap();
+
+    search(&fixture, "", 4);
+    wait_for(&fixture.ui, |ui| {
+        ui.get_albums().iter().any(|row| row.name == "Large cover")
+    });
+    let row = fixture
+        .ui
+        .get_albums()
+        .iter()
+        .find(|row| row.name == "Large cover")
+        .unwrap();
+    assert_eq!(row.cover.size().width, 256);
+    assert_eq!(row.cover.size().height, 256);
+    finish(&fixture);
+}
+
+#[test]
+fn library_sidebar_shows_metadata_libraries_without_folder_groups() {
+    isolated("album_review::child_library_sidebar_metadata_only");
+}
+
+#[test]
+#[ignore = "isolated library sidebar regression"]
+fn child_library_sidebar_metadata_only() {
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    let connection = rusqlite::Connection::open(fixture.provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&connection).unwrap();
+    connection.execute(
+        "UPDATE audio_files SET metadata_json=json_set(audiolib_metadata_json(metadata_json),'$.wav_metadata.fields.library','BOOM ONE') WHERE filename='gore one.wav'",
+        [],
+    ).unwrap();
+    drop(connection);
+
+    search(&fixture, "", 4);
+    wait_albums(&fixture, 1);
+    let album = ui.get_albums().row_data(0).unwrap();
+    assert_eq!(album.name.as_str(), "BOOM ONE");
+    assert_eq!(album.count.as_str(), "1");
+    assert!(
+        ui.get_folders()
+            .iter()
+            .any(|folder| folder.name == "sounds")
+    );
+    finish(&fixture);
+}
+
+#[test]
 #[ignore = "isolated album navigation regression"]
 fn child_album_navigation() {
     let fixture = fixture();

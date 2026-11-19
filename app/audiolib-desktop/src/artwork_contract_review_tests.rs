@@ -3,6 +3,63 @@
 use super::*;
 
 #[test]
+fn startup_cover_option_populates_an_unselected_library() {
+    isolated("album_review::management::contracts::child_startup_cover_option");
+}
+
+#[test]
+#[ignore = "isolated background cover cache regression"]
+fn child_startup_cover_option() {
+    let fixture = fixture();
+    let file = fixture
+        .provider
+        .search(&SearchRequest::default())
+        .unwrap()
+        .results
+        .remove(0);
+    fixture.controller.config.lock().unwrap().allowed_scan_roots =
+        vec![fixture.root.join("sounds")];
+    let connection = rusqlite::Connection::open(fixture.provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&connection).unwrap();
+    connection.execute(
+        "UPDATE audio_files SET metadata_json=json_set(audiolib_metadata_json(metadata_json),'$.wav_metadata.fields.library','Cached library') WHERE id=?1",
+        [file.id],
+    ).unwrap();
+    drop(connection);
+    embedded_cover(Path::new(&file.file_path));
+    search(&fixture, "", 4);
+    wait_for(&fixture.ui, |ui| ui.get_albums().row_count() == 1);
+    assert_eq!(
+        fixture
+            .ui
+            .get_albums()
+            .row_data(0)
+            .unwrap()
+            .cover
+            .size()
+            .width,
+        0
+    );
+
+    fixture.ui.invoke_artwork_precache_changed(true);
+    wait_for(&fixture.ui, |ui| {
+        !ui.get_artwork_precache_busy()
+            && ui
+                .get_albums()
+                .row_data(0)
+                .is_some_and(|row| row.cover.size().width > 0)
+    });
+    assert!(
+        fixture
+            .ui
+            .get_artwork_precache_status()
+            .contains("found 1 covers")
+    );
+    fixture.ui.invoke_artwork_precache_changed(false);
+    finish(&fixture);
+}
+
+#[test]
 fn missing_selection_reloads_its_custom_cover_after_selecting_another_record() {
     isolated("album_review::management::contracts::child_missing_custom_cover_selection");
 }

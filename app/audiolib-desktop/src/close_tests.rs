@@ -41,6 +41,7 @@ fn real_windows_empty_library_closes_after_startup_event_loop() {
         stop_playback_on_focus_loss: false,
         play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
         show_album_artwork: true,
+        pregenerate_album_artwork: false,
         slice_export_directory: None,
         pregenerate_list_waveforms: false,
         hold_list_waveform_batches_after_audition: false,

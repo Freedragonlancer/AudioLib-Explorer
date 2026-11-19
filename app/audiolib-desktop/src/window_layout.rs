@@ -48,6 +48,15 @@ pub(crate) fn restore_panes(ui: &AppWindow, layout: &WindowLayoutPreferences) {
     if let Some(expanded) = layout.libraries_section_expanded {
         ui.set_libraries_section_expanded(expanded);
     }
+    if let Some(visible) = layout.album_show_cover {
+        ui.set_album_show_cover(visible);
+    }
+    if let Some(visible) = layout.album_show_name {
+        ui.set_album_show_name(visible);
+    }
+    if let Some(visible) = layout.album_show_count {
+        ui.set_album_show_count(visible);
+    }
     if let Some(ratio) = layout.folders_section_ratio {
         ui.set_folders_section_ratio(ratio);
     }
@@ -126,6 +135,9 @@ pub(crate) fn capture(
     layout.inspector_visible = Some(ui.get_inspector_visible());
     layout.folders_section_expanded = Some(ui.get_folders_section_expanded());
     layout.libraries_section_expanded = Some(ui.get_libraries_section_expanded());
+    layout.album_show_cover = Some(ui.get_album_show_cover());
+    layout.album_show_name = Some(ui.get_album_show_name());
+    layout.album_show_count = Some(ui.get_album_show_count());
     layout.folders_section_ratio = Some(ui.get_folders_section_ratio());
     // `filters_visible` stays as saved: the page is not restored (see restore_before_show)
     // and older builds that still read it keep their previous value.
@@ -159,6 +171,9 @@ mod tests {
                 filters_visible: Some(true),
                 folders_section_expanded: Some(false),
                 libraries_section_expanded: Some(true),
+                album_show_cover: Some(true),
+                album_show_name: Some(false),
+                album_show_count: Some(false),
                 folders_section_ratio: Some(0.7),
                 ..Default::default()
             };
@@ -176,6 +191,9 @@ mod tests {
             assert_eq!(captured.filters_visible, Some(true));
             assert_eq!(captured.folders_section_expanded, Some(false));
             assert_eq!(captured.libraries_section_expanded, Some(true));
+            assert_eq!(captured.album_show_cover, Some(true));
+            assert_eq!(captured.album_show_name, Some(false));
+            assert_eq!(captured.album_show_count, Some(false));
             assert_eq!(captured.folders_section_ratio, Some(0.7));
         }
     }
