@@ -136,7 +136,7 @@ Docker 继续通过 `package-server-docker.ps1` / `validate-server-docker.ps1` �
 - Linux x64/arm64 共用 `server-unix.json` 的 `unix-server` 计划名。两者显式使用不同 `-RunDirectory`，并核对 Target/Suffix、构建缓存及输出隔离，不能只换 VariablesFile 后沿用默认运行目录。
 - 某架构 Linux 包验收通过即可启动该架构 Docker，无需等待其他平台。Docker 导出/压缩失败可使用已有 `-ExistingImageId sha256:...` 恢复；入口仍会检查原生包和镜像内二进制身份。
 - 同一 Run 负责判断哪些收据可复用。打包失败时保留构建，验收驱动失败时保留实际 payload；输入变化导致管线判定失效时按其结果执行，不删除状态或手写通过收据。新预检改变了计划身份，首次使用新版计划时已有旧收据可能失效，不承诺跨这次工具更新复用历史构建。
-- 上传失败先检查已有 draft/Release 和完整资产，保留已完成的传输与原字节。大 Docker 归档优先从持有已验收文件、网络可用且已有授权凭据的主机上传，避免经另一台电脑中转 NAS 大文件。原上传会话结束后可用下文的 `--resume-draft` 补传；它不替换现有资产，不使用 `--clobber`。
+- 大 Docker 归档优先从持有已验收文件、网络可用且已有授权凭据的主机上传，避免经另一台电脑中转 NAS 大文件。两种架构可在各自验收通过后[独立上传到同一草稿](#并行上传独立文件对)，并发大归档最多两份。失败后先确认对应上传会话已结束，再核对该草稿已有资产并补传缺项。
 - 发布完成后的说明/验收记录更新不触发重建。保留实际源码和二进制身份；同版本替换仅限明确授权的 payload，不能移动 tag，也不能顺带重建、上传其余包。普通标签计划要求 tag 与 checkout 相同；替换使用明确的独立流程和真实来源证明，不能伪造标签身份。例见 [0.9.3 客户端替换记录](Rust_Release_0.9.3.md)。
 
 发布后如果固定安装已与正式 payload 全文件哈希一致，按 AGENTS.md 完成发布身份和安装核对即可；不因“已发布”再跑一遍完整 portable 套件。生产服务更新另按请求授权和部署契约执行。
@@ -160,11 +160,48 @@ Docker 继续通过 `package-server-docker.ps1` / `validate-server-docker.ps1` �
 
 管线不创建标签、提 PR 或自动发布 Release。发布仍使用已授权的 `release-create.sh` 入口；发布后可选用 `release-assets.json` 合并元数据/集合/摘要检查。该只读计划核对所提供的本地归档，不替代首次从 GitHub 下载后的内容复核。发布后固定安装与正式产物身份同步仍按 AGENTS.md 执行，不把本地构建的相同版本号当作同一发布二进制。
 
-发布助手支持显式 `--draft` 创建未发布草稿，例如 `tools/release-create.sh <tag> --draft --notes-file <reviewed-notes> <assets...>`。草稿总是带 `--latest=false`；beta/rc 草稿仍保留预发布标记。省略 `--draft` 时，原正式版与 beta/rc 发布规则不变。创建模式的 `--dry-run` 只打印命令，不调用 GitHub。实际创建前通过已认证的 Release 列表检查同标签草稿或正式 Release，不能仅凭按 tag 查询的 404 认定不存在。字面资产名若以 `-` 开头，放在 `--` 后，助手会保留下游参数边界。
+发布助手支持显式 `--draft` 创建未发布草稿，例如 `tools/release-create.sh <tag> --draft --notes-file <reviewed-notes>`。草稿总是带 `--latest=false`；beta/rc 草稿仍保留预发布标记。省略 `--draft` 时，原正式版与 beta/rc 发布规则不变。创建模式的 `--dry-run` 只打印命令。实际创建前通过已认证的 Release 列表检查同标签草稿或正式 Release。字面资产名若以 `-` 开头，放在 `--` 后，助手会保留下游参数边界。GitHub CLI 带资产的创建分多次请求执行，分批上传时先创建空草稿。[GitHub CLI 创建 Release](https://cli.github.com/manual/gh_release_create)
 
 ### 草稿续传与显式发布
 
-`--resume-draft` 只处理已存在的同标签草稿，默认保留草稿状态；`--publish` 必须与它同用，只有完整资产核验通过后才发布。它们不授权一次实际发布操作，发布权限仍来自当前任务。先确认原上传进程或会话已经结束，避免两个上传者竞争同一资产；该入口不声称提供跨主机分布式锁。
+`--resume-draft` 处理已存在的同标签草稿，默认保留草稿状态。发布权限来自当前任务。一次发布选用独立文件对或单上传者累计模式；续传时沿用已选模式。所有操作在核对过的发布 checkout 中执行，各主机使用相同的目标 GitHub 仓库、冻结标签与审定 notes 文件。可用任务内的 `GH_REPO` 显式固定目标仓库。[GitHub CLI 环境变量](https://cli.github.com/manual/gh_help_environment)
+
+#### 并行上传独立文件对
+
+协调者先创建一次空草稿，从已认证的 Release 列表确认同标签记录唯一、`draft=true`，记录其数字 ID 为 `draft_id`。保留同一份审定 notes，供所有上传者与最终发布使用。
+
+```bash
+tools/release-create.sh "$tag" --draft --notes-file "$notes"
+gh api --hostname github.com --paginate 'repos/{owner}/{repo}/releases?per_page=100' \
+  --jq ".[] | select(.tag_name == \"$tag\") | [.id, .draft] | @tsv"
+```
+
+每份包一验收通过即可从持有其文件的主机启动以下命令。一次提交恰好一份合同内的归档及其 `.sha256`。每对文件只有一个上传者，同时最多传两个大归档。示例在同一 Bash 会话中后台启动，也可在各自的 Windows Git Bash 或 macOS Bash 会话中分别启动。
+
+```bash
+# x64 一通过验收，立即开始上传，并记下会话。
+tools/release-create.sh "$tag" --resume-draft --stage-independent --draft-id "$draft_id" \
+  --notes-file "$notes" -- "$docker_x64" "$docker_x64.sha256" &
+x64_pid=$!
+
+# arm64 一通过验收，立即开始上传。若它先完成验收，就先运行这组命令。
+tools/release-create.sh "$tag" --resume-draft --stage-independent --draft-id "$draft_id" \
+  --notes-file "$notes" -- "$docker_arm64" "$docker_arm64.sha256" &
+arm64_pid=$!
+```
+
+上传者核对同一草稿 ID、标签、标题、预发布标记、审定正文及全局资产名。它用本地接受过的文件校验本对资产的大小、状态和 SHA256。其他合同内文件对可以由另一个上传者同时处理，包括上传期间可见的 `starter` 状态。
+
+上传命令报错时，助手回查同一草稿。若该文件已是 `uploaded`，且大小和 SHA256 均匹配，则继续。若文件缺失，则报告本次失败。等原会话退出后，用相同命令和原文件重跑，助手只补缺项。本对有 `starter`、缺少可信摘要或身份冲突时停下检查。GitHub 的 502 可能留下空的 `starter` 记录，需要按草稿和资产 ID 人工确认后再决定恢复操作。助手保留现有资产，且省略 `--clobber`。[GitHub Release 资产上传](https://docs.github.com/en/rest/releases/assets#upload-a-release-asset) · [GitHub CLI 上传资产](https://cli.github.com/manual/gh_release_upload)
+
+协调者确认所有上传会话已退出并成功，再从拥有完整本地资产集的 checkout 发布。`all_assets` 包含合同要求的 14 条归档与 `.sha256` 路径。`--publish-staged` 只做核验和状态更新。它对完整资产集核验名称、`uploaded` 状态、大小及 SHA256，按草稿 ID 发布，然后复核正式 Release。缺项、未完成状态或摘要冲突会在发布前阻止操作。如果发布请求的结果不明，按同一个数字 ID 进行只读核验，再决定是否继续。
+
+```bash
+tools/release-create.sh "$tag" --resume-draft --publish-staged --draft-id "$draft_id" \
+  --notes-file "$notes" -- "${all_assets[@]}"
+```
+
+#### 单上传者累计上传
 
 冻结正式标签和发布正文后，创建一次草稿。每份正式包通过对应平台验收后，把归档和 `.sha256` 加到同一上传者保留的路径数组 `staged_assets` 中。数组包含本批及之前各批的全部文件，使脚本能核对草稿上的每个已有资产。Docker 归档可在对应镜像运行验收通过后上传。
 
@@ -182,7 +219,7 @@ tools/release-create.sh "$tag" --resume-draft --stage-pairs --notes-file "$notes
 tools/release-create.sh "$tag" --resume-draft --publish --notes-file "$notes" -- "${staged_assets[@]}"
 ```
 
-`--stage-pairs` 仅处理草稿。每次输入都要包含完整的归档与 SHA256 文件对。若已上传其中一件后传输失败，待原进程结束，用同一组文件重跑该批，已匹配的文件会跳过。草稿出现状态不完整的资产记录或摘要冲突时，脚本停止，先检查原上传状态。
+`--stage-pairs` 仅处理草稿。每次输入都要包含完整的归档与 SHA256 文件对。若已上传其中一件后传输失败，待原进程结束，用同一组文件重跑该批，已匹配的文件会跳过。草稿出现状态不完整的资产记录或摘要冲突时，脚本停止，先检查原上传状态。单上传者的 `--publish` 必须与 `--resume-draft` 同用，按完整集合补齐缺项并核验后发布。
 
 续传使用 `gh` 的只读 JSON 查询、原生 SHA256 工具和 PowerShell 7 的离线资产合同，不增加 Python 或独立 jq 依赖。合同清单来自唯一入口：
 
@@ -190,7 +227,7 @@ tools/release-create.sh "$tag" --resume-draft --publish --notes-file "$notes" --
 pwsh tools/verify-release-assets.ps1 -Tag v0.9.6 -ListExpectedAssets
 ```
 
-清单逐行返回归档及 `.sha256` 的精确文件名，不读取 Release 元数据、不连接 GitHub。普通续传与正式发布要求合同完整集合，分批续传使用合同中的完整文件对。额外项、重名、既有正式 Release、源码 tag object、标题、预发布标记或审定正文不一致均拒绝。已有上传资产只有名称、状态、大小与服务器 SHA256 全部匹配时才跳过；缺失资产才上传，缺少可信 digest 或任何冲突会停止，不下载大包、不覆盖或删除资产。发布前再次读取并核验草稿与完整资产集；失败后保留已完成资产，下一次同一续传命令继续处理缺项。
+清单离线逐行返回归档及 `.sha256` 的精确文件名。普通续传与正式发布要求合同完整集合，分批续传使用合同中的完整文件对。额外项、重名、既有正式 Release、源码 tag object、标题、预发布标记或审定正文不一致均拒绝。待续传资产的名称、状态、大小和服务器 SHA256 全部匹配时才跳过。发布前再次读取并核验完整资产集。
 
 这些检查不替代原生 payload 验收。恢复后的正式 Release 仍需做线上元数据/摘要核验和固定安装同步；同版本资产替换仍须单独授权。
 
