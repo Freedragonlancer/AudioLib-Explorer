@@ -8,8 +8,8 @@
   "stages": [
     {"id": "preflight", "script": "tools/check-release.ps1", "parameters": {"Tag": "${Tag}"}},
     {"id": "license-preflight", "reuse": "never", "script": "tools/check-release-licenses.ps1", "parameters": {"Profile": "Server", "Target": "${Target}"}},
-    {"id": "build", "needs": ["preflight", "license-preflight"], "script": "tools/build-server-release.ps1", "parameters": {"Target": "${Target}"}, "outputs": ["${TargetDirectory}/${Target}/release/audiolib-server", "${TargetDirectory}/${Target}/release/audiolib-migrate"]},
+    {"id": "build", "needs": ["preflight", "license-preflight"], "script": "tools/build-server-release.ps1", "parameters": {"Target": "${Target}", "BuildValidationFixture": true}, "outputs": ["${TargetDirectory}/${Target}/release/audiolib-server", "${TargetDirectory}/${Target}/release/audiolib-migrate", "${TargetDirectory}/${Target}/release/search-benchmark"]},
     {"id": "package", "needs": ["build"], "script": "tools/package-server.ps1", "parameters": {"Tag": "${Tag}", "Target": "${Target}"}, "outputs": ["dist/latest/server-${Suffix}", "dist/latest/AudioLibServer-${Tag}-${Suffix}.tar.gz", "dist/latest/AudioLibServer-${Tag}-${Suffix}.tar.gz.sha256", "dist/latest/AudioLibServer-${Tag}-${Suffix}-report.json"]},
-    {"id": "accept", "needs": ["package"], "script": "tools/validate-server-package.ps1", "parameters": {"Tag": "${Tag}", "Target": "${Target}", "ReportPath": "${RunDirectory}/server-validation.json"}, "outputs": ["${RunDirectory}/server-validation.json"]}
+    {"id": "accept", "needs": ["build", "package"], "script": "tools/validate-server-package.ps1", "parameters": {"Tag": "${Tag}", "Target": "${Target}", "ReportPath": "${RunDirectory}/server-validation.json", "UseReleaseFixture": true}, "outputs": ["${RunDirectory}/server-validation.json"]}
   ]
 }

@@ -83,23 +83,36 @@ fn appearance_editor_renders_both_languages_and_reaches_preset_controls() {
                 appearance::apply(&ui, &AppearancePreferences::default());
             });
             use slint::Model;
-            reveal_settings_control(&ui, if chinese { "经典默认" } else { "Classic" });
-            let original = ElementHandle::find_by_accessible_label(
-                &ui,
-                if chinese { "经典默认" } else { "Classic" },
-            )
-            .next()
-            .expect("Classic preset is reachable without advanced options");
-            assert_eq!(original.accessible_enabled(), Some(true));
-            original.invoke_accessible_default_action();
-            assert_eq!(crate::theme::theme_id(ui.get_theme_index()), "default");
-            assert_eq!(
-                ui.global::<Theme>().get_bg(),
-                Color::from_argb_encoded(crate::theme::DEFAULT_PALETTE.bg)
-            );
-            assert!(!ui.global::<Theme>().get_modern_style());
-            assert!(!ui.get_appearance_advanced_open());
-            ui.window().take_snapshot().unwrap();
+            for (id, english, chinese_name, background) in [
+                (
+                    "default",
+                    "Classic",
+                    "经典默认",
+                    crate::theme::DEFAULT_PALETTE.bg,
+                ),
+                (
+                    audiolib_core::config::JADE_CLASSIC_THEME,
+                    "Jade Classic",
+                    "青碧经典",
+                    0xff18_1b20,
+                ),
+            ] {
+                let label = if chinese { chinese_name } else { english };
+                reveal_settings_control(&ui, label);
+                let card = ElementHandle::find_by_accessible_label(&ui, label)
+                    .next()
+                    .expect("Classic presets are reachable without advanced options");
+                assert_eq!(card.accessible_enabled(), Some(true));
+                card.invoke_accessible_default_action();
+                assert_eq!(crate::theme::theme_id(ui.get_theme_index()), id);
+                assert_eq!(
+                    ui.global::<Theme>().get_bg(),
+                    Color::from_argb_encoded(background)
+                );
+                assert!(!ui.global::<Theme>().get_modern_style());
+                assert!(!ui.get_appearance_advanced_open());
+                ui.window().take_snapshot().unwrap();
+            }
             let expected_background = ui
                 .get_recommended_themes()
                 .iter()
@@ -248,13 +261,17 @@ fn recommended_theme_previews_match_distinct_readable_workbench_palettes() {
         assert!(contrast(theme.get_dim(), theme.get_hover()) >= 4.5);
         assert!(contrast(theme.get_ink(), theme.get_checked()) >= 4.5);
         assert!(contrast(theme.get_strong_border(), theme.get_panel()) >= 3.0);
-        for status in [theme.get_mint(), theme.get_warning(), theme.get_danger()] {
+        for status in [theme.get_mint(), theme.get_warning()] {
             assert!(contrast(status, theme.get_hover()) >= 4.5);
         }
-        if crate::theme::theme_id(card.index) != "default" {
-            assert_eq!(theme.get_workbench_backdrop_opacity(), 0.0);
-            assert_eq!(theme.get_normal_canvas(), theme.get_trough());
+        // Exclusion chips and inline color errors paint on danger-surface and raised.
+        for surface in [theme.get_danger_surface(), theme.get_raised()] {
+            assert!(contrast(theme.get_danger(), surface) >= 4.5);
         }
+        if theme.get_modern_style() {
+            assert_eq!(theme.get_workbench_backdrop_opacity(), 0.0);
+        }
+        assert_eq!(theme.get_normal_canvas(), theme.get_trough());
         assert!(contrast(theme.get_dim(), theme.get_normal_canvas()) >= 4.5);
         assert_eq!(
             theme.get_pure_black_workspace(),
@@ -345,7 +362,7 @@ fn recommended_theme_previews_match_distinct_readable_workbench_palettes() {
             .unwrap();
         }
     }
-    assert_eq!(surfaces.len(), 5);
+    assert_eq!(surfaces.len(), 6);
     ui.hide().unwrap();
 }
 

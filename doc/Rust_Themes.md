@@ -10,7 +10,11 @@ language updates the displayed theme names; the saved identifier stays the same.
 | --- | --- | --- |
 | `default` | Default / 默认 | Graphite Classic workbench with amber search and focus accents, neutral selected rows and green playback feedback, bookmark icons for saved searches and stars for favorite sounds. Separate Play and Pause controls, Pitch/Rate fields and Waveform ruler. |
 | `studio` | Studio / 工作室 | Redesigned player from PR #182, retaining the subsequent overview keyboard fix: animated transport controls, editable values with feedback, status display and overview navigation |
-| `default-v2` | Default v2 / 默认 v2 | Studio navigation, search, library table and inspector, paired with the Classic bottom player and a coordinated charcoal and muted teal palette |
+| `default-v2` | Graphite / 石墨 | Studio workbench and Classic player with cool graphite and mist-silver controls |
+| `obsidian` | Obsidian / 护眼黑曜 | Studio workbench and Classic player with pure black surfaces and soft white text |
+| `ocean` | Ocean / 深海蓝 | Studio workbench and Classic player with a slate-blue palette |
+| `amber` | Warm amber / 暖砂琥珀 | Studio workbench and Classic player with warm gray and sand tones |
+| `jade-classic` | Jade Classic / 青碧经典 | The current Classic workbench and player with the v1.0.3 default palette, including charcoal surfaces, jade controls and a dark jade selection. Also available from **Settings > Global settings > General and interface > Theme presets**. |
 
 Each theme includes its workbench and player presentations as well as its color
 tokens. Default v2 keeps the Default player's separate Play and Pause controls,
@@ -19,8 +23,7 @@ Studio workbench above it. Studio and Default v2 use one library sidebar instead
 of a separate icon navigation rail. All sounds, favorites and recent playback
 remain in that sidebar; **View > Show library sidebar** reopens it when hidden,
 and **Settings > Global settings > General and interface** opens language, scale,
-font and cover preferences. Theme selection stays outside that dialog. All three
-themes share the same platform menu bar, with the application name in the window
+font and cover preferences. All themes share the same platform menu bar, with the application name in the window
 title and search and library navigation in the application toolbar. After opening
 a top-level menu, moving the pointer over another menu switches to it. Hovering
 alone does not open a closed menu; Escape, a completed command or an outside click
@@ -29,15 +32,15 @@ and Studio player presentations remain available. Frequency colors and non-tonal
 peaks are audio data, so themes do not change Spectral Peaks analysis or rendering
 colors.
 
-The library sidebar's visibility is restored across a normal restart in all three
-themes. `window_layout.sidebar_visible` is optional: older settings keep the
+The library sidebar's visibility is restored across a normal restart in every
+theme. `window_layout.sidebar_visible` is optional: older settings keep the
 design default, and an invalid value only discards that field. Layout capture uses
 the sidebar's preferred width independently of visibility, so hiding it does not
 save a collapsed width. Restore applies visibility before first display and pane
 widths after interface scaling, using the existing layout-save and close-drain
 ordering.
 
-Default and Default v2 share refreshed Classic controls with hover, press and
+Themes using the Classic player share refreshed controls with hover, press and
 release feedback, dynamic tooltips and explanations when transport is disabled.
 Their separate Play/Pause buttons and Waveform layout remain intact. The transport
 indicator follows confirmed engine state: reaching the end displays **Ended**,

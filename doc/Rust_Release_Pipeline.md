@@ -56,7 +56,7 @@ pwsh tools/release-pipeline.ps1 -PlanFile tools/release-plans/windows-local.json
 | `tools/release-plans/windows-client.json` | Windows x64 客户端，默认 ASIO，包含固定 `local_release/` 安装 |
 | `tools/release-plans/windows-local.json` | Windows 本地快速试用，不要求 Git 标签、不生成 ZIP，保留 portable 验收和固定安装 |
 | `tools/release-plans/server.json` | Windows x64 无播放服务端，显式构建验收 fixture 所需 benchmark |
-| `tools/release-plans/server-unix.json` | 对应本机 Linux/macOS 服务端，不额外构建 Windows fixture helper |
+| `tools/release-plans/server-unix.json` | 对应本机 Linux/macOS 服务端，同次 release 构建私有验收 helper |
 | `tools/release-plans/macos-client.json` | Apple Silicon Mac 客户端，结构与原生验收合并运行；需要已登录桌面 |
 | `tools/release-plans/release-assets.json` | 只读获取已发布资产元数据，核对精确资产集合和本地归档 SHA256；使用已有 GitHub 凭据 |
 
@@ -124,7 +124,7 @@ GitHub 阶段可声明 `github_auth: true`：依次使用已有 token 环境、`
 - 源码、执行器、命令脚本、参数、依赖收据、工具版本或已声明环境变化，都会使相关阶段失效。标准的目标编译器参数、Cargo target/profile、SDK 和链接环境自动计入身份；工具版本在仓库目录中查询，匹配实际 Rust 工具链选择。外部 SDK/工具文件变化时也应使用新运行目录；额外相关环境键可放入 `environment_variables`，工具版本放入 `environment_tools`。
 - `reuse: never` 用于必须重新读取的在线状态或外部可变材料（如 registry notice）。状态、日志、命令参数文件均私有；token、密码和服务器地址通过本机环境提供，不写入计划或发布记录。
 
-服务端计划在 `accept` 阶段把原生验收 JSON 写到 `${RunDirectory}/server-validation.json`，并将文件声明为阶段产物。读取收据前确认对应运行的 `accept` 状态为 `passed` 或 `reused`。独立调用 `validate-server-package.ps1` 时可用 `-ReportPath` 选择工作区 `.rust-validation/` 下的 `server-validation.json`，原有 stdout JSON 仍可用。
+服务端计划在 `accept` 阶段把原生验收 JSON 写到 `${RunDirectory}/server-validation.json`，并将文件声明为阶段产物。读取收据前确认对应运行的 `accept` 状态为 `passed` 或 `reused`。独立调用 `validate-server-package.ps1` 时可用 `-ReportPath` 选择工作区 `.rust-validation/` 下的 `server-validation.json`，原有 stdout JSON 仍可用。Unix 原生计划在同一条 release Cargo 命令中构建私有的 search-benchmark，验收阶段直接用它生成两个独立的合成资料库。helper 由构建收据核验，仅用于本机验收。独立的 Unix 验收仍可由 Cargo 生成夹具。
 
 Docker 继续通过 `package-server-docker.ps1` / `validate-server-docker.ps1` 消费已验收的 Linux 包。其本机路径与 fixture 需明确选择，可按上面的阶段格式放进私有计划；不要把 Docker 验收与原生包验收互相替代。不同本机平台各调用一条计划，执行器不假设 SSH 主机、生产配置或共享容器。
 
@@ -154,7 +154,7 @@ Docker 继续通过 `package-server-docker.ps1` / `validate-server-docker.ps1` �
 | 0.8.7 beta 首次 root 读取超时，身份和配置确认后通过只读阶段续验；后续验收驱动修改未重建七份 payload | 保留失败历史与原身份，仅补受影响门禁，不为工具/文档修正自动重启服务或重建整版。见 [原始记录](Rust_Release_0.8.7.md#beta-两端验收与阶段续跑)。 |
 | 0.9.3 明确授权的两种客户端替换保留其余五份 server/Docker 归档与 tag | 已有正确范围控制，写入 release skill；它是授权例外，不能推广为默认同版本覆盖。见 [发布记录](Rust_Release_0.9.3.md)。 |
 
-本次验证为脚本合成测试、计划预览和文档检查，不声明端到端 release 提速实测。另发现 Unix 服务端验收会隐式 `cargo run` 构建 debug fixture helper；后续应统一 helper 与正式 release 的目标和编译参数后，在原生 Unix 主机验证，本轮保留现有行为。
+本次验证为脚本合成测试、计划预览和文档检查，不声明端到端 release 提速实测。当时发现独立 Unix 验收会通过 Cargo 另行生成 debug 夹具。原生计划已将 helper 纳入同一 release 构建。
 
 ## 发布、缓存和工具验证
 
