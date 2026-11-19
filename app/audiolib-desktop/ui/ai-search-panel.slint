@@ -27,9 +27,11 @@ export component AiSearchToggle inherits Rectangle {
     accessible-checked: root.active;
     accessible-action-default => { if root.enabled { root.toggled(); } }
     forward-focus: switch-focus;
-    Text { x: 4px * Theme.ui-scale; width: 23px * Theme.ui-scale; height: 100%; text: "AI"; color: root.active ? Theme.text(6, 6, Theme.accent) : Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); font-weight: 700; vertical-alignment: center; }
-    Rectangle { x: 31px * Theme.ui-scale; y: (parent.height - self.height) / 2; width: 30px * Theme.ui-scale; height: 17px * Theme.ui-scale; border-radius: self.height / 2; background: root.active ? Theme.accent : Theme.strong-border;
-        Rectangle { x: (root.active ? 15px : 2px) * Theme.ui-scale; y: 2px * Theme.ui-scale; width: 13px * Theme.ui-scale; height: self.width; border-radius: self.height / 2; background: root.active ? Theme.on-accent : Theme.ink; }
+    HorizontalLayout { alignment: center; spacing: 6px * Theme.ui-scale;
+        Text { text: "AI"; color: root.active ? Theme.text(6, 6, Theme.accent) : Theme.text(6, 1, Theme.dim); font-size: Theme.font(12); font-weight: 700; vertical-alignment: center; }
+        Rectangle { width: 30px * Theme.ui-scale; height: 17px * Theme.ui-scale; y: (parent.height - self.height) / 2; border-radius: self.height / 2; background: root.active ? Theme.accent : Theme.strong-border;
+            Rectangle { x: (root.active ? 15px : 2px) * Theme.ui-scale; y: 2px * Theme.ui-scale; width: 13px * Theme.ui-scale; height: self.width; border-radius: self.height / 2; background: root.active ? Theme.on-accent : Theme.ink; }
+        }
     }
     switch-focus := FocusScope { enabled: root.enabled; focus-on-click: false;
         key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.toggled(); return accept; } reject }
@@ -47,7 +49,7 @@ export component AiSearchAction inherits Rectangle {
     in property <bool> chinese;
     callback toggled;
     callback submitted;
-    width: (root.active ? (root.generating ? 196px : 182px) : 140px) * Theme.ui-scale;
+    width: 68px * Theme.ui-scale + max(76px * Theme.ui-scale, Theme.font(12) * 6.5) + 2px;
     height: 30px * Theme.ui-scale;
     horizontal-stretch: 0;
     background: root.active ? Theme.accent.with-alpha(0.14) : Theme.raised;
@@ -69,7 +71,7 @@ export component AiSearchAction inherits Rectangle {
             accessible-label: root.active ? (root.chinese ? "生成 AI 查询建议" : "Generate AI query suggestions") : (root.chinese ? "执行搜索" : "Run search");
             accessible-enabled: self.available;
             accessible-action-default => { if self.available { root.submitted(); } }
-            Text { x: 2px; y: 0px; width: parent.width - 4px; height: parent.height; text: root.active ? (root.generating ? (root.chinese ? "Tag生成中…" : "Generating tags…") : root.chinese ? "Tag生成" : "Generate Tags") : (root.searching ? "…" : root.chinese ? "搜索" : "Search"); color: Theme.text(6, 10, Theme.on-accent); font-size: Theme.font(12); font-weight: 600; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+            Text { x: 2px; y: 0px; width: parent.width - 4px; height: parent.height; text: root.active ? (root.generating ? (root.chinese ? "生成中…" : "Getting…") : root.chinese ? "生成标签" : "Get tags") : (root.searching ? "…" : root.chinese ? "搜索" : "Search"); color: Theme.text(6, 10, Theme.on-accent); font-size: Theme.font(12); font-weight: 600; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
             if root.active && root.generating: ProgressIndicator { x: 2px; y: parent.height - 3px * Theme.ui-scale; width: parent.width - 4px; height: 2px * Theme.ui-scale; indeterminate: true; accessible-label: root.chinese ? "主搜索生成进度" : "Search bar generation progress"; }
             submit-focus := FocusScope { enabled: submit.available; focus-on-click: false;
                 key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.submitted(); return accept; } reject }

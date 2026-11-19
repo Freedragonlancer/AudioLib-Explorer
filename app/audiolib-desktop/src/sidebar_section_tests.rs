@@ -45,13 +45,35 @@ fn cover_only_mode_shows_library_name_when_cover_is_missing() {
 
 #[test]
 fn library_display_menu_toggles_fields_without_moving_the_library_view() {
-    i_slint_backend_testing::init_no_event_loop();
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
     for modern in [false, true] {
         let ui = window(true, 1440.0, 900.0, 1.0);
         ui.global::<crate::Theme>().set_modern_style(modern);
         settle();
         let button = labelled(&ui, "选择音效库显示内容");
+        let folders = header(&ui, false);
+        let libraries = header(&ui, true);
+        click(&ui, &folders);
+        click(&ui, &libraries);
+        assert_eq!(
+            folders.absolute_position().x,
+            libraries.absolute_position().x
+        );
         let before = button.absolute_position();
+        assert!(libraries.absolute_position().x + libraries.size().width <= before.x);
+        save_sidebar_snapshot(
+            &ui,
+            if modern {
+                "library-header-studio.png"
+            } else {
+                "library-header-classic.png"
+            },
+        );
         click(&ui, &button);
         let count = labelled(&ui, "匹配数量");
         count.invoke_accessible_default_action();
