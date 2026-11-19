@@ -6,7 +6,8 @@ param(
     [Parameter(Mandatory)]
     [ValidateSet('x86_64-pc-windows-msvc', 'x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'aarch64-apple-darwin')]
     [string]$Target,
-    [switch]$CleanBuildArtifacts = $true
+    [switch]$CleanBuildArtifacts = $true,
+    [switch]$BuildValidationFixture
 )
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
@@ -108,7 +109,9 @@ try {
     # cc-rs retains caller global/target flags and appends these target flags last.
     [Environment]::SetEnvironmentVariable($nativeFlagKey, $combinedNativeFlags)
     [Environment]::SetEnvironmentVariable($shellFlagKey, '1')
-    cargo build -p audiolib-server -p audiolib-db --bin audiolib-server --bin audiolib-migrate --release --locked --no-default-features --target $Target
+    $buildArguments = @('build', '-p', 'audiolib-server', '-p', 'audiolib-db', '--bin', 'audiolib-server', '--bin', 'audiolib-migrate', '--release', '--locked', '--no-default-features', '--target', $Target)
+    if ($BuildValidationFixture) { $buildArguments += @('--bin', 'search-benchmark') }
+    cargo @buildArguments
     if ($LASTEXITCODE -ne 0) { throw 'Rust server release build failed.' }
 } finally {
     if ($buildLease) { $buildLease.Dispose() }

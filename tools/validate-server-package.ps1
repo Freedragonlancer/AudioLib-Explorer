@@ -9,7 +9,8 @@ param(
     [ValidateSet('x86_64-pc-windows-msvc', 'x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'aarch64-apple-darwin')]
     [string]$Target,
     [switch]$Asio,
-    [ValidateNotNullOrEmpty()][string]$ReportPath
+    [ValidateNotNullOrEmpty()][string]$ReportPath,
+    [switch]$UseReleaseFixture
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'dependency-licenses.ps1')
@@ -287,23 +288,30 @@ try {
     if ((Get-Content -LiteralPath (Join-Path $testRoot 'version.stdout') -Raw).Trim() -cne "audiolib-server $version") { throw 'Extracted server version differs from the tag.' }
 
     $database = Join-Path $testRoot 'library.db'
-    if ($IsWindows) {
+    $seedPrefix = @()
+    $seedDirectory = $testRoot
+    if ($IsWindows -or $UseReleaseFixture) {
         . (Join-Path $PSScriptRoot 'build-cache.ps1')
         $targetRoot = Get-AudioLibTargetDirectory $taskRoot
-        $benchmark = Join-Path $targetRoot "$Target/release/search-benchmark.exe"
-        if (!(Test-Path -LiteralPath $benchmark -PathType Leaf)) { throw 'Build the Windows release search-benchmark before server validation.' }
-        Assert-UnlinkedTree $benchmark
-        $seed = Start-OwnedProcess $benchmark @('--db', $database, '--records', '1', '--queries', '100') 'seed' $testRoot
+        $benchmarkName = if ($IsWindows) { 'search-benchmark.exe' } else { 'search-benchmark' }
+        $seedCommand = Join-Path $targetRoot "$Target/release/$benchmarkName"
+        if (!(Test-Path -LiteralPath $seedCommand -PathType Leaf)) {
+            if ($IsWindows) { throw 'Build the Windows release search-benchmark before server validation.' }
+            throw 'Build the native release search-benchmark with -BuildValidationFixture before server validation.'
+        }
+        Assert-UnlinkedTree $seedCommand
     } else {
-        $cargo = (Get-Command cargo -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
-        $seed = Start-OwnedProcess $cargo @('run', '-p', 'audiolib-db', '--bin', 'search-benchmark', '--locked', '--target', $Target, '--', '--db', $database, '--records', '1', '--queries', '100') 'seed' $taskRoot
+        $seedCommand = (Get-Command cargo -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+        $seedPrefix = @('run', '-p', 'audiolib-db', '--bin', 'search-benchmark', '--locked', '--target', $Target, '--')
+        $seedDirectory = $taskRoot
     }
+    $seed = Start-OwnedProcess $seedCommand ($seedPrefix + @('--db', $database, '--records', '1', '--queries', '100')) 'seed' $seedDirectory
     Wait-OwnedProcess $seed 600000 'Synthetic server library generation failed or timed out.'
     if (!(Test-Path -LiteralPath $database -PathType Leaf)) { throw 'Synthetic server library was not created.' }
     # Generate a separate owned fixture; never copy a SQLite main file while
     # assuming that every committed WAL frame was checkpointed by process exit.
     $migrationDb=Join-Path $testRoot 'migration-package.db';Assert-Within $migrationDb $testRoot
-    $migrationSeed=if($IsWindows){Start-OwnedProcess $benchmark @('--db',$migrationDb,'--records','1','--queries','100') 'migration-seed' $testRoot}else{Start-OwnedProcess $cargo @('run','-p','audiolib-db','--bin','search-benchmark','--locked','--target',$Target,'--','--db',$migrationDb,'--records','1','--queries','100') 'migration-seed' $taskRoot}
+    $migrationSeed = Start-OwnedProcess $seedCommand ($seedPrefix + @('--db', $migrationDb, '--records', '1', '--queries', '100')) 'migration-seed' $seedDirectory
     Wait-OwnedProcess $migrationSeed 600000 'Owned migration library generation failed or timed out.'
     $beforeGuardHash=(Get-FileHash -LiteralPath $migrationDb -Algorithm SHA256).Hash
     $trace=Join-Path $testRoot 'must-not-exist.sql';$guard=Start-OwnedProcess $migrator @('status','--db',$migrationDb,'--sql-trace',$trace) 'migrator-production-guard' $testRoot
