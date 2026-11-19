@@ -1062,6 +1062,8 @@ export component AppWindow inherits Window {
     property <bool> ai-batch-restoring: root.ai-batch-searching && root.task-restoring && !root.ai-batch-blocked;
     property <bool> ai-sidebar-expanded: root.ai-visible && !root.ai-collapsed
         && (!root.background-blocked || root.ai-batch-restoring);
+    // Recommendations use the rest of the row, so changing mode leaves the editor in place.
+    private property <length> search-group-width: clamp(root.width * 0.42, 360px * Theme.ui-scale, 720px * Theme.ui-scale);
     // One visible editor, with independent drafts for keyword and AI modes.
     in-out property <string> search-entry-text: root.query;
     changed query => { if !root.ai-visible { root.search-entry-text = root.query; } }
@@ -3098,9 +3100,9 @@ main-scroll := ScrollView {
                 can-forward: !root.ai-visible && root.search-history-ready && root.search-history-can-forward;
                 navigate(direction) => { root.search-history-requested(direction); }
             }
-            classic-search-group := Rectangle { horizontal-stretch: 3; min-width: clamp(root.width - 1040px * Theme.ui-scale, 360px * Theme.ui-scale, 500px * Theme.ui-scale); preferred-width: 560px * Theme.ui-scale; max-width: 720px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: search-input.has-focus || root.ai-visible ? Theme.accent : Theme.border;
+            classic-search-group := Rectangle { width: root.search-group-width; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: Theme.border;
                 HorizontalLayout { padding: 5px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-                    Image { width: 20px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: Theme.classic-accent-controls || search-input.has-focus ? Theme.accent : Theme.dim; image-fit: contain; }
+                    Image { width: 20px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: Theme.classic-accent-controls ? Theme.accent : Theme.dim; image-fit: contain; }
                     search-input := LineEdit { text-module: 1; horizontal-stretch: 1; min-width: 70px * Theme.ui-scale; enabled: !root.background-blocked; text <=> root.search-entry-text;
                         input-label: root.ai-visible ? (root.chinese ? "AI 声音描述" : "AI sound description") : (root.chinese ? "搜索关键词" : "Search keywords");
                         placeholder-text: root.ai-visible ? (root.chinese ? "描述声音，例如科幻爆炸…" : "Describe a sound, e.g. sci-fi explosion…") : (root.chinese ? "搜索声音、标签和源文件 Metadata…" : "Search sounds, tags and source Metadata…");
@@ -3338,6 +3340,7 @@ main-scroll := ScrollView {
                         // Library/album groups declared by the files themselves. Clicking one
                         // filters the results; clicking the active one clears the filter.
                         libraries-header := SidebarSectionHeader {
+                            x: 0px;
                             visible: directory-sections.has-libraries;
                             width: parent.width - (directory-sections.has-libraries ? 36px * Theme.ui-scale : 0px); height: directory-sections.has-libraries ? directory-sections.header-height : 0px;
                             y: folder-focus.y + folder-focus.height + directory-sections.divider-height;
@@ -3354,9 +3357,9 @@ main-scroll := ScrollView {
                             action-label: root.chinese ? "选择音效库显示内容" : "Choose library display fields";
                             enabled: !root.background-blocked;
                             clicked => { album-display-popup.show(); }
-                            Image { source: @image-url("icons/chevron-down.svg"); colorize: Theme.ink;
+                            Image { source: @image-url("icons/settings.svg"); colorize: Theme.dim;
                                 x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-                                width: 12px * Theme.ui-scale; height: 8px * Theme.ui-scale; image-fit: contain; accessible-role: none;
+                                width: 15px * Theme.ui-scale; height: self.width; image-fit: contain; accessible-role: none;
                             }
                             Tooltip { text: @markdown("\{album-display-action.action-label}"); }
                         }
@@ -4009,8 +4012,8 @@ main-scroll := ScrollView {
                     can-forward: !root.ai-visible && root.search-history-ready && root.search-history-can-forward;
                     navigate(direction) => { root.search-history-requested(direction); }
                 }
-                studio-search-group := Rectangle { horizontal-stretch: 3; min-width: clamp(root.width - 1040px * Theme.ui-scale, 360px * Theme.ui-scale, 500px * Theme.ui-scale); preferred-width: 560px * Theme.ui-scale; max-width: 720px * Theme.ui-scale; height: 34px * Theme.ui-scale; y: (parent.height - self.height) / 2;
-                    background: Theme.panel; border-radius: 4px * Theme.ui-scale; border-width: 1px; border-color: studio-search-input.has-focus || root.ai-visible ? Theme.accent : Theme.strong-border.with-alpha(0.5);
+                studio-search-group := Rectangle { width: root.search-group-width; height: 34px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+                    background: Theme.panel; border-radius: 4px * Theme.ui-scale; border-width: 1px; border-color: Theme.strong-border.with-alpha(0.5);
                     HorizontalLayout { padding: 2px * Theme.ui-scale; padding-left: 10px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                         Image { width: 17px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: Theme.dim; image-fit: contain; accessible-role: none; }
                         studio-search-input := LineEdit { text-module: 1; horizontal-stretch: 1; min-width: 70px * Theme.ui-scale; enabled: !root.background-blocked; text <=> root.search-entry-text;
@@ -4195,6 +4198,7 @@ main-scroll := ScrollView {
                         // Library/album groups declared by the files themselves. Clicking one
                         // filters the results; clicking the active one clears the filter.
                         studio-libraries-header := SidebarSectionHeader {
+                            x: 0px;
                             visible: studio-directory-sections.has-libraries;
                             width: parent.width - (studio-directory-sections.has-libraries ? 36px * Theme.ui-scale : 0px); height: studio-directory-sections.has-libraries ? studio-directory-sections.header-height : 0px;
                             y: studio-folder-focus.y + studio-folder-focus.height + studio-directory-sections.divider-height;
@@ -4211,9 +4215,9 @@ main-scroll := ScrollView {
                             action-label: root.chinese ? "选择音效库显示内容" : "Choose library display fields";
                             enabled: !root.background-blocked;
                             clicked => { studio-album-display-popup.show(); }
-                            Image { source: @image-url("icons/chevron-down.svg"); colorize: Theme.ink;
+                            Image { source: @image-url("icons/settings.svg"); colorize: Theme.dim;
                                 x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-                                width: 12px * Theme.ui-scale; height: 8px * Theme.ui-scale; image-fit: contain; accessible-role: none;
+                                width: 15px * Theme.ui-scale; height: self.width; image-fit: contain; accessible-role: none;
                             }
                             Tooltip { text: @markdown("\{studio-album-display-action.action-label}"); }
                         }

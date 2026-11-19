@@ -903,14 +903,16 @@ fn ai_panel_actions_and_provider_view_are_renderable() {
     ui.set_ai_saved_protocol(6);
     settle();
     snapshot_if_requested(&ui, "ai-provider-panel");
-    click(&ui, "Skill 与预设");
+    click(&ui, "AI skills settings");
     assert_eq!(ui.get_ai_settings_page(), 1);
     assert!(
-        ElementHandle::find_by_accessible_label(&ui, "AI Skill")
+        ElementHandle::find_by_accessible_label(&ui, "AI skill selection")
             .next()
             .is_some()
     );
-    snapshot_if_requested(&ui, "ai-skill-preset-panel");
+    snapshot_if_requested(&ui, "ai-skill-panel");
+    click(&ui, "搜索行为");
+    assert_eq!(ui.get_ai_settings_page(), 2);
     click(&ui, "保存提示词");
     assert_eq!(actions.borrow().last(), Some(&(15, 0)));
     click(&ui, "供应商");
@@ -1284,7 +1286,7 @@ fn ai_provider_form_survives_page_recreation_and_panel_reopening() {
         assert_eq!(ui.get_ai_key(), "unsaved-draft-key");
         assert_eq!(ui.get_ai_timeout(), 31);
         assert_eq!(ui.get_ai_request_mode(), 1);
-        click(&ui, "Skill and presets");
+        click(&ui, "AI skills settings");
         assert_eq!(ui.get_ai_settings_page(), 1);
         assert_eq!(ui.get_ai_preset_index(), 1);
         assert_eq!(
@@ -1898,6 +1900,86 @@ fn ai_compact_toolbar_preserves_actions_with_eight_mixed_tags() {
             }
         }
     }
+}
+
+#[test]
+fn search_entry_and_actions_stay_in_place_across_ai_modes() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    let ui = window();
+    let bounds = |label: &str| {
+        let control = ElementHandle::find_by_accessible_label(&ui, label)
+            .next()
+            .unwrap();
+        (control.absolute_position(), control.size())
+    };
+    for theme in ["default", "studio"] {
+        crate::theme::apply_theme(&ui, theme);
+        for chinese in [false, true] {
+            ui.set_chinese(chinese);
+            let language = if chinese { "cn" } else { "en" };
+            let toggle = if chinese {
+                "AI 搜索模式"
+            } else {
+                "AI search mode"
+            };
+            let field = if chinese {
+                "搜索关键词"
+            } else {
+                "Search keywords"
+            };
+            let prompt = if chinese {
+                "AI 声音描述"
+            } else {
+                "AI sound description"
+            };
+            let search = if chinese {
+                "执行搜索"
+            } else {
+                "Run search"
+            };
+            let generate = if chinese {
+                "生成 AI 查询建议"
+            } else {
+                "Generate AI query suggestions"
+            };
+            for width in [1080.0, 1920.0] {
+                ui.window().set_size(slint::LogicalSize::new(width, 700.0));
+                ui.set_ai_visible(false);
+                ui.set_ai_collapsed(true);
+                ui.set_ai_busy(false);
+                ui.set_ai_generating(false);
+                ui.set_ai_quick_rows(ModelRc::default());
+                ui.set_query("gear".into());
+                ui.set_ai_prompt("gear".into());
+                settle();
+                click(&ui, field);
+                let normal = [bounds(field), bounds(toggle), bounds(search)];
+                if width == 1080.0 {
+                    snapshot_if_requested(&ui, &format!("toolbar-{theme}-{language}-search"));
+                }
+                ui.set_ai_visible(true);
+                settle();
+                assert_eq!([bounds(prompt), bounds(toggle), bounds(generate)], normal);
+                if width == 1080.0 {
+                    snapshot_if_requested(&ui, &format!("toolbar-{theme}-{language}-tags"));
+                }
+                ui.set_ai_busy(true);
+                ui.set_ai_generating(true);
+                ui.set_ai_quick_rows(ModelRc::new(VecModel::from(vec![crate::AiSuggestion {
+                    text: "gear shift".into(),
+                    ..Default::default()
+                }])));
+                settle();
+                assert_eq!([bounds(prompt), bounds(toggle), bounds(generate)], normal);
+            }
+        }
+    }
+    ui.hide().unwrap();
 }
 
 #[test]
