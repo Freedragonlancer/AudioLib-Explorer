@@ -391,14 +391,14 @@ switch -Exact ($scriptName) {
     Write-Host 'PASS: local delivery routes fixed installation and selected manifest; only installation reruns on routing/manifest changes.'
 
     $taskAcceptStub=@'
-param([string]$Tag,[string]$Target,[string]$ReportPath)
+param([string]$Tag,[string]$Target,[string]$ReportPath,[switch]$UseReleaseFixture)
 $ErrorActionPreference='Stop'
 $reports=Join-Path (Get-Location).ProviderPath '.rust-validation/release-pipeline'
 if (!$ReportPath.StartsWith($reports+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or
     [IO.Path]::GetFileName($ReportPath) -cne 'server-validation.json') { throw 'Mock server receipt escaped fixture run.' }
 Write-Host 'Synthetic compatibility diagnostics precede the JSON receipt.'
 if (Test-Path -LiteralPath target/fail-server-accept) { throw 'Synthetic server acceptance failure.' }
-$proof=@{success=$true;tag=$Tag;target=$Target}
+$proof=@{success=$true;tag=$Tag;target=$Target;release_fixture=$UseReleaseFixture.IsPresent}
 $proof | ConvertTo-Json -Compress | Set-Content -LiteralPath $ReportPath -Encoding utf8
 $proof | ConvertTo-Json -Compress
 '@
@@ -408,6 +408,14 @@ $proof | ConvertTo-Json -Compress
         $taskPlan=Get-Content -LiteralPath (Join-Path $PSScriptRoot "release-plans/$taskServerPlan") -Raw | ConvertFrom-Json -AsHashtable
         $taskPlan.require_tag=$false; $taskPlan.host='any'; $taskPlan.environment_tools=@()
         $taskAccept=$taskPlan.stages | Where-Object id -ceq 'accept'
+        $taskExpectReleaseFixture = $taskServerPlan -ceq 'server-unix.json'
+        if ($taskExpectReleaseFixture) {
+            $taskBuild = $taskPlan.stages | Where-Object id -ceq 'build'
+            if ($taskBuild.parameters.BuildValidationFixture -ne $true -or $taskAccept.needs -cnotcontains 'build' -or
+                $taskBuild.outputs -cnotcontains '${TargetDirectory}/${Target}/release/search-benchmark') {
+                throw 'The Unix plan must build and track the private release fixture before acceptance.'
+            }
+        }
         # Use actual validator parameters and outputs. Replace upstream work with owned fake files.
         $taskPlan.stages=@(foreach ($dependency in $taskAccept.needs) {
             @{id=$dependency;script='worker.ps1';parameters=@{Name=$dependency;Selected=$false;Packages=@('one','two')};outputs=@("target/$dependency.bin")}
@@ -428,7 +436,7 @@ $proof | ConvertTo-Json -Compress
             $taskProof=Get-Content -LiteralPath $taskReceipt -Raw | ConvertFrom-Json
             $taskServerState=Read-State
             if ($taskProof.success -ne $true -or $taskProof.tag -cne 'v0.0.1' -or $taskProof.target -cne $taskPlan.variables.Target -or
-                $taskServerState.stages.accept.status -cne 'passed' -or
+                $taskProof.release_fixture -ne $taskExpectReleaseFixture -or $taskServerState.stages.accept.status -cne 'passed' -or
                 @($taskAccept.needs | Where-Object { $taskServerState.stages[$_].status -cne 'reused' }).Count) {
                 throw 'Receipt recovery changed upstream work or lost the accepted server identity.'
             }

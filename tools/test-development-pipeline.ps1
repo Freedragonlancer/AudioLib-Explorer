@@ -384,8 +384,13 @@ try {
             $taskState.Prepared -or $taskState.Cleaned -ne ($taskCleanedBefore + 1)) { throw 'Native server build changed its selected binaries/features or did not clean after success.' }
         if ($taskBuild.Flags -notmatch 'target-feature=\+crt-static' -or $taskBuild.Flags -notmatch '--remap-path-prefix=') { throw 'Native server build lost release privacy/static CRT flags.' }
         $taskCleanedBefore = $taskState.Cleaned
-        Invoke-PipelineCase 'build-server-release.ps1' @{Target='x86_64-pc-windows-msvc';CleanBuildArtifacts=$false}
+        $taskOrdinaryArguments = $taskBuild.Arguments
+        $taskOrdinaryFlags = $taskBuild.Flags
+        Invoke-PipelineCase 'build-server-release.ps1' @{Target='x86_64-pc-windows-msvc';BuildValidationFixture=$true;CleanBuildArtifacts=$false}
         if ($taskState.Cleaned -ne $taskCleanedBefore) { throw 'Server cleanup opt-out was ignored.' }
+        $taskExpectedArguments = $taskOrdinaryArguments + @('--bin','search-benchmark')
+        if ($taskCalls.Count -ne 1 -or ($taskCalls[0].Arguments -join [char]31) -cne ($taskExpectedArguments -join [char]31) -or
+            $taskCalls[0].Flags -cne $taskOrdinaryFlags) { throw 'The validation fixture must share the native server release Cargo invocation and flags.' }
         $taskState.FailAt = 1
         Invoke-PipelineCase 'build-server-release.ps1' @{Target='x86_64-pc-windows-msvc'} 'Rust server release build failed'
         $taskState.FailAt = 0
