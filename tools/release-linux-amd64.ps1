@@ -59,12 +59,16 @@ if ($LASTEXITCODE -ne 0 -or (Get-AudioLibCanonicalPath $checkout) -cne $root) {
 }
 $triple = 'x86_64-unknown-linux-gnu'
 if ($Action -ne 'Register') {
-    $compiler = & rustc -vV
-    if ($LASTEXITCODE -ne 0 -or $compiler -cnotcontains "host: $triple") {
-        throw "Select the pinned native $triple Rust toolchain before using this lane."
-    }
+    Push-Location -LiteralPath $root
+    try {
+        $compiler = & rustc -vV
+        if ($LASTEXITCODE -ne 0 -or $compiler -cnotcontains "host: $triple") {
+            throw "Select the pinned native $triple Rust toolchain before using this lane."
+        }
+    } finally { Pop-Location }
 }
 
+$stageLockPath = Join-Path $cache '.audiolib-linux-amd64-stage.lock'
 $lease = $null
 $owner = $null
 $savedTarget = $env:CARGO_TARGET_DIR
@@ -79,6 +83,14 @@ try {
             $lease = [IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
         } catch [IO.IOException] {
             throw 'The Linux AMD64 cache is busy or its lease cannot be opened. Check the existing runner first.'
+        }
+        # An interrupted supervisor releases its lock before its child necessarily exits.
+        Assert-AudioLibUnlinkedPath $stageLockPath
+        try {
+            $stageProbe = [IO.File]::Open($stageLockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+            $stageProbe.Dispose()
+        } catch [IO.IOException] {
+            throw 'A previous Linux AMD64 release stage is still active or its shared cache lease cannot be opened.'
         }
         Assert-AudioLibUnlinkedPath $ownerPath
         if (Test-Path -LiteralPath $ownerPath) {
@@ -109,6 +121,7 @@ try {
         PlanFile='tools/release-plans/server-unix.json'
         RunDirectory=".rust-validation/release-pipeline/$Tag/linux-x64-server"
         BuildCacheLimitGiB=$BuildCacheLimitGiB
+        SharedStageLockPath=$stageLockPath
     }
     if ($ChecksFile) { $arguments.ChecksFile = $ChecksFile }
     & (Join-Path $PSScriptRoot 'release-pipeline.ps1') @arguments

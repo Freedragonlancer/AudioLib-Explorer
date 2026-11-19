@@ -270,7 +270,7 @@ pwsh -NoProfile -File tools/release-pipeline.ps1 \
 
 AMD64 单独持有一个已登记的 `CARGO_TARGET_DIR`，供连续版本使用。若通过容器构建，沿用固定镜像、目标架构、Rust 工具链及现有容器用户，固定主机名（例如 `--hostname audiolib-release-linux-amd64`）、源码 checkout 容器路径（例如 `/work/source`）和缓存卷挂载点（例如 `/cache/audiolib-linux-amd64`）。初始化新专用卷时确保既有构建用户可写。Cargo registry、Rustup、ARM64 输出和应用数据使用各自目录。
 
-入口选用专用卷下的 `target-linux-amd64`，首次登记空目标后沿用同一卷。Run 以固定主机和 checkout 身份核对登记，并串行访问同一个持久卷。默认的 `-BuildCacheLimitGiB 8` 可按逻辑预算调整，作用于原有 `server-unix.json` 的成功后缓存维护；各标签使用独立的 `.rust-validation/release-pipeline/<tag>/linux-x64-server` 收据。运行 Docker 前继续消费该次原生服务端验收 JSON。
+入口选用专用卷下的 `target-linux-amd64`，首次登记空目标后沿用同一卷。Plan 和 Run 都在固定发布 checkout 中探测 Rust 工具链，支持从其他目录用绝对路径调用入口。Run 以固定主机和 checkout 身份核对登记，并串行访问同一个持久卷。即使父进程中断，仍在运行的子阶段也会持有共享卷锁，另一标签须等该子阶段退出后才能进入。默认的 `-BuildCacheLimitGiB 8` 可按逻辑预算调整，作用于原有 `server-unix.json` 的成功后缓存维护；各标签使用独立的 `.rust-validation/release-pipeline/<tag>/linux-x64-server` 收据。运行 Docker 前继续消费该次原生服务端验收 JSON。
 
 ```bash
 cache_root=/cache/audiolib-linux-amd64
@@ -289,7 +289,7 @@ AMD64 入口覆盖原生 x64 主机和 ARM64 主机上的 Linux AMD64 构建容�
 
 修改执行器时运行 `pwsh tools/test-release-pipeline.ps1`，只使用自有 Git/文件夹/伪命令验证续跑、输出边界、参数、环境与产物失效，不编译应用或访问真实库。安装器使用 `tools/test-local-release-install.ps1` 验证拒绝不完整包；提供 `-RuntimePayload <已验收包>` 时在自有临时 checkout 中验证安装、重复执行、启动与数据保留，不更新工作区的真实安装。计划路由变化还需预览对应 `Plan`；本机脚本语法通过不代表 Mac、Linux 或硬件验收通过。
 
-`test-release-pipeline.ps1 -Scope Profiles` 用伪工具验证 Windows 计划的 ASIO 选择以及同一 target 上独立的 Mac Beta 和正式标签收据，后者仍进入原生打包验收。`test-release-linux-amd64.ps1` 模拟 AMD64 卷登记、同卷互斥、版本间 target 复用和预算转发。`bash tools/test-release-create.sh` 离线测试并发、失败补传和分段计时。
+`test-release-pipeline.ps1 -Scope Profiles` 用伪工具验证 Windows 计划的 ASIO 选择以及同一 target 上独立的 Mac Beta 和正式标签收据，后者仍进入原生打包验收。`test-release-linux-amd64.ps1` 模拟 AMD64 卷登记、父进程中断后的同卷互斥、版本间 target 复用、预算转发和从其他目录调用时的工具链探测。`bash tools/test-release-create.sh` 离线测试并发、失败补传和分段计时。
 
 许可证前置入口用 `pwsh tools/test-release-license-preflight.ps1` 检查实际解析器在隔离元数据下的各产品/目标路由及缺件拒绝；配合 Profiles 回归检查每次续跑重新预检、失败阻断，以及材料恢复后成功构建/包/验收/安装收据的复用。这些合成测试不编译应用或访问真实库。
 
