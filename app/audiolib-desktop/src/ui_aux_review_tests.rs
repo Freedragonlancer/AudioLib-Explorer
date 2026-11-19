@@ -177,9 +177,9 @@ fn focus_from_pitch(ui: &AppWindow, chinese: bool, backtabs: usize) {
     let pitch = action(
         ui,
         if chinese {
-            "变调半音，回车或离开时应用"
+            "调整音高"
         } else {
-            "Pitch semitones, applied on Enter or focus loss"
+            "Adjust pitch"
         },
     );
     let origin = pitch.absolute_position();
@@ -188,6 +188,8 @@ fn focus_from_pitch(ui: &AppWindow, chinese: bool, backtabs: usize) {
         slint::LogicalPosition::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
     pointer(ui, center, true);
     pointer(ui, center, false);
+    key(ui, Key::Escape.into(), true);
+    key(ui, Key::Escape.into(), false);
     // Repeat immediately precedes Pitch in every player presentation.
     for _ in 0..backtabs {
         key(ui, Key::Backtab.into(), true);

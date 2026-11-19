@@ -6,9 +6,8 @@ use audiolib_remote::ArtworkReply;
 
 /// Busy replies retried after the first. Four cover reads at most.
 const ARTWORK_BUSY_RETRIES: u32 = 3;
-// The sidebar can show covers at up to 180 logical pixels. A 40px thumbnail
-// becomes visibly blocky there, while 256px keeps the per-row memory bounded.
-const SIDEBAR_COVER_SIDE: u32 = 256;
+// Keep the 26-logical-pixel row thumbnail sharp on high-DPI displays.
+const SIDEBAR_COVER_SIDE: u32 = 96;
 
 #[cfg(test)]
 #[path = "shared_album_artwork_migration_tests.rs"]
