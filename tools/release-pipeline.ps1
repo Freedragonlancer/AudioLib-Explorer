@@ -22,7 +22,8 @@ param(
     [ValidateRange(256,16000)][int]$MaxCharacters = 6000,
     [switch]$CleanBuildArtifacts = $true,
     [ValidateRange(0,100000)][double]$BuildCacheLimitGiB = 0,
-    [string]$Root = (Split-Path -Parent $PSScriptRoot)
+    [string]$Root = (Split-Path -Parent $PSScriptRoot),
+    [string]$SharedStageLockPath
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
@@ -220,6 +221,10 @@ try {
     if ($plan.Contains('require_tag') -and $plan.require_tag -and (Read-Git @('rev-parse',"$Tag`^{commit}")) -cne $commit) { throw 'Release tag must identify HEAD.' }
     $hostName = if ($IsWindows) {'windows'} elseif ($IsMacOS) {'macos'} else {'linux'}
     if ($plan.Contains('host') -and $plan.host -ne 'any' -and $plan.host -ne $hostName) { throw 'Run this plan on its matching native host.' }
+    if ($SharedStageLockPath) {
+        if (![IO.Path]::IsPathFullyQualified($SharedStageLockPath)) { throw 'Shared stage lock path must be absolute.' }
+        Assert-Unlinked $SharedStageLockPath
+    }
     New-Item -ItemType Directory -Path $RunDirectory -Force | Out-Null
     Assert-Unlinked (Join-Path $RunDirectory '.lock')
     $lock = [IO.File]::Open((Join-Path $RunDirectory '.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
@@ -263,6 +268,7 @@ try {
         Assert-Dependencies $item
         if ($cleanupRequested -and $id -eq 'build-cache-cleanup' -and $buildLease) { $buildLease.Dispose();$buildLease=$null }
         $command = [ordered]@{root=$Root;lock_path=$childLockPath}
+        if ($SharedStageLockPath) { $command.shared_stage_lock_path = $SharedStageLockPath }
         if ($item.Contains('github_auth')) { $command.github_auth = [bool]$item.github_auth }
         if ($item.Contains('script')) { $command.script = Resolve-PathValue $item.script; $command.parameters = if ($item.Contains('parameters')) {$item.parameters} else {@{}} }
         else { $command.command=$item.command; $command.arguments=if ($item.Contains('arguments')) {@($item.arguments)} else {@()} }

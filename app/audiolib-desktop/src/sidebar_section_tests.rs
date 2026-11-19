@@ -45,13 +45,35 @@ fn cover_only_mode_shows_library_name_when_cover_is_missing() {
 
 #[test]
 fn library_display_menu_toggles_fields_without_moving_the_library_view() {
-    i_slint_backend_testing::init_no_event_loop();
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
     for modern in [false, true] {
         let ui = window(true, 1440.0, 900.0, 1.0);
         ui.global::<crate::Theme>().set_modern_style(modern);
         settle();
         let button = labelled(&ui, "选择音效库显示内容");
+        let folders = header(&ui, false);
+        let libraries = header(&ui, true);
+        click(&ui, &folders);
+        click(&ui, &libraries);
+        assert_eq!(
+            folders.absolute_position().x,
+            libraries.absolute_position().x
+        );
         let before = button.absolute_position();
+        assert!(libraries.absolute_position().x + libraries.size().width <= before.x);
+        save_sidebar_snapshot(
+            &ui,
+            if modern {
+                "library-header-studio.png"
+            } else {
+                "library-header-classic.png"
+            },
+        );
         click(&ui, &button);
         let count = labelled(&ui, "匹配数量");
         count.invoke_accessible_default_action();
@@ -68,12 +90,11 @@ fn library_display_menu_toggles_fields_without_moving_the_library_view() {
 }
 
 #[test]
-fn cover_only_library_view_enlarges_the_cover_in_both_styles() {
+fn library_card_stacks_cover_name_and_count_in_both_styles() {
     i_slint_backend_testing::init_no_event_loop();
     for modern in [false, true] {
         let ui = window(true, 1440.0, 900.0, 1.0);
         ui.global::<crate::Theme>().set_modern_style(modern);
-        settle();
         assert!(ui.get_album_show_cover());
         assert!(ui.get_album_show_name());
         assert!(ui.get_album_show_count());
@@ -82,20 +103,72 @@ fn cover_only_library_view_enlarges_the_cover_in_both_styles() {
         } else {
             "AppWindow::album-row"
         };
+        let cover_id = if modern {
+            "AppWindow::studio-album-cover"
+        } else {
+            "AppWindow::album-cover"
+        };
+        let name_id = if modern {
+            "AppWindow::studio-album-card-name"
+        } else {
+            "AppWindow::album-card-name"
+        };
+        let count_id = if modern {
+            "AppWindow::studio-album-card-count"
+        } else {
+            "AppWindow::album-card-count"
+        };
+        settle();
+        assert!(
+            ElementHandle::find_by_element_id(&ui, name_id)
+                .next()
+                .is_some(),
+            "the name must be visible in the default library pane"
+        );
+        assert!(
+            ElementHandle::find_by_element_id(&ui, count_id)
+                .next()
+                .is_some(),
+            "the count must be visible in the default library pane"
+        );
+        ui.set_folders_section_expanded(false);
+        settle();
         let regular = ElementHandle::find_by_element_id(&ui, row_id)
             .next()
             .expect("library row")
             .size()
             .height;
+        let cover = ElementHandle::find_by_element_id(&ui, cover_id)
+            .next()
+            .expect("large library cover");
+        let name = ElementHandle::find_by_element_id(&ui, name_id)
+            .next()
+            .expect("library name below cover");
+        let count = ElementHandle::find_by_element_id(&ui, count_id)
+            .next()
+            .expect("match count below name");
+        assert!(cover.size().width >= 100.0);
+        assert!(name.absolute_position().y >= cover.absolute_position().y + cover.size().height);
+        assert!(count.absolute_position().y >= name.absolute_position().y + name.size().height);
         ui.set_album_show_name(false);
         ui.set_album_show_count(false);
         settle();
-        let enlarged = ElementHandle::find_by_element_id(&ui, row_id)
+        let cover_only = ElementHandle::find_by_element_id(&ui, row_id)
             .next()
             .expect("library row after changing display fields")
             .size()
             .height;
-        assert!(enlarged >= 100.0 && enlarged > regular * 3.0);
+        assert!(cover_only >= 100.0 && cover_only < regular);
+        assert!(
+            ElementHandle::find_by_element_id(&ui, name_id)
+                .next()
+                .is_none()
+        );
+        assert!(
+            ElementHandle::find_by_element_id(&ui, count_id)
+                .next()
+                .is_none()
+        );
         ui.hide().unwrap();
     }
 }

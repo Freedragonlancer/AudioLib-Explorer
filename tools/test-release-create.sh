@@ -523,20 +523,53 @@ assert_independent_upload() {
     fail "unexpected independent upload at mutation $number"
 }
 
+timing_field() {
+  local pattern="\"$2\":([0-9]+)"
+  [[ $1 =~ $pattern ]] || fail "missing integer timing field: $2"
+  printf '%s' "${BASH_REMATCH[1]}"
+}
+assert_upload_timing() {
+  local log=$1 archive=$2 attempts=$3 failures=$4 code=$5 intake=$6 line local_ms archive_ms checksum_ms
+  [ "$(grep -c '^RELEASE_UPLOAD_TIMING ' "$log")" = 1 ] || fail "missing or duplicated timing receipt: $log"
+  line=$(grep '^RELEASE_UPLOAD_TIMING ' "$log")
+  [[ $line == *"\"archive\":\"$archive\""* && $line == *'"draft_id":"12345"'* ]] || fail 'timing receipt has the wrong identity'
+  [ "$(timing_field "$line" post_attempts)" = "$attempts" ] &&
+    [ "$(timing_field "$line" post_failures)" = "$failures" ] &&
+    [ "$(timing_field "$line" exit_code)" = "$code" ] &&
+    [ "$(timing_field "$line" intake_read_hash_ms)" = "$intake" ] || fail 'timing receipt has the wrong operation counts or outcome'
+  local_ms=$(timing_field "$line" local_read_hash_ms)
+  archive_ms=$(timing_field "$line" post_archive_ms)
+  checksum_ms=$(timing_field "$line" post_checksum_ms)
+  [ "$(timing_field "$line" read_hash_ms)" -eq "$((intake + local_ms))" ] ||
+    fail 'timing receipt read/hash total disagrees with its components'
+  [ "$(timing_field "$line" post_ms)" -eq "$((archive_ms + checksum_ms))" ] ||
+    fail 'timing receipt POST total disagrees with its components'
+  [ "$local_ms" -gt 0 ] && [ "$(timing_field "$line" remote_verify_ms)" -gt 0 ] ||
+    fail 'timing receipt omitted local or remote reads'
+  if [ "$attempts" -gt 0 ] && [ "$((archive_ms + checksum_ms))" -eq 0 ]; then
+    fail 'timing receipt omitted attempted POSTs'
+  fi
+}
+
+reject '--timings requires --stage-independent' "v$v" --resume-draft --timings
+reject 'requires an integer number of milliseconds' "v$v" --resume-draft --stage-independent --draft-id 12345 --timings --intake-read-hash-ms -1
+reject '--intake-read-hash-ms requires --timings' "v$v" --resume-draft --stage-independent --draft-id 12345 --intake-read-hash-ms 14
+
 # Both Docker uploads start before either archive finishes. Leave ARM64 in
 # starter state until the AMD64 process has completed its final verification.
 reset_draft
 amd64=${all_assets[8]}; arm64=${all_assets[10]}
 amd_name=$(basename "$amd64"); arm_name=$(basename "$arm64")
-out=$(independent_command --dry-run -- "$amd64.sha256" "$amd64")
+out=$(independent_command --timings --dry-run -- "$amd64.sha256" "$amd64")
+[[ $out != *'RELEASE_UPLOAD_TIMING '* ]] || fail 'dry-run emitted actual upload timings'
 [[ $out == *'gh api --hostname github.com --method POST'* && $out == *'no mutations performed'* ]] ||
   fail 'independent preview did not show a pinned upload'
 [ "$(mutation_count)" = 0 ] || fail 'independent preview mutated the draft'
 AUDIOLIB_INDEPENDENT_PEER=$arm_name AUDIOLIB_INDEPENDENT_FAIL_AFTER=$amd_name \
-  independent_command -- "$amd64.sha256" "$amd64" > "$test_root/amd64.log" 2>&1 &
+  independent_command --timings -- "$amd64.sha256" "$amd64" > "$test_root/amd64.log" 2>&1 &
 amd_pid=$!
 AUDIOLIB_INDEPENDENT_PEER=$amd_name AUDIOLIB_INDEPENDENT_HOLD=1 \
-  independent_command -- "$arm64" "$arm64.sha256" > "$test_root/arm64.log" 2>&1 &
+  independent_command --timings -- "$arm64" "$arm64.sha256" > "$test_root/arm64.log" 2>&1 &
 arm_pid=$!
 amd_status=0; wait "$amd_pid" || amd_status=$?
 foreign_starter=0
@@ -561,6 +594,8 @@ else
 fi
 assert_independent_upload 2 "$amd64.sha256"
 assert_independent_upload 3 "$arm64.sha256"
+assert_upload_timing "$test_root/amd64.log" "$amd_name" 2 1 0 0
+assert_upload_timing "$test_root/arm64.log" "$arm_name" 2 0 0 0
 
 # Recover a checksum request GitHub did not store. The existing ARM64 pair and
 # the successfully stored AMD64 archive, including their remote IDs, survive.
@@ -568,25 +603,32 @@ reset_draft
 independent_command -- "$arm64" "$arm64.sha256" >/dev/null
 status=0
 AUDIOLIB_INDEPENDENT_FAIL_BEFORE="$amd_name.sha256" \
-  independent_command -- "$amd64" "$amd64.sha256" > "$test_root/interrupted.log" 2>&1 || status=$?
+  independent_command --timings -- "$amd64" "$amd64.sha256" > "$test_root/interrupted.log" 2>&1 || status=$?
 [ "$status" = 41 ] && [ "$(mutation_count)" = 4 ] && [ "$(wc -l < "$state/assets" | tr -d '[:space:]')" = 3 ] ||
   fail 'independent checksum request did not fail with only the archive stored'
 assert_independent_upload 2 "$amd64"
 assert_independent_upload 3 "$amd64.sha256"
+assert_upload_timing "$test_root/interrupted.log" "$amd_name" 2 1 41 0
 cp "$state/assets" "$state/before-retry"
 reject_draft 'complete verified draft' publish_staged_command -- "${all_assets[@]}"
-independent_command -- "$amd64" "$amd64.sha256" >/dev/null
+independent_command --timings --intake-read-hash-ms 123 -- "$amd64" "$amd64.sha256" > "$test_root/retry.log"
+assert_upload_timing "$test_root/retry.log" "$amd_name" 1 0 0 123
+grep -q '"post_archive_ms":0,' "$test_root/retry.log" || fail 'timing charged an archive upload on checksum-only retry'
 [ "$(mutation_count)" = 5 ] && [ "$(cat "$state/draft")" = true ] || fail 'independent retry retransmitted or published'
 assert_independent_upload 4 "$amd64.sha256"
 while IFS= read -r row; do
   grep -Fqx -- "$row" "$state/assets" || fail 'retry changed an already stored asset'
 done < "$state/before-retry"
-independent_command -- "$amd64" "$amd64.sha256" >/dev/null
+independent_command --timings -- "$amd64" "$amd64.sha256" > "$test_root/complete.log"
+assert_upload_timing "$test_root/complete.log" "$amd_name" 0 0 0 0
+grep -q '"post_ms":0,' "$test_root/complete.log" || fail 'timing charged a POST for verified existing assets'
 [ "$(mutation_count)" = 5 ] || fail 'complete independent pair was retransmitted'
 
 # Reject ambiguous scope, conflicting assets and a still-uploading owned asset.
 reset_draft
 reject_draft 'exactly one archive and checksum pair' independent_command -- "$amd64"
+TMPDIR="$test_root/missing-scratch" reject_draft 'exactly one archive and checksum pair' \
+  independent_command --dry-run --timings -- "$amd64"
 reject_draft 'exactly one archive and checksum pair' independent_command -- "$amd64" "$amd64.sha256" "$arm64" "$arm64.sha256"
 reject_draft 'archive and checksum' independent_command -- "$amd64" "$arm64.sha256"
 reject_draft 'draft ID differs' env AUDIOLIB_REQUIRE_API_HOST=1 "$here/release-create.sh" "$tag" --resume-draft --stage-independent --draft-id 54321 --notes-file "$notes" -- "$amd64" "$amd64.sha256"
@@ -622,4 +664,4 @@ for suffix in '' '-rc.2'; do
   reject_draft 'unpublished draft' publish_staged_command -- "${all_assets[@]}"
 done
 
-echo 'release-create tests passed (offline fake gh/pwsh/git; legacy resume, cumulative and independent pairs, interrupted retry, exact staged publication)'
+echo 'release-create tests passed (offline fake gh/pwsh/git; legacy resume, cumulative and independent pairs, interrupted retry, segmented upload timing, exact staged publication)'

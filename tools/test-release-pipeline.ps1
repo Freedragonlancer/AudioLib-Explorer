@@ -207,7 +207,8 @@ if(Test-Path -LiteralPath target/move-head){
     }
     New-Item -ItemType Directory -Path (Join-Path $taskRoot 'target') -Force | Out-Null
     $taskStub=@'
-param($Tag,$Profile,[switch]$WithoutAsio,[switch]$SkipBuild,[switch]$SkipArchive,$BinaryDirectory,$Source,$Destination='local_release',$VersionManifest='Cargo.toml',[string[]]$Package,[switch]$Asio)
+param($Tag,$Profile,[switch]$WithoutAsio,[switch]$SkipBuild,[switch]$SkipArchive,$BinaryDirectory,$Source,$Destination='local_release',$VersionManifest='Cargo.toml',[string[]]$Package,[switch]$Asio,
+    $ExpectedCommit,$ReportPath,$BuildReport,[switch]$ValidateRuntime,$SigningIdentity,$OutputDirectory)
 $ErrorActionPreference='Stop'
 $fixtureRoot=[IO.Path]::GetFullPath((Get-Location).ProviderPath)
 . (Join-Path $PSScriptRoot 'build-cache.ps1')
@@ -227,12 +228,32 @@ $scriptName=[IO.Path]::GetFileName($MyInvocation.MyCommand.Path)
 # Model what each real tool produces, independently of the plan's declarations.
 switch -Exact ($scriptName) {
     'check-release-licenses.ps1' {
-        if ($Profile -cne 'WindowsClient') { throw 'Wrong license preflight profile.' }
+        $requiredProfile = if (Test-Path -LiteralPath (Join-Path $fixtureTarget 'macos-profile')) { 'MacosClient' } else { 'WindowsClient' }
+        if ($Profile -cne $requiredProfile) { throw 'Wrong license preflight profile.' }
         if (Test-Path -LiteralPath (Join-Path $fixtureTarget 'missing-license')) { throw 'Synthetic external notice missing.' }
     }
     'build-release.ps1' {
         Write-FixtureFile 'target/x86_64-pc-windows-msvc/release/AudioLibExplorer.exe' "desktop without_asio=$WithoutAsio"
         Write-FixtureFile 'target/x86_64-pc-windows-msvc/release/AudioLibCli.exe' "cli without_asio=$WithoutAsio"
+    }
+    'build-macos-client-pipeline.ps1' {
+        $head = & git -C $fixtureRoot rev-parse HEAD
+        if ($LASTEXITCODE -ne 0 -or $ExpectedCommit -cne $head) { throw 'Wrong Mac build commit.' }
+        $warmMarker = Join-Path $fixtureTarget 'macos-warm-cache'
+        $warmed = Test-Path -LiteralPath $warmMarker
+        if (!$warmed) { Write-FixtureFile $warmMarker $ExpectedCommit }
+        foreach ($binary in 'AudioLibExplorer','AudioLibCli') {
+            Write-FixtureFile "target/aarch64-apple-darwin/release/$binary" "synthetic Mac binary $binary"
+        }
+        $proof = @{commit=$ExpectedCommit;target_directory=$fixtureTarget;warmed=$warmed} | ConvertTo-Json -Compress
+        Write-FixtureFile $ReportPath $proof
+    }
+    'package-macos-client.ps1' {
+        $proof = Get-Content -LiteralPath $BuildReport -Raw | ConvertFrom-Json
+        if ($Tag -cne 'v0.0.1' -or !$ValidateRuntime -or $SigningIdentity -cne '-' -or $proof.commit -cne $ExpectedCommit -or !$proof.warmed) {
+            throw 'Formal Mac packaging did not request native acceptance with fresh proof on the warmed target.'
+        }
+        Write-FixtureFile (Join-Path $OutputDirectory 'accepted.fixture') $ExpectedCommit
     }
     'package-portable.ps1' {
         if (!$SkipBuild) { throw 'Profile packaging must reuse its build.' }
@@ -450,6 +471,58 @@ $proof | ConvertTo-Json -Compress
         }
     }
     Write-Host 'PASS: native server plans write JSON independently of logs, reuse verified receipts, and recover failed or changed receipts without repeating upstream work.'
+
+    foreach ($taskMacScript in 'build-macos-client-pipeline.ps1','package-macos-client.ps1') {
+        [IO.File]::WriteAllText((Join-Path $taskRoot "tools/$taskMacScript"),$taskStub)
+    }
+    $taskMacTarget = Join-Path $taskRoot 'target'
+    [IO.File]::WriteAllText((Join-Path $taskMacTarget 'macos-profile'),'Mac client fixture')
+    $taskMacPlans = @{}
+    foreach ($taskMacProfile in 'macos-client-beta','macos-client') {
+        $taskPlan = Get-Content -LiteralPath (Join-Path $PSScriptRoot "release-plans/$taskMacProfile.json") -Raw | ConvertFrom-Json -AsHashtable
+        if ($taskPlan.host -cne 'macos' -or $taskPlan.require_tag -ne ($taskMacProfile -ceq 'macos-client')) {
+            throw 'Mac plan lost the native host or tagged formal gate.'
+        }
+        $taskPlan.host = 'any'
+        $taskPlan.environment_tools = @()
+        $taskMacPlans[$taskMacProfile] = $taskPlan
+        $taskPlan | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $taskMacTarget "$taskMacProfile.json") -Encoding utf8
+    }
+    Invoke-FixtureGit @('add','tools')
+    Invoke-FixtureGit @('commit','-qm','Mac client route fixture')
+    $taskBetaCommit = & git -C $taskRoot rev-parse HEAD
+    $taskBetaTree = & git -C $taskRoot rev-parse 'HEAD^{tree}'
+    $taskRun = Join-Path $taskRoot '.rust-validation/release-pipeline/macos-client-beta'
+    $taskBetaProofPath = Join-Path $taskRun 'build.json'
+    $taskPlanPath = Join-Path $taskMacTarget 'macos-client-beta.json'
+    $taskPlan = $taskMacPlans['macos-client-beta']
+    # Invoke-Pipeline passes the same explicit cleanup opt-out as the Beta runbook.
+    $null = Invoke-Pipeline
+    $taskBetaState = Read-State
+    $taskBetaProof = Get-Content -LiteralPath $taskBetaProofPath -Raw | ConvertFrom-Json
+    if (($taskBetaState.stages.Keys -join ',') -cne 'preflight,license-preflight,build' -or
+        $taskBetaState.stages.build.status -cne 'passed' -or $taskBetaProof.commit -cne $taskBetaCommit -or $taskBetaProof.warmed -or
+        [IO.File]::ReadAllText((Join-Path $taskMacTarget 'macos-warm-cache')) -cne $taskBetaCommit) {
+        throw 'Beta route did not retain the cache and exact candidate build proof.'
+    }
+    $taskBetaProofHash = (Get-FileHash -LiteralPath $taskBetaProofPath).Hash
+    Invoke-FixtureGit @('commit','--allow-empty','-qm','Same-tree formal Mac identity')
+    Invoke-FixtureGit @('tag','v0.0.1')
+    $taskFinalCommit = & git -C $taskRoot rev-parse HEAD
+    if ($taskFinalCommit -ceq $taskBetaCommit -or (& git -C $taskRoot rev-parse 'HEAD^{tree}') -cne $taskBetaTree) { throw 'Expected distinct commits with equal trees.' }
+    $taskRun = Join-Path $taskRoot '.rust-validation/release-pipeline/macos-client'
+    $taskPlanPath = Join-Path $taskMacTarget 'macos-client.json'
+    $taskPlan = $taskMacPlans['macos-client']
+    $null = Invoke-Pipeline
+    $taskFinalState = Read-State
+    $taskFinalProof = Get-Content -LiteralPath (Join-Path $taskRun 'build.json') -Raw | ConvertFrom-Json
+    if ($taskFinalProof.commit -cne $taskFinalCommit -or !$taskFinalProof.warmed -or $taskFinalProof.target_directory -cne $taskBetaProof.target_directory -or
+        $taskFinalState.stages.build.status -cne 'passed' -or $taskFinalState.stages.'package-accept'.status -cne 'passed' -or
+        [IO.File]::ReadAllText((Join-Path $taskRun 'artifacts/accepted.fixture')) -cne $taskFinalCommit -or
+        (Get-FileHash -LiteralPath $taskBetaProofPath).Hash -cne $taskBetaProofHash) {
+        throw 'Tagged formal plan lost its separate build proof or package acceptance on the warmed target.'
+    }
+    Write-Host 'PASS: native Mac Beta prewarming retains its target and proof; the same-tree formal tag gets fresh build proof and package acceptance.'
 } finally {
     [Environment]::SetEnvironmentVariable('AUDIOLIB_PIPELINE_TEST',$taskSaved)
     $env:GH_TOKEN=$taskSavedGhToken

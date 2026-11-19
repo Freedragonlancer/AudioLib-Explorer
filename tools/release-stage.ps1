@@ -6,11 +6,17 @@ param([Parameter(Mandatory)][string]$CommandFile)
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 $stageLock = $null
+$sharedStageLock = $null
 try {
     $stage = Get-Content -LiteralPath $CommandFile -Raw | ConvertFrom-Json -AsHashtable
     # Survives a parent-runner interruption until this child exits. A retry
     # cannot overlap a still-running build/install from the interrupted run.
     $stageLock = [IO.File]::Open($stage.lock_path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    if ($stage.ContainsKey('shared_stage_lock_path')) {
+        . (Join-Path $PSScriptRoot 'build-cache.ps1')
+        Assert-AudioLibUnlinkedPath $stage.shared_stage_lock_path
+        $sharedStageLock = [IO.File]::Open($stage.shared_stage_lock_path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    }
     Set-Location -LiteralPath $stage.root
     if ($stage.ContainsKey('github_auth') -and $stage.github_auth -and !$env:GH_TOKEN -and !$env:GITHUB_TOKEN) {
         # Resolve once inside this child. Never persist the credential in a plan,
@@ -40,4 +46,7 @@ try {
 } catch {
     [Console]::Error.WriteLine($_.ToString())
     exit 1
-} finally { if ($stageLock) { $stageLock.Dispose() } }
+} finally {
+    if ($sharedStageLock) { $sharedStageLock.Dispose() }
+    if ($stageLock) { $stageLock.Dispose() }
+}
