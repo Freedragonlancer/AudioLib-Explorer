@@ -1,7 +1,6 @@
 // app/audiolib-desktop/ui/audition-panel.slint
 import { ComboBox } from "std-widgets.slint";
-import { LineEdit as NativeLineEdit } from "std-widgets.slint";
-import { Theme, ThemedSlider as Slider, ThemedLineEdit as LineEdit } from "theme.slint";
+import { Theme, ThemedSlider as Slider } from "theme.slint";
 
 /// One time-ruler tick: its position as a fraction of the visible range and, on
 /// major ticks, the time label drawn beside it.
@@ -287,110 +286,159 @@ component PlayToggle inherits Rectangle {
 }
 component Caption inherits Text { color: Theme.text(4, 1, Theme.dim); font-size: Theme.font(11); vertical-alignment: center; }
 
-component ClassicTransformField inherits Rectangle {
-    in property <string> input-label;
-    in property <bool> enabled <=> edit.enabled;
-    in-out property <string> text <=> edit.text;
-    out property <bool> has-focus: edit.has-focus;
-    callback accepted <=> edit.accepted;
-    forward-focus: edit;
-    edit := NativeLineEdit {
-        accessible-label: root.input-label;
-        width: root.width; height: root.height;
-    }
-    height: max(24px * Theme.ui-scale, Theme.font(12) + 6px * Theme.ui-scale);
-    if root.has-focus && root.enabled: Rectangle {
-        x: 4px * Theme.ui-scale; y: parent.height - 2px * Theme.ui-scale;
-        width: parent.width - 8px * Theme.ui-scale; height: 2px * Theme.ui-scale;
-        background: Theme.accent;
-    }
-}
-
-// A Pitch / Rate entry: type a value and press Enter, or step it with the mouse
-// wheel or Up / Down (Shift for fine steps). The controller rejects out-of-range
-// input and asks the field to shake and show the accepted range.
-component NumberField inherits Rectangle {
-    in property <string> input-label;
-    in property <bool> enabled: true;
+// The transport contract uses semitones; the editor exposes whole cents.
+component TransformField inherits Rectangle {
+    in property <bool> pitch;
+    in property <bool> chinese;
+    in property <bool> enabled;
     in-out property <string> text;
-    in property <float> minimum;
-    in property <float> maximum;
-    in property <float> default-value;
-    in property <float> step;
-    in property <float> fine-step;
-    in property <string> range-hint;
-    out property <bool> modified: root.text.is-float() && abs(root.text.to-float() - root.default-value) > 0.0001;
-    out property <bool> has-focus: edit.has-focus;
     callback submit(string);
-    property <bool> invalid: false;
-    property <bool> shaking: false;
-    property <duration> shake-start: 0ms;
-    property <length> wheel-travel: 0px;
-    public function refuse() {
-        root.invalid = true;
-        root.shaking = true;
-        root.shake-start = animation-tick();
+    private property <float> minimum: root.pitch ? -2400 : 0.25;
+    private property <float> maximum: root.pitch ? 2400 : 4;
+    private property <float> current: root.pitch ? round(root.text.to-float() * 100) : root.text.to-float();
+    private property <string> unit: root.pitch ? "ct" : "×";
+    private property <string> title: root.pitch ? (root.chinese ? "音高" : "Pitch") : (root.chinese ? "速度" : "Rate");
+    out property <bool> modified: root.current != (root.pitch ? 0 : 1);
+    private property <string> label: root.pitch ? (root.chinese ? "调整音高" : "Adjust pitch") : (root.chinese ? "调整速度" : "Adjust speed");
+    private property <string> draft;
+    private property <float> preview;
+    private property <bool> invalid;
+    pure function formatted(value: float) -> string {
+        return root.pitch ? "\{round(value)}" : Clock.fixed2(value);
     }
-    function step-by(direction: int, fine: bool) {
+    public function refuse() { root.invalid = true; }
+    function open() {
         if !root.enabled { return; }
-        let base = root.text.is-float() ? root.text.to-float() : root.default-value;
-        let next = clamp(Math.round((base + direction * (fine ? root.fine-step : root.step)) / root.fine-step) * root.fine-step, root.minimum, root.maximum);
-        root.text = Clock.fixed2(next);
-        root.submit(root.text);
+        trigger.focus();
+        root.preview = root.current;
+        root.draft = root.formatted(root.current);
+        root.invalid = false;
+        popup.show();
     }
-    // Decaying side-to-side offset after rejected input; reads the frame clock only while shaking.
-    property <float> shake-elapsed: root.shaking ? (animation-tick() - root.shake-start) / 1ms : 0;
-    property <length> shake-offset: root.shaking ? 4px * Theme.ui-scale * max(0, 1 - root.shake-elapsed / 300) * sin(root.shake-elapsed / 75 * 360deg) : 0px;
-    Timer { interval: 320ms; running: root.shaking; triggered => { root.shaking = false; } }
-    Timer { interval: 1800ms; running: root.invalid; triggered => { root.invalid = false; } }
-    // Up / Down are observed before the text input sees them.
-    keys := FocusScope {
-        x: root.shake-offset; width: root.width; height: root.height;
-        focus-on-click: false; focus-on-tab-navigation: false;
-        capture-key-pressed(event) => {
-            if root.enabled && (event.text == Key.UpArrow || event.text == Key.DownArrow) {
-                root.step-by(event.text == Key.UpArrow ? 1 : -1, event.modifiers.shift);
-                return accept;
-            }
-            reject
+    function apply(value: string) {
+        if !root.enabled { return; }
+        let n = value.to-float();
+        if !value.is-float() || n < root.minimum || n > root.maximum || (root.pitch && n != round(n)) {
+            root.refuse();
+            return;
         }
-        // The wheel reaches this area because the text input ignores scrolling.
-        TouchArea {
-            scroll-event(event) => {
-                let delta = event.delta-y != 0px ? event.delta-y : event.delta-x;
-                if !root.enabled || delta == 0px { return reject; }
-                root.wheel-travel += delta;
-                // One detent (120px) is one step; precision touchpads accumulate.
-                if abs(root.wheel-travel) >= 40px {
-                    root.step-by(root.wheel-travel > 0px ? 1 : -1, event.modifiers.shift);
-                    root.wheel-travel = 0px;
+        let next = Clock.fixed2(root.pitch ? n / 100 : n);
+        root.invalid = false;
+        root.preview = root.pitch ? round(n) : next.to-float();
+        root.draft = root.formatted(root.preview);
+        if next != root.text {
+            root.text = next;
+            root.submit(root.text);
+        }
+    }
+    changed enabled => { if !root.enabled { popup.close(); } }
+    // Reserve enough space for the full range while the value is changing.
+    width: title-text.preferred-width + widest-number.preferred-width + unit-text.preferred-width + 19px * Theme.ui-scale;
+    height: max(22px * Theme.ui-scale, Theme.font(12) + 8px * Theme.ui-scale);
+    border-radius: 3px * Theme.ui-scale; border-width: 1phx;
+    border-color: trigger.has-focus ? Theme.accent : transparent;
+    background: hit.pressed ? Theme.trough : hit.has-hover ? Theme.hover : transparent;
+    opacity: root.enabled ? 1 : 0.45;
+    animate border-color, background { duration: Theme.motion-fast; }
+    accessible-role: button; accessible-label: root.label; accessible-value: root.formatted(root.current) + " " + root.unit;
+    accessible-enabled: root.enabled; accessible-action-default => { root.open(); }
+    forward-focus: trigger;
+    trigger := ActionKeyScope {
+        enabled: root.enabled; activated => { root.open(); }
+    }
+    widest-number := Text { visible: false; text: root.pitch ? "-8888" : "8.88"; font-size: Theme.font(12); font-weight: 600; }
+    title-text := Caption { x: 6px * Theme.ui-scale; width: self.preferred-width; text: root.title; }
+    number := Text {
+        x: title-text.x + title-text.width + 5px * Theme.ui-scale;
+        width: widest-number.preferred-width; text: root.formatted(root.current);
+        horizontal-alignment: right; vertical-alignment: center; font-size: Theme.font(12); font-weight: 600;
+        color: root.modified ? Theme.accent-hover : Theme.ink;
+    }
+    unit-text := Caption {
+        x: number.x + number.width + 2px * Theme.ui-scale; width: self.preferred-width;
+        text: root.unit; font-size: Theme.font(10);
+    }
+    hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.open(); } }
+    popup := PopupWindow {
+        close-policy: close-on-click-outside;
+        x: 0px; y: -self.height - 4px * Theme.ui-scale;
+        width: 160px * Theme.ui-scale + max(48px * Theme.ui-scale, widest-number.preferred-width + 16px * Theme.ui-scale);
+        height: max(54px * Theme.ui-scale, Theme.font(11) + Theme.font(12) + 29px * Theme.ui-scale);
+        editor-surface := Rectangle {
+            background: Theme.panel; border-width: 1phx; border-color: Theme.strong-border; border-radius: 5px * Theme.ui-scale;
+            FocusScope {
+                capture-key-pressed(event) => { if event.text == Key.Escape { popup.close(); return accept; } reject }
+                VerticalLayout {
+                    padding-left: 8px * Theme.ui-scale; padding-right: 8px * Theme.ui-scale;
+                    padding-top: 5px * Theme.ui-scale; padding-bottom: 5px * Theme.ui-scale; spacing: 2px * Theme.ui-scale;
+                    HorizontalLayout {
+                        Caption { text: root.title; font-weight: 600; color: Theme.ink; }
+                        Caption {
+                            text: root.pitch ? "−2400 … +2400 ct" : "0.25 … 4.00 ×"; horizontal-alignment: right;
+                            color: root.invalid ? Theme.warning : Theme.dim; font-size: Theme.font(10);
+                        }
+                    }
+                    HorizontalLayout { spacing: 6px * Theme.ui-scale;
+                        Slider {
+                            input-label: root.label; surface: Theme.panel; minimum: root.minimum; maximum: root.maximum; step: root.pitch ? 1 : 0.01;
+                            value: root.preview;
+                            changed(value) => { root.draft = root.formatted(value); root.invalid = false; }
+                            released(value) => { root.apply(root.formatted(value)); }
+                        }
+                        Rectangle {
+                            width: max(48px * Theme.ui-scale, widest-number.preferred-width + 16px * Theme.ui-scale);
+                            height: max(24px * Theme.ui-scale, Theme.font(12) + 8px * Theme.ui-scale);
+                            y: (parent.height - self.height) / 2;
+                            background: Theme.trough; border-radius: 3px * Theme.ui-scale; border-width: 1phx;
+                            border-color: root.invalid ? Theme.warning : exact.has-focus ? Theme.accent : Theme.border;
+                            exact := TextInput {
+                                width: parent.width; height: parent.height; single-line: true;
+                                text <=> root.draft; color: Theme.ink; font-size: Theme.font(12);
+                                horizontal-alignment: center; vertical-alignment: center;
+                                selection-foreground-color: Theme.on-accent; selection-background-color: Theme.accent;
+                                accessible-role: text-input; accessible-label: root.pitch ? (root.chinese ? "精确音分" : "Exact cents") : (root.chinese ? "精确速度" : "Exact speed");
+                                accessible-value: self.text; accessible-action-set-value(v) => { self.text = v; root.invalid = false; }
+                                edited => { root.invalid = false; }
+                                accepted => { root.apply(self.text); if !root.invalid { popup.close(); } }
+                            }
+                        }
+                    }
                 }
-                return accept;
             }
-            edit := LineEdit {
-                width: parent.width; height: parent.height;
-                text <=> root.text; enabled: root.enabled; input-label: root.input-label;
-                changed has-focus => { if !self.has-focus && root.enabled { root.submit(self.text); } }
-                accepted => { root.submit(self.text); }
-            }
-        }
-        // A non-default value carries an accent mark.
-        Rectangle {
-            x: parent.width - 8px * Theme.ui-scale; y: 4px * Theme.ui-scale; width: 4px * Theme.ui-scale; height: self.width; border-radius: self.width / 2;
-            background: Theme.accent; opacity: root.modified && root.enabled ? 1 : 0;
-            animate opacity { duration: Theme.motion-base; }
-        }
-        Rectangle {
-            border-width: 1px; border-radius: 4px * Theme.ui-scale; border-color: Theme.danger;
-            opacity: root.invalid ? 1 : 0;
-            animate opacity { duration: Theme.motion-base; }
         }
     }
-    Tip { z: 10; anchor-width: root.width; anchor-height: root.height; align: -1; text: root.range-hint; show: root.invalid; }
 }
 
-// Monitoring level in dB. Drag or click to set, wheel for 1 dB steps, double-click
-// for 0 dB; arrow keys step 1 dB (Shift 0.1 dB).
+component TransformPair inherits Rectangle {
+    in property <bool> chinese;
+    in property <bool> enabled;
+    in-out property <string> pitch-text;
+    in-out property <string> rate-text;
+    out property <bool> modified: pitch-field.modified || rate-field.modified;
+    callback submit(string, string);
+    public function reject-input(fields: int) {
+        if Math.mod(fields, 2) == 1 { pitch-field.refuse(); }
+        if fields >= 2 { rate-field.refuse(); }
+    }
+    width: self.preferred-width;
+    height: pitch-field.height + 4px * Theme.ui-scale;
+    border-radius: 5px * Theme.ui-scale; border-width: 1phx; border-color: Theme.player-border;
+    background: Theme.raised.mix(Theme.player, 0.55);
+    HorizontalLayout {
+        padding: 2px * Theme.ui-scale; spacing: 0px;
+        pitch-field := TransformField {
+            pitch: true; chinese: root.chinese; enabled: root.enabled; text <=> root.pitch-text;
+            submit(value) => { root.submit(value, root.rate-text); }
+        }
+        Rectangle { width: 1phx; height: parent.height / 2; y: (parent.height - self.height) / 2; background: Theme.player-border; }
+        rate-field := TransformField {
+            chinese: root.chinese; enabled: root.enabled; text <=> root.rate-text;
+            submit(value) => { root.submit(root.pitch-text, value); }
+        }
+    }
+}
+
+
 component VolumeSlider inherits Rectangle {
     in property <float> minimum: -60;
     in property <float> maximum: 0;
@@ -1365,17 +1413,16 @@ component ClassicAuditionPanel inherits Rectangle {
                 clicked => { root.repeat = !root.repeat; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); }
             }
             Rectangle { width: 1px; background: Theme.player-border; }
-            Caption { text: root.chinese ? "音高" : "Pitch"; }
-            ClassicTransformField { y: (parent.height - self.height) / 2; width: 24px * Theme.ui-scale + Theme.font(12) * 2.95; text <=> root.pitch-text; enabled: root.ready; input-label: root.chinese ? "变调半音，回车或离开时应用" : "Pitch semitones, applied on Enter or focus loss"; changed has-focus => { if !self.has-focus && root.ready { root.transform(self.text, root.rate-text, root.mono, root.repeat); } } accepted => { root.transform(self.text, root.rate-text, root.mono, root.repeat); } }
-            Caption { text: root.chinese ? "半音" : "st"; }
-            Caption { text: root.chinese ? "速度" : "Rate"; }
-            ClassicTransformField { y: (parent.height - self.height) / 2; width: 24px * Theme.ui-scale + Theme.font(12) * 2.15; text <=> root.rate-text; enabled: root.ready; input-label: root.chinese ? "保持音高的播放速度，回车或离开时应用" : "Pitch-preserving speed, applied on Enter or focus loss"; changed has-focus => { if !self.has-focus && root.ready { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } } accepted => { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } }
-            Caption { text: "×"; }
-            ClassicTool { icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; hint: root.chinese ? "恢复 0 半音与 1× 速度" : "Restore 0 semitones and 1× speed"; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+            TransformPair {
+                y: (parent.height - self.height) / 2; chinese: root.chinese; enabled: root.ready;
+                pitch-text <=> root.pitch-text; rate-text <=> root.rate-text;
+                submit(pitch, rate) => { root.transform(pitch, rate, root.mono, root.repeat); }
+            }
+            ClassicTool { icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; hint: root.chinese ? "恢复 0 音分与 1× 速度" : "Restore 0 cents and 1× speed"; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
             Rectangle { width: 1px; background: Theme.player-border; }
             Caption { text: root.chinese ? "音量" : "Volume"; }
             volume-control := Slider { input-label: root.chinese ? "音量" : "Volume"; min-width: 76px * Theme.ui-scale; max-width: 160px * Theme.ui-scale; horizontal-stretch: 1; minimum: -60; maximum: 0; step: 0.1; value <=> root.volume-db; changed => { root.volume(self.value); } }
-            Caption { width: 66px * Theme.ui-scale; text: root.volume-label; horizontal-alignment: right; }
+            Caption { width: Theme.font(11) * 4.2; text: root.volume-label; horizontal-alignment: left; }
             MonitorModeButton {
                 height: max(24px * Theme.ui-scale, Theme.font(11) + 6px * Theme.ui-scale); y: (parent.height - self.height) / 2;
                 chinese: root.chinese; mono: root.mono; stereo-pair: root.stereo-pair;
@@ -1384,6 +1431,7 @@ component ClassicAuditionPanel inherits Rectangle {
             }
             Rectangle { horizontal-stretch: 1; }
             OutputPill {
+                y: (parent.height - self.height) / 2;
                 chinese: root.chinese; backend: root.output-backend; rate: root.output-rate;
                 xruns: root.output-xruns; failed: root.state == 7; details: root.output;
                 clicked => { root.output-settings(); }
@@ -1602,8 +1650,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
     callback retry(); callback relink();
     /// The controller rejected typed transform input: bit 1 Pitch, bit 2 Rate.
     public function reject-input(fields: int) {
-        if Math.mod(fields, 2) == 1 { pitch-field.refuse(); }
-        if fields >= 2 { rate-field.refuse(); }
+        transforms.reject-input(fields);
     }
     in property <int> rejection-fields;
     in property <int> rejection-revision;
@@ -1773,26 +1820,10 @@ component WorkbenchAuditionPanel inherits Rectangle {
         }
         Rectangle { row: 0; col: 3; width: (root.narrow ? 398px : 440px) * Theme.ui-scale * root.font-factor; vertical-stretch: 1; min-height: max(64px * Theme.ui-scale, Theme.font(20) + 40px * Theme.ui-scale);
             transform-controls := HorizontalLayout { width: parent.width; height: max(32px * Theme.ui-scale, Theme.font(20) + 12px * Theme.ui-scale); y: max(0px, min((parent.height - self.height) / 2, parent.height - self.height - 24px * Theme.ui-scale)); spacing: 8px * Theme.ui-scale;
-                HorizontalLayout { spacing: 4px * Theme.ui-scale; horizontal-stretch: 0;
-                    Caption { text: root.chinese ? "音高" : "Pitch"; color: pitch-field.modified ? Theme.text(4, 4, Theme.accent-hover) : Theme.text(4, 1, Theme.dim); animate color { duration: Theme.motion-base; } }
-                    pitch-field := NumberField {
-                        width: 62px * Theme.ui-scale * max(1, Theme.ui-font-px / 13.0); enabled: root.ready; text <=> root.pitch-text;
-                        minimum: -24; maximum: 24; default-value: 0; step: 1; fine-step: 0.1;
-                        input-label: root.chinese ? "变调半音，回车或离开时应用" : "Pitch semitones, applied on Enter or focus loss";
-                        range-hint: root.chinese ? "音高范围 −24 ~ +24 半音" : "Pitch range −24 to +24 semitones";
-                        submit(value) => { root.transform(value, root.rate-text, root.mono, root.repeat); }
-                    }
-                }
-                HorizontalLayout { spacing: 4px * Theme.ui-scale; horizontal-stretch: 0;
-                    Caption { text: root.chinese ? "速度" : "Rate"; color: rate-field.modified ? Theme.text(4, 4, Theme.accent-hover) : Theme.text(4, 1, Theme.dim); animate color { duration: Theme.motion-base; } }
-                    rate-field := NumberField {
-                        width: 57px * Theme.ui-scale * max(1, Theme.ui-font-px / 13.0); enabled: root.ready; text <=> root.rate-text;
-                        minimum: 0.25; maximum: 4; default-value: 1; step: 0.05; fine-step: 0.01;
-                        input-label: root.chinese ? "保持音高的播放速度，回车或离开时应用" : "Pitch-preserving speed, applied on Enter or focus loss";
-                        range-hint: root.chinese ? "速度范围 0.25 ~ 4.00 倍" : "Rate range 0.25 to 4.00×";
-                        submit(value) => { root.transform(root.pitch-text, value, root.mono, root.repeat); }
-                    }
-                    Caption { text: "×"; }
+                transforms := TransformPair {
+                    y: (parent.height - self.height) / 2; chinese: root.chinese; enabled: root.ready;
+                    pitch-text <=> root.pitch-text; rate-text <=> root.rate-text;
+                    submit(pitch, rate) => { root.transform(pitch, rate, root.mono, root.repeat); }
                 }
                 Tool {
                     width: 28px * Theme.ui-scale; height: 32px * Theme.ui-scale; subtle: true; icon-size: 18px * Theme.ui-scale;
@@ -1806,17 +1837,18 @@ component WorkbenchAuditionPanel inherits Rectangle {
                     label: root.chinese ? "音量" : "Volume"; value <=> root.volume-db;
                     changed(value) => { root.volume(value); }
                 }
+                Caption { width: Theme.font(10) * 4.2; text: root.volume-label; font-size: Theme.font(10); }
             }
             HorizontalLayout { width: parent.width; height: 24px * Theme.ui-scale; y: min(parent.height - self.height, transform-controls.y + transform-controls.height + 2px * Theme.ui-scale); spacing: 3px * Theme.ui-scale;
                 OutputPill {
+                    y: (parent.height - self.height) / 2;
                     compact: true;
                     chinese: root.chinese; backend: root.output-backend; rate: root.output-rate; xruns: root.output-xruns;
                     failed: root.state == 7; details: root.output;
                     clicked => { root.output-settings(); }
                 }
-                Caption { text: root.volume-label; font-size: Theme.font(9); }
                 Rectangle { horizontal-stretch: 1; }
-                Tool { width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; icon-size: 16px * Theme.ui-scale; icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; enabled: pitch-field.modified || rate-field.modified; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+                Tool { width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; icon-size: 16px * Theme.ui-scale; icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; enabled: transforms.modified; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
                 MonitorModeButton {
                     height: 24px * Theme.ui-scale;
                     chinese: root.chinese; mono: root.mono; stereo-pair: root.stereo-pair;

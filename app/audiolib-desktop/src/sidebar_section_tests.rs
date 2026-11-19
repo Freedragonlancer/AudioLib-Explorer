@@ -16,11 +16,7 @@ fn cover_only_mode_shows_library_name_when_cover_is_missing() {
         ui.set_album_show_name(false);
         ui.set_album_show_count(false);
         settle();
-        let name_id = if modern {
-            "AppWindow::studio-album-cover-name"
-        } else {
-            "AppWindow::album-cover-name"
-        };
+        let name_id = "LibraryListRow::library-name";
         let fallback = ElementHandle::find_by_element_id(&ui, name_id)
             .next()
             .expect("missing cover displays its library name");
@@ -90,84 +86,88 @@ fn library_display_menu_toggles_fields_without_moving_the_library_view() {
 }
 
 #[test]
-fn library_card_stacks_cover_name_and_count_in_both_styles() {
-    i_slint_backend_testing::init_no_event_loop();
+fn library_row_keeps_the_thumbnail_name_and_count_on_one_line() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
     for modern in [false, true] {
-        let ui = window(true, 1440.0, 900.0, 1.0);
-        ui.global::<crate::Theme>().set_modern_style(modern);
-        assert!(ui.get_album_show_cover());
-        assert!(ui.get_album_show_name());
-        assert!(ui.get_album_show_count());
-        let row_id = if modern {
-            "AppWindow::studio-album-row"
+        let ui = window(true, 1080.0, 700.0, 1.0);
+        let theme = if modern {
+            audiolib_core::config::STUDIO_THEME
         } else {
-            "AppWindow::album-row"
+            audiolib_core::config::DEFAULT_THEME
         };
-        let cover_id = if modern {
-            "AppWindow::studio-album-cover"
-        } else {
-            "AppWindow::album-cover"
-        };
-        let name_id = if modern {
-            "AppWindow::studio-album-card-name"
-        } else {
-            "AppWindow::album-card-name"
-        };
-        let count_id = if modern {
-            "AppWindow::studio-album-card-count"
-        } else {
-            "AppWindow::album-card-count"
-        };
-        settle();
-        assert!(
-            ElementHandle::find_by_element_id(&ui, name_id)
-                .next()
-                .is_some(),
-            "the name must be visible in the default library pane"
-        );
-        assert!(
-            ElementHandle::find_by_element_id(&ui, count_id)
-                .next()
-                .is_some(),
-            "the count must be visible in the default library pane"
-        );
+        crate::theme::apply_theme(&ui, theme);
+        let mut albums = vec![ui.get_albums().row_data(0).unwrap()];
+        for (id, name, count) in [
+            ("72", "Concert Audiences", "4691"),
+            ("73", "Metal Construction Kit", "4896"),
+        ] {
+            albums.push(AlbumRow {
+                id: id.into(),
+                name: name.into(),
+                count: count.into(),
+                ..Default::default()
+            });
+        }
+        let cover = image::RgbaImage::from_fn(48, 48, |x, y| {
+            if x + y > 52 {
+                image::Rgba([84, 117, 116, 255])
+            } else {
+                image::Rgba([44, 60, 64, 255])
+            }
+        });
+        albums[0].cover = slint::Image::from_rgba8(slint::SharedPixelBuffer::clone_from_slice(
+            cover.as_raw(),
+            48,
+            48,
+        ));
+        ui.set_albums(ModelRc::new(VecModel::from(albums)));
         ui.set_folders_section_expanded(false);
         settle();
-        let regular = ElementHandle::find_by_element_id(&ui, row_id)
-            .next()
-            .expect("library row")
-            .size()
-            .height;
-        let cover = ElementHandle::find_by_element_id(&ui, cover_id)
-            .next()
-            .expect("large library cover");
-        let name = ElementHandle::find_by_element_id(&ui, name_id)
-            .next()
-            .expect("library name below cover");
-        let count = ElementHandle::find_by_element_id(&ui, count_id)
-            .next()
-            .expect("match count below name");
-        assert!(cover.size().width >= 100.0);
-        assert!(name.absolute_position().y >= cover.absolute_position().y + cover.size().height);
-        assert!(count.absolute_position().y >= name.absolute_position().y + name.size().height);
-        ui.set_album_show_name(false);
-        ui.set_album_show_count(false);
-        settle();
-        let cover_only = ElementHandle::find_by_element_id(&ui, row_id)
-            .next()
-            .expect("library row after changing display fields")
-            .size()
-            .height;
-        assert!(cover_only >= 100.0 && cover_only < regular);
+        let item = |id| ElementHandle::find_by_element_id(&ui, id).next().unwrap();
+        let cover = item("LibraryListRow::thumbnail");
+        let name = item("LibraryListRow::library-name");
+        let count = item("LibraryListRow::match-count");
+        assert!(cover.size().width <= 32.0);
+        assert_eq!(item("LibraryListRow::cover-image").size(), cover.size());
+        assert!(cover.absolute_position().x + cover.size().width <= name.absolute_position().x);
         assert!(
-            ElementHandle::find_by_element_id(&ui, name_id)
+            name.absolute_position().x + name.size().width <= count.absolute_position().x + 1.0
+        );
+        near(midpoint(&cover).y, midpoint(&name).y);
+        near(midpoint(&name).y, midpoint(&count).y);
+        assert_eq!(count.accessible_label().as_deref(), Some("120"));
+        save_sidebar_snapshot(
+            &ui,
+            if modern {
+                "list-studio.png"
+            } else {
+                "list-classic.png"
+            },
+        );
+        let left = cover.absolute_position().x;
+        ui.set_album_show_cover(false);
+        settle();
+        near(
+            item("LibraryListRow::library-name").absolute_position().x,
+            left,
+        );
+        ui.set_album_show_name(false);
+        settle();
+        assert!(
+            ElementHandle::find_by_element_id(&ui, "LibraryListRow::library-name")
                 .next()
                 .is_none()
         );
-        assert!(
-            ElementHandle::find_by_element_id(&ui, count_id)
-                .next()
-                .is_none()
+        assert_eq!(
+            item("LibraryListRow::match-count")
+                .accessible_label()
+                .as_deref(),
+            Some("120")
         );
         ui.hide().unwrap();
     }

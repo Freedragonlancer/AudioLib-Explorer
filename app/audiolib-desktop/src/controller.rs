@@ -9833,30 +9833,21 @@ mod tests {
             let transformed = transformed.clone();
             move |pitch, _, _, _| transformed.set(pitch == "7.00")
         });
-        let pitch = ElementHandle::find_by_accessible_label(
-            &ui,
-            "Pitch semitones, applied on Enter or focus loss",
-        )
-        .next()
-        .unwrap();
-        let rate = ElementHandle::find_by_accessible_label(
-            &ui,
-            "Pitch-preserving speed, applied on Enter or focus loss",
-        )
-        .next()
-        .unwrap();
+        let pitch = ElementHandle::find_by_accessible_label(&ui, "Adjust pitch")
+            .next()
+            .unwrap();
+        let rate = ElementHandle::find_by_accessible_label(&ui, "Adjust speed")
+            .next()
+            .unwrap();
         assert!(
             pitch.absolute_position().x + pitch.size().width <= rate.absolute_position().x,
             "Narrow input paint and hit regions must not overlap the next field"
         );
-        pitch.set_accessible_value("7.00");
         pitch.mock_single_click(PointerEventButton::Left);
-        ui.window().dispatch_event(WindowEvent::KeyPressed {
-            text: Key::Return.into(),
-        });
-        ui.window().dispatch_event(WindowEvent::KeyReleased {
-            text: Key::Return.into(),
-        });
+        let cents = ElementHandle::find_by_accessible_label(&ui, "Adjust pitch")
+            .find(|item| item.accessible_value_minimum() == Some(-2400.0))
+            .expect("pitch slider in the open popup");
+        cents.set_accessible_value("700");
         assert!(transformed.get());
         ui.hide().unwrap();
     }

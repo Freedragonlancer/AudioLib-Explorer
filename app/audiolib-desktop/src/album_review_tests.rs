@@ -17,13 +17,13 @@ fn wait_albums(fixture: &Fixture, count: usize) {
 }
 
 #[test]
-fn enlarged_sidebar_cover_keeps_enough_cached_pixels() {
-    isolated("album_review::child_enlarged_sidebar_cover");
+fn compact_sidebar_cover_downsamples_cached_artwork() {
+    isolated("album_review::child_compact_sidebar_cover");
 }
 
 #[test]
 #[ignore = "isolated sidebar cover resolution regression"]
-fn child_enlarged_sidebar_cover() {
+fn child_compact_sidebar_cover() {
     let fixture = fixture();
     let file = fixture
         .provider
@@ -72,8 +72,8 @@ fn child_enlarged_sidebar_cover() {
         .iter()
         .find(|row| row.name == "Large cover")
         .unwrap();
-    assert_eq!(row.cover.size().width, 256);
-    assert_eq!(row.cover.size().height, 256);
+    assert_eq!(row.cover.size().width, 96);
+    assert_eq!(row.cover.size().height, 96);
     finish(&fixture);
 }
 
