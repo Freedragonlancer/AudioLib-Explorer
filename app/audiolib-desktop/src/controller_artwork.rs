@@ -334,11 +334,28 @@ impl Controller {
         let c = self.clone();
         ui.on_artwork_cache_refresh_requested(move || c.refresh_artwork_cache_stats());
         let c = self.clone();
+        ui.on_artwork_precache_changed(move |enabled| {
+            c.pregenerate_album_artwork
+                .store(enabled, Ordering::Release);
+            *c.single_click_play_pending.lock().unwrap() = true;
+            c.single_click_play_wake.notify_one();
+            if enabled {
+                c.start_artwork_precache();
+            } else {
+                c.cancel_artwork_precache();
+            }
+        });
+        let c = self.clone();
+        ui.on_artwork_precache_cancel_requested(move || c.cancel_artwork_precache());
+        let c = self.clone();
         ui.on_artwork_enabled_requested(move |enabled| {
             if !c.available() {
                 return;
             }
             c.cancel_artwork();
+            if !enabled {
+                c.cancel_artwork_precache();
+            }
             c.show_album_artwork.store(enabled, Ordering::Release);
             *c.single_click_play_pending.lock().unwrap() = true;
             c.single_click_play_wake.notify_one();
@@ -352,6 +369,9 @@ impl Controller {
                     c.queue_artwork(&file);
                 }
                 c.request_search(&ui, true, false);
+                if enabled {
+                    c.start_artwork_precache();
+                }
             }
         });
         let c = self.clone();

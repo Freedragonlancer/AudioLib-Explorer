@@ -3,9 +3,102 @@
 use crate::{AlbumRow, AppWindow, FolderRow};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
 use slint::{
-    ComponentHandle, ModelRc, VecModel, platform::PointerEventButton, platform::WindowEvent,
+    ComponentHandle, Model, ModelRc, VecModel, platform::PointerEventButton, platform::WindowEvent,
 };
 use std::{cell::Cell, rc::Rc, time::Duration};
+
+#[test]
+fn cover_only_mode_shows_library_name_when_cover_is_missing() {
+    i_slint_backend_testing::init_no_event_loop();
+    for modern in [false, true] {
+        let ui = window(true, 1440.0, 900.0, 1.0);
+        ui.global::<crate::Theme>().set_modern_style(modern);
+        ui.set_album_show_name(false);
+        ui.set_album_show_count(false);
+        settle();
+        let name_id = if modern {
+            "AppWindow::studio-album-cover-name"
+        } else {
+            "AppWindow::album-cover-name"
+        };
+        let fallback = ElementHandle::find_by_element_id(&ui, name_id)
+            .next()
+            .expect("missing cover displays its library name");
+        assert_eq!(
+            fallback.accessible_label().as_deref(),
+            Some("Fixture library")
+        );
+
+        let mut row = ui.get_albums().row_data(0).unwrap();
+        row.cover =
+            slint::Image::from_rgba8(slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(8, 8));
+        ui.set_albums(ModelRc::new(VecModel::from(vec![row])));
+        settle();
+        assert!(
+            ElementHandle::find_by_element_id(&ui, name_id)
+                .next()
+                .is_none()
+        );
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
+fn library_display_menu_toggles_fields_without_moving_the_library_view() {
+    i_slint_backend_testing::init_no_event_loop();
+    for modern in [false, true] {
+        let ui = window(true, 1440.0, 900.0, 1.0);
+        ui.global::<crate::Theme>().set_modern_style(modern);
+        settle();
+        let button = labelled(&ui, "选择音效库显示内容");
+        let before = button.absolute_position();
+        click(&ui, &button);
+        let count = labelled(&ui, "匹配数量");
+        count.invoke_accessible_default_action();
+        settle();
+        assert!(!ui.get_album_show_count());
+        let name = labelled(&ui, "厂牌名字");
+        name.invoke_accessible_default_action();
+        settle();
+        assert!(!ui.get_album_show_name());
+        assert!(ui.get_album_show_cover());
+        assert_eq!(button.absolute_position(), before);
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
+fn cover_only_library_view_enlarges_the_cover_in_both_styles() {
+    i_slint_backend_testing::init_no_event_loop();
+    for modern in [false, true] {
+        let ui = window(true, 1440.0, 900.0, 1.0);
+        ui.global::<crate::Theme>().set_modern_style(modern);
+        settle();
+        assert!(ui.get_album_show_cover());
+        assert!(ui.get_album_show_name());
+        assert!(ui.get_album_show_count());
+        let row_id = if modern {
+            "AppWindow::studio-album-row"
+        } else {
+            "AppWindow::album-row"
+        };
+        let regular = ElementHandle::find_by_element_id(&ui, row_id)
+            .next()
+            .expect("library row")
+            .size()
+            .height;
+        ui.set_album_show_name(false);
+        ui.set_album_show_count(false);
+        settle();
+        let enlarged = ElementHandle::find_by_element_id(&ui, row_id)
+            .next()
+            .expect("library row after changing display fields")
+            .size()
+            .height;
+        assert!(enlarged >= 100.0 && enlarged > regular * 3.0);
+        ui.hide().unwrap();
+    }
+}
 
 #[test]
 fn software_rendered_chevrons_follow_each_section_disclosure_state() {

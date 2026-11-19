@@ -55,6 +55,13 @@ pub struct WindowLayoutPreferences {
     /// Whether the library/album section is expanded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub libraries_section_expanded: Option<bool>,
+    /// Visible fields in each library sidebar row; absent keeps the original view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album_show_cover: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album_show_name: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album_show_count: Option<bool>,
     /// Folder list share while both sections are expanded, independent of UI scale.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folders_section_ratio: Option<f32>,
@@ -101,6 +108,9 @@ impl WindowLayoutPreferences {
             filters_visible: flag("filters_visible"),
             folders_section_expanded: flag("folders_section_expanded"),
             libraries_section_expanded: flag("libraries_section_expanded"),
+            album_show_cover: flag("album_show_cover"),
+            album_show_name: flag("album_show_name"),
+            album_show_count: flag("album_show_count"),
             folders_section_ratio: number("folders_section_ratio").map(|value| value as f32),
         }
         .normalized()
@@ -126,6 +136,14 @@ impl WindowLayoutPreferences {
             (Some(x), Some(y)) => (Some(x), Some(y)),
             _ => (None, None),
         };
+        let album_show_cover = if self.album_show_cover == Some(false)
+            && self.album_show_name == Some(false)
+            && self.album_show_count == Some(false)
+        {
+            Some(true)
+        } else {
+            self.album_show_cover
+        };
         Self {
             width: edge(self.width, WINDOW_MIN_WIDTH),
             height: edge(self.height, WINDOW_MIN_HEIGHT),
@@ -139,6 +157,9 @@ impl WindowLayoutPreferences {
             filters_visible: self.filters_visible,
             folders_section_expanded: self.folders_section_expanded,
             libraries_section_expanded: self.libraries_section_expanded,
+            album_show_cover,
+            album_show_name: self.album_show_name,
+            album_show_count: self.album_show_count,
             folders_section_ratio: pane(self.folders_section_ratio, FOLDERS_SECTION_RATIO_RANGE),
         }
     }
@@ -267,6 +288,9 @@ mod tests {
             filters_visible: Some(true),
             folders_section_expanded: Some(false),
             libraries_section_expanded: Some(true),
+            album_show_cover: Some(true),
+            album_show_name: Some(false),
+            album_show_count: Some(false),
             folders_section_ratio: Some(0.7),
         };
         let text = serde_json::to_string(&layout).unwrap();
@@ -280,6 +304,27 @@ mod tests {
         assert_eq!(value, json!({"maximized": false}));
         let parsed: WindowLayoutPreferences = serde_json::from_value(value).unwrap();
         assert_eq!(parsed, WindowLayoutPreferences::default());
+    }
+
+    #[test]
+    fn library_display_fields_restore_without_leaving_an_empty_row() {
+        let cover_only = WindowLayoutPreferences::from_value(&json!({
+            "album_show_cover": true,
+            "album_show_name": false,
+            "album_show_count": false
+        }));
+        assert_eq!(cover_only.album_show_cover, Some(true));
+        assert_eq!(cover_only.album_show_name, Some(false));
+        assert_eq!(cover_only.album_show_count, Some(false));
+        let saved = serde_json::to_value(&cover_only).unwrap();
+        assert_eq!(WindowLayoutPreferences::from_value(&saved), cover_only);
+
+        let empty = WindowLayoutPreferences::from_value(&json!({
+            "album_show_cover": false,
+            "album_show_name": false,
+            "album_show_count": false
+        }));
+        assert_eq!(empty.album_show_cover, Some(true));
     }
 
     #[test]

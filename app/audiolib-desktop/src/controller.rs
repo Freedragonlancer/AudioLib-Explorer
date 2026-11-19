@@ -34,7 +34,7 @@ use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffe
 // configurable visible page. Never send a 1000-row UI request with a 200-row cursor.
 const PAGE_SIZE: usize = 200;
 const MAX_RESULT_WINDOW_ROWS: usize = audiolib_core::config::MAX_SEARCH_PAGE_SIZE as usize;
-/// Sidebar album covers are read only for the first rows; later rows show text only.
+/// By default, only the first sidebar covers are read on each search.
 const ALBUM_THUMBNAILS: usize = 12;
 const HISTORY_SIZE: usize = 50;
 /// Owned scan presentation can be regenerated after a runtime language change.
@@ -202,6 +202,8 @@ fn table_preferences(ui: &AppWindow) -> AudioTablePreferences {
 mod artwork_album_hints;
 #[path = "controller_artwork.rs"]
 mod artwork_controller;
+#[path = "artwork_precache.rs"]
+mod artwork_precache;
 #[cfg(test)]
 #[path = "click_preview_tests.rs"]
 mod click_preview_tests;
@@ -828,6 +830,9 @@ pub struct Controller {
     single_click_play: AtomicBool,
     stop_playback_on_focus_loss: AtomicBool,
     show_album_artwork: AtomicBool,
+    pregenerate_album_artwork: AtomicBool,
+    artwork_precache_busy: AtomicBool,
+    artwork_precache_cancel: Mutex<Arc<AtomicBool>>,
     /// Latest table layout, captured on the event loop and saved by the preferences worker.
     audio_table: Mutex<AudioTablePreferences>,
     task_workspace: Mutex<search_tasks::TaskWorkspaceState>,
@@ -1085,6 +1090,7 @@ impl Controller {
         ui.set_focus_loss_stop_supported(cfg!(any(windows, target_os = "macos")));
         ui.set_pregenerate_list_waveforms(config.pregenerate_list_waveforms);
         ui.set_artwork_enabled(config.show_album_artwork);
+        ui.set_artwork_precache_enabled(config.pregenerate_album_artwork);
         ui.set_hold_list_waveform_batches(config.hold_list_waveform_batches_after_audition);
         apply_ui_scale(ui, config.ui_scale_percent);
         crate::window_layout::restore_panes(ui, &config.window_layout);
@@ -1147,6 +1153,9 @@ impl Controller {
             single_click_play: AtomicBool::new(config.audition_play_on_single_click),
             stop_playback_on_focus_loss: AtomicBool::new(config.stop_playback_on_focus_loss),
             show_album_artwork: AtomicBool::new(config.show_album_artwork),
+            pregenerate_album_artwork: AtomicBool::new(config.pregenerate_album_artwork),
+            artwork_precache_busy: AtomicBool::new(false),
+            artwork_precache_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             list_waveforms: ListWaveforms::new(config.pregenerate_list_waveforms)
                 .with_hold_after_audition(config.hold_list_waveform_batches_after_audition),
             pregenerate_list_waveforms: AtomicBool::new(config.pregenerate_list_waveforms),
@@ -1278,6 +1287,7 @@ impl Controller {
         controller.request_search(ui, true, true);
         controller.init_remote(remote);
         controller.init_search_workspace();
+        controller.start_artwork_precache();
         controller.find_metadata_recovery();
         controller
     }
@@ -2880,6 +2890,15 @@ impl Controller {
                                     retain_search,
                                 );
                             }
+                            if matches!(
+                                operation,
+                                LibraryOperation::Switch { .. }
+                                    | LibraryOperation::DataSource(_)
+                                    | LibraryOperation::LocalSource(_)
+                                    | LibraryOperation::Restore(_)
+                            ) {
+                                c2.start_artwork_precache();
+                            }
                             crate::diagnostics::record(if retain_search {
                                 crate::diagnostics::Event::SnapshotRefreshed
                             } else {
@@ -3421,6 +3440,8 @@ impl Controller {
                         config.stop_playback_on_focus_loss =
                             c.stop_playback_on_focus_loss.load(Ordering::Acquire);
                         config.show_album_artwork = c.show_album_artwork.load(Ordering::Acquire);
+                        config.pregenerate_album_artwork =
+                            c.pregenerate_album_artwork.load(Ordering::Acquire);
                         config.pregenerate_list_waveforms =
                             c.pregenerate_list_waveforms.load(Ordering::Acquire);
                         config.hold_list_waveform_batches_after_audition =
@@ -4697,11 +4718,18 @@ impl Controller {
         // independent artwork worker. slint::Image is not Send, so pixels cross to
         // the event loop and images are built there.
         let mut rows = Vec::with_capacity(albums.len());
-        for (index, facet) in albums.into_iter().enumerate() {
+        let mut visible_index = 0;
+        for facet in albums {
             if !current() {
                 return;
             }
-            let thumbnail = self.album_thumbnail(&provider, &facet.album, index);
+            let thumbnail = if facet.album.kind == AlbumKind::Metadata {
+                let thumbnail = self.album_thumbnail(&provider, &facet.album, visible_index);
+                visible_index += 1;
+                thumbnail
+            } else {
+                None
+            };
             rows.push((facet.album, facet.matching_count, thumbnail));
         }
         let generation = job.generation;
@@ -4720,6 +4748,7 @@ impl Controller {
             );
             let rows: Vec<AlbumRow> = rows
                 .into_iter()
+                .filter(|(album, _, _)| album.kind == AlbumKind::Metadata)
                 .map(|(album, count, thumbnail)| AlbumRow {
                     id: album.id.to_string().into(),
                     name: album.name.into(),
@@ -7932,6 +7961,7 @@ impl Controller {
             tracing::warn!(%error, "Save artwork settings during shutdown");
         }
         self.shutdown.store(true, Ordering::Release);
+        self.cancel_artwork_precache();
         self.slice_preview_jobs.wake_shutdown();
         self.slice_render_jobs.wake_shutdown();
         self.cancel_artwork();
@@ -8016,6 +8046,7 @@ impl Controller {
         config.stop_playback_on_focus_loss =
             self.stop_playback_on_focus_loss.load(Ordering::Acquire);
         config.show_album_artwork = self.show_album_artwork.load(Ordering::Acquire);
+        config.pregenerate_album_artwork = self.pregenerate_album_artwork.load(Ordering::Acquire);
         config.pregenerate_list_waveforms = self.pregenerate_list_waveforms.load(Ordering::Acquire);
         config.hold_list_waveform_batches_after_audition =
             self.hold_list_waveform_batches.load(Ordering::Acquire);
@@ -10312,6 +10343,7 @@ mod tests {
             stop_playback_on_focus_loss: false,
             play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
             show_album_artwork: true,
+            pregenerate_album_artwork: false,
             slice_export_directory: None,
             max_search_tasks: 6,
             pregenerate_list_waveforms: false,
