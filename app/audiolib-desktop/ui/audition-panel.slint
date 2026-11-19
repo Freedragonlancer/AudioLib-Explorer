@@ -1296,8 +1296,8 @@ component ClassicAuditionPanel inherits Rectangle {
                     }
                     ClassicTool {
                         height: 28px * Theme.ui-scale; primary: root.transport-ready && root.state == 3;
-                        primary-tone: Theme.modern-style ? Theme.primary-button : Theme.mint;
-                        primary-hover-tone: Theme.modern-style ? Theme.primary-button-hover : Theme.mint.brighter(0.15);
+                        primary-tone: Theme.accent-controls ? Theme.primary-button : Theme.mint;
+                        primary-hover-tone: Theme.accent-controls ? Theme.primary-button-hover : Theme.mint.brighter(0.15);
                         icon: @image-url("icons/pause.svg");
                         label: root.chinese ? "暂停" : "Pause"; tip-align: -1; checkable: true;
                         active: root.transport-ready && root.state == 4;

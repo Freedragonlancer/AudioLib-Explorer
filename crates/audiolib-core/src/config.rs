@@ -596,12 +596,14 @@ pub fn normalize_ui_scale_percent(percent: u32) -> u32 {
     }
 }
 
-/// Identifier of the built-in default theme (the original palette).
+/// Identifier of the built-in default theme.
 pub const DEFAULT_THEME: &str = "default";
 /// Identifier of the opt-in Studio theme, with the redesigned audition controls.
 pub const STUDIO_THEME: &str = "studio";
 /// Identifier of the Studio workbench with the original default audition controls.
 pub const DEFAULT_V2_THEME: &str = "default-v2";
+/// Identifier of the Classic workbench and player with the v1.0.3 default palette.
+pub const JADE_CLASSIC_THEME: &str = "jade-classic";
 
 /// Library workbench presentation selected independently of audition controls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -635,8 +637,8 @@ pub struct BuiltinTheme {
     pub player_style: PlayerStyle,
 }
 
-/// Single registry of shipped themes, with the original default first.
-pub const BUILTIN_THEMES: [BuiltinTheme; 6] = [
+/// Single registry of shipped themes, with the default first.
+pub const BUILTIN_THEMES: [BuiltinTheme; 7] = [
     BuiltinTheme {
         id: DEFAULT_THEME,
         name: "Default",
@@ -677,6 +679,13 @@ pub const BUILTIN_THEMES: [BuiltinTheme; 6] = [
         name: "Warm amber",
         name_cn: "暖砂琥珀",
         workbench_style: WorkbenchStyle::Studio,
+        player_style: PlayerStyle::Classic,
+    },
+    BuiltinTheme {
+        id: JADE_CLASSIC_THEME,
+        name: "Jade Classic",
+        name_cn: "青碧经典",
+        workbench_style: WorkbenchStyle::Classic,
         player_style: PlayerStyle::Classic,
     },
 ];
