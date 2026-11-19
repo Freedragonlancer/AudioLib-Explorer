@@ -32,6 +32,7 @@ export global Theme {
     // Studio keeps its artwork; the recommended palettes paint solid surfaces.
     in-out property <bool> pure-black-workspace: false;
     in-out property <bool> tinted-surfaces: false;
+    in-out property <bool> classic-accent-controls: false;
     out property <float> workbench-backdrop-opacity: Theme.tinted-surfaces ? 0 : Theme.modern-player ? 1.0 : 0.22;
     // GUI scale factor selected by the interface Appearance setting.
     // Literal lengths are written as `Npx * Theme.ui-scale`. 0px and 1px hairlines
@@ -110,9 +111,10 @@ export global Theme {
     out property <image> player-backdrop: Theme.modern-player ? Theme.studio-player : Theme.empty-backdrop;
     out property <image> transport-backdrop: Theme.modern-player ? Theme.studio-transport : Theme.empty-backdrop;
     out property <image> tab-indicator: Theme.modern-style ? Theme.studio-tab-indicator : Theme.empty-backdrop;
-    out property <color> primary-button: Theme.modern-style ? Theme.accent : Theme.dim;
-    out property <color> primary-button-hover: Theme.modern-style ? Theme.accent-hover : Theme.ink;
-    out property <color> navigation-ink: Theme.modern-style ? Theme.accent : Theme.ink;
+    out property <bool> accent-controls: Theme.modern-style || Theme.classic-accent-controls;
+    out property <color> primary-button: Theme.accent-controls ? Theme.accent : Theme.dim;
+    out property <color> primary-button-hover: Theme.accent-controls ? Theme.accent-hover : Theme.ink;
+    out property <color> navigation-ink: Theme.accent-controls ? Theme.accent : Theme.ink;
     out property <color> toolbar-surface: Theme.modern-player ? #28282a : Theme.bg;
     out property <color> rail-surface: Theme.modern-player ? #2a2b2e : Theme.panel;
     out property <color> library-surface: Theme.pure-black-workspace ? Theme.bg : (Theme.modern-player ? #202224 : Theme.panel);

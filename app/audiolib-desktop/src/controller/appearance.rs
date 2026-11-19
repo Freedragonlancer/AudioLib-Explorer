@@ -117,10 +117,15 @@ impl Controller {
         ui.on_text_colors_reset(move || c.reset_text_colors());
         let c = self.clone();
         ui.on_recommended_theme_requested(move |index| {
-            if !c.available() || ![0, 2, 3, 4, 5].contains(&index) {
+            if !c.available() {
                 return;
             }
-            if let Some(ui) = c.ui.upgrade() {
+            if let Some(ui) = c.ui.upgrade()
+                && ui
+                    .get_recommended_themes()
+                    .iter()
+                    .any(|card| card.index == index)
+            {
                 c.appearance.lock().unwrap().text_colors.clear();
                 ui.invoke_theme_requested(index);
                 c.queue_appearance_save(&ui);

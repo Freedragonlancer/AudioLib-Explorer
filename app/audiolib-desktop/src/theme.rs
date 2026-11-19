@@ -5,8 +5,8 @@
 //! with the interface scale.
 use crate::AppWindow;
 use audiolib_core::config::{
-    BUILTIN_THEMES, DEFAULT_THEME, DEFAULT_V2_THEME, PlayerStyle, THEME_IDS, WorkbenchStyle,
-    clamp_font_size, normalize_theme,
+    BUILTIN_THEMES, DEFAULT_THEME, DEFAULT_V2_THEME, JADE_CLASSIC_THEME, PlayerStyle, THEME_IDS,
+    WorkbenchStyle, clamp_font_size, normalize_theme,
 };
 use slint::{Color, ComponentHandle, Image, ModelRc, SharedString, VecModel};
 
@@ -69,6 +69,37 @@ pub(crate) const DEFAULT_PALETTE: Palette = Palette {
     player: 0xff21_2223,
     player_border: 0xff44_4544,
     tooltip: 0xff18_191a,
+    overlay: 0xa800_0000,
+};
+
+/// The original default palette from v1.0.3.
+const JADE_CLASSIC_PALETTE: Palette = Palette {
+    bg: 0xff18_1b20,
+    panel: 0xff20_242a,
+    raised: 0xff2a_3037,
+    hover: 0xff35_3d45,
+    border: 0xff35_3d45,
+    strong_border: 0xff69_7581,
+    ink: 0xffd9_dee3,
+    dim: 0xffaa_b2bd,
+    muted: 0xff95_a0ac,
+    accent: 0xff8f_aea6,
+    accent_hover: 0xffa8_c3bb,
+    mint: 0xff8f_aea6,
+    apricot: 0xffc3_b48e,
+    coral: 0xffcf_9696,
+    on_accent: 0xff20_2b28,
+    selected: 0xff2b_3a38,
+    checked: 0xff35_4744,
+    alternate: 0xff22_282e,
+    warning: 0xffc3_b48e,
+    trough: 0xff15_181c,
+    segment: 0xff3a_434c,
+    danger: 0xffcf_9696,
+    danger_surface: 0xff3a_2a2d,
+    player: 0xff23_2a30,
+    player_border: 0xff46_5059,
+    tooltip: 0xff14_171c,
     overlay: 0xa800_0000,
 };
 
@@ -227,6 +258,7 @@ const AMBER_PALETTE: Palette = Palette {
 fn palette_for(id: &str) -> &'static Palette {
     match id {
         DEFAULT_V2_THEME => &DEFAULT_V2_PALETTE,
+        JADE_CLASSIC_THEME => &JADE_CLASSIC_PALETTE,
         "studio" => &STUDIO_PALETTE,
         "obsidian" => &OBSIDIAN_PALETTE,
         "ocean" => &OCEAN_PALETTE,
@@ -271,6 +303,13 @@ fn recommended_themes() -> ModelRc<crate::ThemePreview> {
             "经典默认",
             "Graphite and amber",
             "石墨灰底色，琥珀色搜索与焦点",
+        ),
+        (
+            JADE_CLASSIC_THEME,
+            "Jade Classic",
+            "青碧经典",
+            "v1.0.3 original palette",
+            "v1.0.3 原版配色",
         ),
     ]
     .into_iter()
@@ -347,6 +386,7 @@ pub(crate) fn apply_theme(ui: &AppWindow, id: &str) {
     }
     theme.set_modern_style(modern_style);
     theme.set_modern_player(modern_player);
+    theme.set_classic_accent_controls(entry.id == JADE_CLASSIC_THEME);
     theme.set_tinted_surfaces(tinted_surfaces);
     theme.set_pure_black_workspace(entry.id == "obsidian");
     let color = Color::from_argb_encoded;

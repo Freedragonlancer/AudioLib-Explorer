@@ -89,7 +89,7 @@ component Action inherits Rectangle {
     background: root.primary ? (hit.pressed ? Theme.primary-button.darker(0.12) : hit.has-hover ? Theme.primary-button-hover : Theme.primary-button)
         : Theme.interactive-fill(root.active, hit.has-hover, hit.pressed, root.subtle ? transparent : Theme.raised);
     border-width: 1px;
-    border-color: button-focus.has-focus ? Theme.accent-hover : root.active && Theme.modern-style ? Theme.accent : root.active || hit.has-hover ? Theme.strong-border : (root.subtle ? transparent : Theme.border);
+    border-color: button-focus.has-focus ? Theme.accent-hover : root.active && Theme.accent-controls ? Theme.accent : root.active || hit.has-hover ? Theme.strong-border : (root.subtle ? transparent : Theme.border);
     animate background, border-color { duration: Theme.motion-fast; easing: ease-out; }
     opacity: root.enabled ? 1 : 0.42;
     if root.icon.width > 0: Image {
@@ -3047,7 +3047,7 @@ main-scroll := ScrollView {
             }
             classic-search-group := Rectangle { horizontal-stretch: 3; min-width: clamp(root.width - 1040px * Theme.ui-scale, 360px * Theme.ui-scale, 500px * Theme.ui-scale); preferred-width: 560px * Theme.ui-scale; max-width: 720px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: search-input.has-focus || root.ai-visible ? Theme.accent : Theme.border;
                 HorizontalLayout { padding: 5px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-                    Image { width: 20px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: search-input.has-focus ? Theme.accent : Theme.dim; image-fit: contain; }
+                    Image { width: 20px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: Theme.classic-accent-controls || search-input.has-focus ? Theme.accent : Theme.dim; image-fit: contain; }
                     search-input := LineEdit { text-module: 1; horizontal-stretch: 1; min-width: 70px * Theme.ui-scale; enabled: !root.background-blocked; text <=> root.search-entry-text;
                         input-label: root.ai-visible ? (root.chinese ? "AI 声音描述" : "AI sound description") : (root.chinese ? "搜索关键词" : "Search keywords");
                         placeholder-text: root.ai-visible ? (root.chinese ? "描述声音，例如科幻爆炸…" : "Describe a sound, e.g. sci-fi explosion…") : (root.chinese ? "搜索声音、标签和源文件 Metadata…" : "Search sounds, tags and source Metadata…");

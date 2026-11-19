@@ -1000,7 +1000,9 @@ fn theme_switch_does_not_replay_expired_or_classic_input_rejections() {
 fn view_theme_menu_keyboard_selection_applies_the_requested_style() {
     use crate::theme::{apply_theme, theme_id, theme_index};
     use crate::ui_tests::{open_menu, send_keys};
-    use audiolib_core::config::{DEFAULT_THEME, DEFAULT_V2_THEME, STUDIO_THEME};
+    use audiolib_core::config::{
+        DEFAULT_THEME, DEFAULT_V2_THEME, JADE_CLASSIC_THEME, STUDIO_THEME,
+    };
     use slint::platform::Key;
     use std::{cell::Cell, rc::Rc};
 
@@ -1009,6 +1011,9 @@ fn view_theme_menu_keyboard_selection_applies_the_requested_style() {
         let ui = AppWindow::new().unwrap();
         ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
         ui.set_chinese(chinese);
+        ui.set_rows(synthetic_rows());
+        ui.set_folders(synthetic_folders());
+        ui.set_selected_row(0);
         apply_theme(&ui, DEFAULT_THEME);
         let requests = Rc::new(Cell::new(0));
         ui.on_theme_requested({
@@ -1021,9 +1026,14 @@ fn view_theme_menu_keyboard_selection_applies_the_requested_style() {
         });
         ui.show().unwrap();
         let language = if chinese { "cn" } else { "en" };
-        for (step, id) in [STUDIO_THEME, DEFAULT_V2_THEME, DEFAULT_THEME]
-            .into_iter()
-            .enumerate()
+        for (step, id) in [
+            STUDIO_THEME,
+            DEFAULT_V2_THEME,
+            JADE_CLASSIC_THEME,
+            DEFAULT_THEME,
+        ]
+        .into_iter()
+        .enumerate()
         {
             open_menu(&ui, if chinese { "视图" } else { "View" });
             // Theme is the first View command; Right enters its registered choices.
@@ -1035,14 +1045,17 @@ fn view_theme_menu_keyboard_selection_applies_the_requested_style() {
             send_keys(&ui, &[Key::Return.into()]);
             assert_eq!(requests.get(), step + 1);
             assert_eq!(ui.get_theme_index(), theme_index(id));
+            let theme = ui.global::<crate::Theme>();
             assert_eq!(
-                ui.global::<crate::Theme>().get_modern_style(),
-                id != DEFAULT_THEME
+                theme.get_modern_style(),
+                matches!(id, STUDIO_THEME | DEFAULT_V2_THEME)
             );
-            assert_eq!(
-                ui.global::<crate::Theme>().get_modern_player(),
-                id == STUDIO_THEME
-            );
+            assert_eq!(theme.get_modern_player(), id == STUDIO_THEME);
+            if id == JADE_CLASSIC_THEME {
+                assert_eq!(theme.get_primary_button().as_argb_encoded(), 0xff8f_aea6);
+                assert_eq!(theme.get_navigation_ink(), theme.get_primary_button());
+                assert_eq!(theme.get_selected().as_argb_encoded(), 0xff2b_3a38);
+            }
             assert!(
                 !ui.get_settings_visible(),
                 "theme switching needs no dialog"

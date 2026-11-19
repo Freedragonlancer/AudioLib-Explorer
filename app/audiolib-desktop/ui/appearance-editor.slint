@@ -94,7 +94,7 @@ export component AppearanceEditor inherits Rectangle {
     in property <string> message;
     in-out property <bool> advanced-open: false;
     private property <bool> manage-open: false;
-    out property <bool> has-focus: first-theme.has-focus || original-theme.has-focus || advanced-toggle.has-focus;
+    out property <bool> has-focus: first-theme.has-focus || original-theme.has-focus || jade-theme.has-focus || advanced-toggle.has-focus;
     forward-focus: first-theme;
     callback theme-selected(int);
     callback font-selected(string);
@@ -123,6 +123,7 @@ export component AppearanceEditor inherits Rectangle {
         ThemeCard { preview: root.recommendations[3]; chinese: root.chinese; enabled: root.enabled; selected: root.theme-index == self.preview.index; chosen => { root.theme-selected(self.preview.index); } }
     }
     original-theme := ThemeCard { compact: true; preview: root.recommendations[4]; chinese: root.chinese; enabled: root.enabled; selected: root.theme-index == self.preview.index; chosen => { root.theme-selected(self.preview.index); } }
+    jade-theme := ThemeCard { compact: true; preview: root.recommendations[5]; chinese: root.chinese; enabled: root.enabled; selected: root.theme-index == self.preview.index; chosen => { root.theme-selected(self.preview.index); } }
     if root.customized: Hint { text: root.chinese ? "当前含自定义文字颜色。选择推荐主题可恢复整套配色，字体保留。" : "Custom text colors are active. A recommended theme restores its palette and keeps your font."; }
     advanced-toggle := Button {
         enabled: root.enabled;
