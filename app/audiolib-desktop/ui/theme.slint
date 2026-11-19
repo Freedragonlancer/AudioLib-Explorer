@@ -178,6 +178,7 @@ export component ThemedSlider inherits Rectangle {
         if next != root.value {
             root.value = next;
             root.changed(next);
+            root.released(next);
         }
     }
     native := Slider {

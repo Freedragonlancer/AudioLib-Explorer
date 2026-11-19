@@ -710,6 +710,117 @@ fn classic_transport_pointer_gesture_cannot_cross_disabled_state_transitions() {
     }
 }
 
+// Slint's embedded popup exposes its controls in popup-local coordinates.
+fn transform_popup_point(
+    ui: &AppWindow,
+    anchor: &ElementHandle,
+    item: &ElementHandle,
+) -> slint::LogicalPosition {
+    let surface = ElementHandle::find_by_element_id(ui, "TransformField::editor-surface")
+        .next()
+        .expect("open transform editor");
+    let local = control_center(item);
+    let trigger = anchor.absolute_position();
+    slint::LogicalPosition::new(
+        trigger.x + local.x,
+        trigger.y - surface.size().height - 4.0 * ui.global::<crate::Theme>().get_ui_scale()
+            + local.y,
+    )
+}
+
+fn click_transform_value(ui: &AppWindow, anchor: &ElementHandle, editor: &ElementHandle) {
+    let point = transform_popup_point(ui, anchor, editor);
+    pointer_down(ui, point);
+    pointer_up(ui, point);
+}
+
+#[test]
+fn transform_popups_apply_integer_cents_and_speed_in_both_themes() {
+    init_backend();
+    for (theme, snapshot) in [(DEFAULT_THEME, "classic"), (STUDIO_THEME, "studio")] {
+        let ui = fixture(false);
+        apply_theme(&ui, theme);
+        ui.show().unwrap();
+        frame(&ui, &format!("{snapshot}-transport"));
+        let submissions = Rc::new(RefCell::new(Vec::new()));
+        let seen = submissions.clone();
+        ui.on_transform_requested(move |pitch, rate, _, _| seen.borrow_mut().push((pitch, rate)));
+
+        let pitch = player_action(&ui, "Adjust pitch");
+        assert_eq!(pitch.accessible_value().as_deref(), Some("300 ct"));
+        let anchor = pitch.absolute_position();
+        pitch.mock_single_click(PointerEventButton::Left);
+        frame(&ui, &format!("{snapshot}-pitch-popup"));
+        assert_eq!(pitch.absolute_position(), anchor);
+        let edit = ElementHandle::find_by_accessible_label(&ui, "Exact cents")
+            .next()
+            .unwrap();
+        click_transform_value(&ui, &pitch, &edit);
+        edit.set_accessible_value("-123.5");
+        key(&ui, Key::Return.into());
+        assert!(submissions.borrow().is_empty());
+        edit.set_accessible_value("");
+        for digit in ["-", "1", "2", "3"] {
+            key(&ui, digit.into());
+        }
+        key(&ui, Key::Return.into());
+        assert_eq!(ui.get_pitch_text().as_str(), "-1.23");
+        assert_eq!(pitch.accessible_value().as_deref(), Some("-123 ct"));
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "Exact cents")
+                .next()
+                .is_none(),
+            "Enter commits and leaves the popup closed"
+        );
+
+        let rate = player_action(&ui, "Adjust speed");
+        rate.mock_single_click(PointerEventButton::Left);
+        let slider = ElementHandle::find_by_accessible_label(&ui, "Adjust speed")
+            .find(|item| item.accessible_value_minimum() == Some(0.25))
+            .unwrap();
+        let point = transform_popup_point(&ui, &rate, &slider);
+        pointer_down(&ui, point);
+        assert_eq!(submissions.borrow().len(), 1, "Drag only previews");
+        pointer_up(&ui, point);
+        assert_eq!(submissions.borrow().len(), 2, "Release applies once");
+        let edit = ElementHandle::find_by_accessible_label(&ui, "Exact speed")
+            .next()
+            .unwrap();
+        click_transform_value(&ui, &rate, &edit);
+        edit.set_accessible_value("1.37");
+        key(&ui, Key::Return.into());
+        assert_eq!(ui.get_speed_text().as_str(), "1.37");
+        assert_eq!(submissions.borrow().last().unwrap().0.as_str(), "-1.23");
+        rate.mock_single_click(PointerEventButton::Left);
+        let edit = ElementHandle::find_by_accessible_label(&ui, "Exact speed")
+            .next()
+            .unwrap();
+        click_transform_value(&ui, &rate, &edit);
+        edit.set_accessible_value("3.00");
+        key(&ui, Key::Escape.into());
+        assert_eq!(ui.get_speed_text().as_str(), "1.37");
+        ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+        ui.set_chinese(true);
+        ui.set_pitch_text("0.00".into());
+        ui.set_speed_text("1.00".into());
+        frame(&ui, &format!("{snapshot}-compact-transport"));
+        let rate_pos = rate.absolute_position();
+        let pitch_width = pitch.size().width;
+        ui.set_pitch_text("-24.00".into());
+        ui.set_speed_text("4.00".into());
+        rate.mock_single_click(PointerEventButton::Left);
+        frame(&ui, &format!("{snapshot}-compact-rate-popup"));
+        assert_eq!(pitch.size().width, pitch_width);
+        assert_eq!(rate.absolute_position(), rate_pos);
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "精确速度")
+                .next()
+                .is_some()
+        );
+        ui.hide().unwrap();
+    }
+}
+
 #[test]
 fn classic_transport_keyboard_releases_once_and_cancels_on_focus_loss() {
     init_backend();
@@ -727,14 +838,15 @@ fn classic_transport_keyboard_releases_once_and_cancels_on_focus_loss() {
             let field = player_action(
                 &ui,
                 if chinese {
-                    "变调半音，回车或离开时应用"
+                    "调整音高"
                 } else {
-                    "Pitch semitones, applied on Enter or focus loss"
+                    "Adjust pitch"
                 },
             );
             let position = control_center(&field);
             pointer_down(&ui, position);
             pointer_up(&ui, position);
+            key(&ui, Key::Escape.into());
             // Repeat immediately precedes Pitch in the transport's tab order.
             key(&ui, Key::Backtab.into());
             changes.borrow_mut().clear();
