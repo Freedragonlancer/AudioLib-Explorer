@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "name": "macos-client-beta",
+  "host": "macos",
+  "require_tag": false,
+  "environment_tools": ["rustc", "cargo"],
+  "stages": [
+    {"id": "preflight", "script": "tools/check-release.ps1", "parameters": {"Tag": "${Tag}"}},
+    {"id": "license-preflight", "reuse": "never", "script": "tools/check-release-licenses.ps1", "parameters": {"Profile": "MacosClient"}},
+    {"id": "build", "needs": ["preflight", "license-preflight"], "script": "tools/build-macos-client-pipeline.ps1", "parameters": {"ExpectedCommit": "${Commit}", "ReportPath": "${RunDirectory}/build.json"}, "outputs": ["${RunDirectory}/build.json", "${TargetDirectory}/aarch64-apple-darwin/release/AudioLibExplorer", "${TargetDirectory}/aarch64-apple-darwin/release/AudioLibCli"]}
+  ]
+}

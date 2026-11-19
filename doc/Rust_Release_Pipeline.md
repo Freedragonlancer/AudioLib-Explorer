@@ -58,6 +58,7 @@ pwsh tools/release-pipeline.ps1 -PlanFile tools/release-plans/windows-local.json
 | `tools/release-plans/server.json` | Windows x64 无播放服务端，显式构建验收 fixture 所需 benchmark |
 | `tools/release-plans/server-unix.json` | 对应本机 Linux/macOS 服务端，同次 release 构建私有验收 helper |
 | `tools/release-plans/macos-client.json` | Apple Silicon Mac 客户端，结构与原生验收合并运行；需要已登录桌面 |
+| `tools/release-plans/macos-client-beta.json` | Apple Silicon Mac 客户端 Beta 预编译，复用正式编译入口并保留中间缓存 |
 | `tools/release-plans/release-assets.json` | 只读获取已发布资产元数据，核对精确资产集合和本地归档 SHA256；使用已有 GitHub 凭据 |
 
 Windows 客户端计划按打包器的实际常规输出记录 `dist/latest/AudioLibExplorer-latest-win-x64-portable.zip` 及其 `.sha256`；`-Tag` 写入包的版本身份，不改变这两个本地文件名。
@@ -180,12 +181,12 @@ gh api --hostname github.com --paginate 'repos/{owner}/{repo}/releases?per_page=
 
 ```bash
 # x64 一通过验收，立即开始上传，并记下会话。
-tools/release-create.sh "$tag" --resume-draft --stage-independent --draft-id "$draft_id" \
+tools/release-create.sh "$tag" --resume-draft --stage-independent --draft-id "$draft_id" --timings \
   --notes-file "$notes" -- "$docker_x64" "$docker_x64.sha256" &
 x64_pid=$!
 
 # arm64 一通过验收，立即开始上传。若它先完成验收，就先运行这组命令。
-tools/release-create.sh "$tag" --resume-draft --stage-independent --draft-id "$draft_id" \
+tools/release-create.sh "$tag" --resume-draft --stage-independent --draft-id "$draft_id" --timings \
   --notes-file "$notes" -- "$docker_arm64" "$docker_arm64.sha256" &
 arm64_pid=$!
 ```
@@ -200,6 +201,17 @@ arm64_pid=$!
 tools/release-create.sh "$tag" --resume-draft --publish-staged --draft-id "$draft_id" \
   --notes-file "$notes" -- "${all_assets[@]}"
 ```
+
+`--timings` 在计时启动后随独立上传者退出输出一行带 `RELEASE_UPLOAD_TIMING ` 前缀的 JSON，单位为毫秒。保留每个上传者已有的独立日志。计时属于单个任务，并行窗口另外用任务的起止时间衡量。
+
+| 字段 | 计时范围 |
+| --- | --- |
+| `read_hash_ms` | 本地读取、文件大小和 SHA256 校验，包括上传前后原有的复核。若调用方传入复制与复验耗时，此值包含两部分。 |
+| `post_ms` | 归档与校验文件 POST 的合计，可通过 `post_archive_ms` 和 `post_checksum_ms` 分别查看。包括流式读取、网络传输及 GitHub 响应。 |
+| `remote_verify_ms` | 已有草稿发现、标签和资产元数据复核请求的合计。 |
+| `post_attempts`、`post_failures`、`exit_code` | POST 尝试次数、命令报错次数和整个校验任务的结果。远端已经接收的文件可以在 POST 报错后核验成功。 |
+
+如果 Windows 协调者先把已验收的共享归档及校验文件复制到专用本地盘，使用 Stopwatch 围住原有复制和 SHA256 复验。调用独立入口时把这段实测值以 `--timings --intake-read-hash-ms <整数毫秒>` 传入。收据分别保留 `intake_read_hash_ms` 和 `local_read_hash_ms`。重试复用已核验的本地副本时省略入盘计时参数。生产端从原生目录把包交接到共享目录的时间属于就绪前阶段。重试只补传校验文件时，`post_archive_ms` 为 0，远端已有完整文件对时 `post_ms` 为 0。
 
 #### 单上传者累计上传
 
@@ -239,9 +251,45 @@ Windows 和 macOS 可各保留一个专用发布 checkout、一个已登记的 `
 
 多份计划共享同一受管缓存时，等它们的构建与交付全部结束，再集中维护一次；不要给每条并行计划都追加清理。只复用原有结果、未构建/测试 Rust 的文档或流程任务不触发维护扫描。
 
+### macOS Beta 客户端预编译
+
+冻结候选后，在固定 Mac 发布 checkout 校验 HEAD 和工作区状态，沿用正式版的 `CARGO_TARGET_DIR`、Rust 工具链、SDK 与编译参数。同一个 target 上先完成 Mac Beta 服务端的构建和验收，再趁 Windows Beta 验收运行客户端预编译。在这个阶段，`$tag` 取工作区版本，尚未创建 Git 标签。两个命令都传入关闭中间产物清理的参数。
+
+```bash
+pwsh -NoProfile -File tools/release-pipeline.ps1 \
+  -PlanFile tools/release-plans/macos-client-beta.json -Tag "$tag" \
+  '-CleanBuildArtifacts:$false'
+pwsh -NoProfile -File tools/release-pipeline.ps1 \
+  -PlanFile tools/release-plans/macos-client-beta.json -Tag "$tag" \
+  '-CleanBuildArtifacts:$false' -Action Run
+```
+
+候选计划只执行版本预检、本机客户依赖许可证预检和原生构建，收据在 `.rust-validation/release-pipeline/<tag>/macos-client-beta/build.json`。正式标签冻结后仍运行 `macos-client.json`，从该标签生成证据，在自己的运行目录完成签名打包和原生验收。Git tree、编译参数及环境一致时，Cargo 可复用预编译结果。正式计划仍按自身的实际输入和产物判断是否成功，最后一个使用共享 target 的计划执行预算维护。
+
+### Linux AMD64 持久发布缓存
+
+AMD64 单独持有一个已登记的 `CARGO_TARGET_DIR`，供连续版本使用。若通过容器构建，沿用固定镜像、目标架构、Rust 工具链及现有容器用户，固定主机名（例如 `--hostname audiolib-release-linux-amd64`）、源码 checkout 容器路径（例如 `/work/source`）和缓存卷挂载点（例如 `/cache/audiolib-linux-amd64`）。初始化新专用卷时确保既有构建用户可写。Cargo registry、Rustup、ARM64 输出和应用数据使用各自目录。
+
+入口选用专用卷下的 `target-linux-amd64`，首次登记空目标后沿用同一卷。Plan 和 Run 都在固定发布 checkout 中探测 Rust 工具链，支持从其他目录用绝对路径调用入口。Run 以固定主机和 checkout 身份核对登记，并串行访问同一个持久卷。即使父进程中断，仍在运行的子阶段也会持有共享卷锁，另一标签须等该子阶段退出后才能进入。默认的 `-BuildCacheLimitGiB 8` 可按逻辑预算调整，作用于原有 `server-unix.json` 的成功后缓存维护；各标签使用独立的 `.rust-validation/release-pipeline/<tag>/linux-x64-server` 收据。运行 Docker 前继续消费该次原生服务端验收 JSON。
+
+```bash
+cache_root=/cache/audiolib-linux-amd64
+build_host=audiolib-release-linux-amd64
+pwsh -NoProfile -File tools/release-linux-amd64.ps1 -Action Register \
+  -CacheRoot "$cache_root" -ExpectedHostName "$build_host"
+pwsh -NoProfile -File tools/release-linux-amd64.ps1 -Action Plan -Tag "$tag" \
+  -CacheRoot "$cache_root" -ExpectedHostName "$build_host" -BuildCacheLimitGiB 8
+pwsh -NoProfile -File tools/release-linux-amd64.ps1 -Action Run -Tag "$tag" \
+  -CacheRoot "$cache_root" -ExpectedHostName "$build_host" -BuildCacheLimitGiB 8
+```
+
+AMD64 入口覆盖原生 x64 主机和 ARM64 主机上的 Linux AMD64 构建容器。后者的结果照常标记为仿真。Linux ARM64 继续使用单独的原生计划、build target 和运行目录。
+
+### 发布流程模拟测试
+
 修改执行器时运行 `pwsh tools/test-release-pipeline.ps1`，只使用自有 Git/文件夹/伪命令验证续跑、输出边界、参数、环境与产物失效，不编译应用或访问真实库。安装器使用 `tools/test-local-release-install.ps1` 验证拒绝不完整包；提供 `-RuntimePayload <已验收包>` 时在自有临时 checkout 中验证安装、重复执行、启动与数据保留，不更新工作区的真实安装。计划路由变化还需预览对应 `Plan`；本机脚本语法通过不代表 Mac、Linux 或硬件验收通过。
 
-只调整计划参数路由时，可用 `test-release-pipeline.ps1 -Scope Profiles` 定向验证实际 Windows 计划的两种 ASIO 选择和构建环境失效；该模式使用伪工具，不执行 Cargo。执行器的缓存/失败处理变化仍使用完整回归。
+`test-release-pipeline.ps1 -Scope Profiles` 用伪工具验证 Windows 计划的 ASIO 选择以及同一 target 上独立的 Mac Beta 和正式标签收据，后者仍进入原生打包验收。`test-release-linux-amd64.ps1` 模拟 AMD64 卷登记、父进程中断后的同卷互斥、版本间 target 复用、预算转发和从其他目录调用时的工具链探测。`bash tools/test-release-create.sh` 离线测试并发、失败补传和分段计时。
 
 许可证前置入口用 `pwsh tools/test-release-license-preflight.ps1` 检查实际解析器在隔离元数据下的各产品/目标路由及缺件拒绝；配合 Profiles 回归检查每次续跑重新预检、失败阻断，以及材料恢复后成功构建/包/验收/安装收据的复用。这些合成测试不编译应用或访问真实库。
 
