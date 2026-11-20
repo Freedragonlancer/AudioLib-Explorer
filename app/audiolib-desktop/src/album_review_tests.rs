@@ -488,6 +488,35 @@ fn cross_index_navigation(server_snapshot: bool) {
     // Switch to a library outside the selected folder, then back to that folder.
     choose_gore(&fixture);
     wait_navigation(&fixture, 3);
+    // No event-loop pump between these clicks: both highlights and breadcrumb paths
+    // must follow input immediately, while only the final page may be published.
+    let folders = ui.get_folders();
+    let rows = ui.get_rows();
+    for name in ["wind", "gore"] {
+        let index = folders
+            .iter()
+            .position(|folder| folder.name == name)
+            .unwrap();
+        let path = folders.row_data(index).unwrap().path;
+        ui.invoke_folder_requested(index as i32);
+        assert_eq!(ui.get_selected_folder(), index as i32);
+        assert_eq!(ui.get_selected_folder_path(), path);
+        assert_eq!(
+            ui.get_crumbs()
+                .iter()
+                .map(|row| row.name.to_string())
+                .collect::<Vec<_>>(),
+            ["sounds", name]
+        );
+        assert_eq!(ui.get_rows(), rows);
+    }
+    wait_navigation(&fixture, 3);
+    assert_eq!(
+        ui.get_folders(),
+        folders,
+        "unchanged directory counts must retain the displayed tree"
+    );
+    assert!(ui.get_rows().iter().all(|row| row.name.starts_with("gore")));
     wait_albums(&fixture, 2);
     let active_tab = || ui.get_search_tasks().iter().find(|tab| tab.active).unwrap();
     assert_eq!(active_tab().index_name, "gore");
