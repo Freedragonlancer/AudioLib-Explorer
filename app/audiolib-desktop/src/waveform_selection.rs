@@ -11,7 +11,7 @@ mod integration_tests;
 /// Captured with the displayed image, independent of inspector/task selection.
 #[derive(Clone)]
 pub(super) struct WaveSource {
-    file: AudioFile,
+    pub(super) file: AudioFile,
     key: String,
     source_generation: u64,
     library_generation: u64,
@@ -67,6 +67,15 @@ impl WaveSource {
             remote_version: None,
             key,
         }
+    }
+
+    /// Identity before the worker binds the original version.
+    pub(super) fn request_key(&self) -> &str {
+        &self.key
+    }
+
+    pub(super) fn peak_request(&self) -> WaveformRequest {
+        crate::waveform_peaks::source_request(self.total_frames(), self.file.channels)
     }
 
     fn total_frames(&self) -> u64 {

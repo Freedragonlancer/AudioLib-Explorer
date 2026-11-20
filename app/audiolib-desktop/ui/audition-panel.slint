@@ -1292,6 +1292,7 @@ component ClassicAuditionPanel inherits Rectangle {
     in property <float> playback-rate: 1;
     in property <image> waveform;
     in property <bool> waveform-ready;
+    in property <float> waveform-progress: 1;
     in property <string> name;
     in property <string> info;
     in property <string> output;
@@ -1493,6 +1494,10 @@ component ClassicAuditionPanel inherits Rectangle {
                     source: root.waveform; height: parent.height; image-fit: fill;
                     x: (root.view-start - root.shown-start) / root.shown-span * parent.width;
                     width: max(0px, (root.view-end - root.view-start) / root.shown-span * parent.width);
+                }
+                if !root.waveform-ready && root.waveform-progress > 0 && root.waveform-progress < 1: Rectangle {
+                    y: 0px; height: 1px * Theme.ui-scale; width: parent.width * root.waveform-progress;
+                    background: Theme.accent.with-alpha(0.55);
                 }
                 if !root.waveform-ready: Text { text: root.busy || root.missing || root.state == 1 || root.state == 7 ? root.unavailable : root.ready ? (root.spectral ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.chinese ? "正在分析波形…" : "Analyzing waveform…")) : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition")); color: Theme.text(4, 1, Theme.dim); horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(11); }
                 // These overlays are paint-only, leaving click/scroll ownership to scrub.
@@ -1986,8 +1991,8 @@ component WorkbenchAuditionPanel inherits Rectangle {
                         Rectangle { y: parent.height * 0.25 - 1px; height: 2px; background: parent.lane; }
                         Rectangle { y: parent.height * 0.75 - 1px; height: 2px; background: parent.lane; }
                     }
-                    // Render progress while a partial Waveform is already on screen.
-                    if root.ready && root.waveform-ready && root.waveform-progress < 1: Rectangle {
+                    // First-load progress is independent of the complete Waveform image.
+                    if !root.waveform-ready && root.waveform-progress > 0 && root.waveform-progress < 1: Rectangle {
                         y: 0px; height: 2px * Theme.ui-scale; background: #00000020;
                         Rectangle { x: 0px; height: parent.height; width: parent.width * clamp(root.waveform-progress, 0, 1); background: Theme.accent; animate width { duration: Theme.motion-base; } }
                     }
@@ -2306,6 +2311,7 @@ export component AuditionPanel inherits Rectangle {
         playback-rate: root.playback-rate;
         waveform: root.waveform;
         waveform-ready: root.waveform-ready;
+        waveform-progress: root.waveform-progress;
         name: root.name;
         info: root.info;
         output: root.output;

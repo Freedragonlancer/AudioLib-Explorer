@@ -2784,14 +2784,14 @@ fn process_threads() -> usize {
 }
 
 #[test]
-fn ready_preview_zoom_pan_peaks_and_resize_request_original_waveform() {
+fn waveform_zoom_pan_and_resize_use_resident_original_after_server_disconnects() {
     isolated("child_ready_preview_viewport");
 }
 
 #[test]
 #[ignore = "isolated Slint remote viewport helper"]
 fn child_ready_preview_viewport() {
-    i_slint_backend_testing::init_no_event_loop();
+    i_slint_backend_testing::init_integration_test_with_system_time();
     let root = root();
     let mut config = configuration(&root.join("preferences"));
     let virtual_path = config.data_root().join("remote/library/stream/42-pcm.wav");
@@ -2799,16 +2799,20 @@ fn child_ready_preview_viewport() {
     config.data_source.mode = DataSourceMode::Server;
     config.data_source.server_url = format!("http://{}", listener.local_addr().unwrap());
     config.data_source.poll_interval_secs = 0;
-    let (sent, received) = std::sync::mpsc::channel();
+    let address = listener.local_addr().unwrap();
+    let request_count = Arc::new(AtomicU64::new(0));
+    let observed = request_count.clone();
     let server = std::thread::spawn(move || {
-        let mut waveforms = 0;
-        while waveforms < 5 {
-            let mut socket = accept(&listener);
+        let mut next_frame = 0;
+        loop {
+            let (mut socket, _) = listener.accept().unwrap();
             let head = request(&mut socket);
+            if head.starts_with("GET /finished ") {
+                assert_eq!(next_frame, 192_000);
+                break;
+            }
+            observed.fetch_add(1, Ordering::SeqCst);
             if head.starts_with("HEAD /api/v1/audio/42/stream?download=1 ") {
-                // These version probes are independent of the five viewport
-                // GETs. Supply the real original layout's stable byte length
-                // and strong validator instead of weakening version admission.
                 let original_length = 44 + 96_000_u64 * 6 * 2 * 2;
                 write!(socket,
                     "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {original_length}\r\nETag: \"original-viewport-v1\"\r\nConnection: close\r\n\r\n"
@@ -2816,13 +2820,32 @@ fn child_ready_preview_viewport() {
                 continue;
             }
             assert!(head.starts_with("GET /api/v1/audio/42/waveform?"), "{head}");
-            sent.send(head).unwrap();
-            waveforms += 1;
-            respond(
-                &mut socket,
-                "403 Forbidden",
-                r#"{"error_code":"FORBIDDEN","message":"no Waveform in test"}"#,
-            );
+            let param = |key: &str| -> u64 {
+                head.split_once(key)
+                    .unwrap()
+                    .1
+                    .split(['&', ' '])
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            };
+            let start = param("start_frame=");
+            let end = param("end_frame=");
+            assert_eq!(start, next_frame);
+            next_frame = end;
+            // A constant six-channel segment is enough to verify complete coverage
+            // and the source time base, independently of the mono audition stream.
+            let peak = audiolib_audio::WaveformPeak {
+                min: -0.5,
+                max: 0.7,
+                rms: 0.4,
+                ..Default::default()
+            };
+            let body = serde_json::json!({"start_frame":start, "end_frame":end, "total_frames":192000,
+                "frames": end-start, "samples_per_pixel":end-start, "sample_rate":96000, "channels":6,
+                "peaks":vec![vec![peak];6]});
+            respond(&mut socket, "200 OK", &body.to_string());
         }
     });
     let provider = Arc::new(SqliteProvider::open(&root.join("library.db")).unwrap());
@@ -2925,63 +2948,89 @@ fn child_ready_preview_viewport() {
         controller.waveform_file(&remote).unwrap().sample_rate,
         96_000
     );
-    *controller.wave_view.lock().unwrap() = (file.file_path.clone(), WaveView::default());
-    for action in 0..5 {
-        match action {
-            0 => ui.invoke_waveform_zoom_requested(2.0),
-            1 => ui.invoke_waveform_wheel_zoom_requested(2.0, 0.5),
-            2 => ui.invoke_waveform_pan_requested(0.75),
-            3 => {
-                ui.set_peak_mode(1);
-                ui.invoke_peak_style_requested();
-            }
-            _ => ui.invoke_waveform_resize_requested(777, 123),
-        }
-        let (start, end) = controller.wave_view.lock().unwrap().1.range(file.duration);
-        let start = (start * 96_000.0).round() as u64;
-        let end = (end * 96_000.0).round() as u64;
-        let width = controller.waveform_size.lock().unwrap().0;
-        let request_plan = WaveformRequest {
-            start_frame: start,
-            end_frame: Some(end),
-            samples_per_pixel: (end - start).div_ceil(u64::from(width)).max(1) as u32,
-            include_colors: true,
-        };
-        // Use the production range planner: its first half-second rounds upward
-        // to a bucket boundary, so the HTTP endpoint is not the whole viewport.
-        let mut first = None;
-        crate::progressive_waveform::load(
-            request_plan,
-            96_000,
-            &AtomicBool::new(false),
-            |part, buckets| {
-                first = Some((part, buckets));
-                Err("Captured first source segment".into())
-            },
-            |_, _| unreachable!(),
-        )
-        .unwrap_err();
-        let (part, buckets) = first.unwrap();
-        let request = received.recv_timeout(Duration::from_secs(6)).unwrap();
-        assert!(
-            request.starts_with("GET /api/v1/audio/42/waveform?"),
-            "{request}"
-        );
-        assert!(
-            request.contains(&format!("start_frame={}", part.start_frame)),
-            "{request}"
-        );
-        assert!(
-            request.contains(&format!("end_frame={}", part.end_frame.unwrap())),
-            "{request}"
-        );
-        assert!(request.contains(&format!("buckets={buckets}")), "{request}");
-        assert!(
-            !virtual_path.exists(),
-            "Waveform created a local audition copy"
-        );
-    }
+    controller.queue_waveform(&file);
+    let win = ui.as_weak();
+    run_until(&ui, move || {
+        win.unwrap().get_waveform_ready() && win.unwrap().get_waveform_info().contains("96.0 kHz")
+    });
+    let first_load_requests = request_count.load(Ordering::SeqCst);
+    assert!(first_load_requests > 1);
+    // Disconnect completely. Even a fresh original-version probe would now fail.
+    std::net::TcpStream::connect(address)
+        .unwrap()
+        .write_all(b"GET /finished HTTP/1.0\r\n\r\n")
+        .unwrap();
     server.join().unwrap();
+
+    let source_token = controller.waveform_cancel.lock().unwrap().clone();
+    for (factor, wheel) in [(2.0, false), (2.0, true), (0.5, true), (0.0, false)] {
+        let old_zoom = ui.get_wave_zoom();
+        if wheel {
+            ui.invoke_waveform_wheel_zoom_requested(factor, 0.35);
+        } else {
+            ui.invoke_waveform_zoom_requested(factor);
+        }
+        let zoom = if factor == 0.0 {
+            1.0
+        } else {
+            old_zoom * factor
+        };
+        let win = ui.as_weak();
+        run_until(&ui, move || win.unwrap().get_wave_zoom() == zoom);
+        assert_eq!(ui.get_view_start(), ui.get_wave_target_start());
+        assert_eq!(ui.get_view_end(), ui.get_wave_target_end());
+        assert!((ui.get_view_end() - ui.get_view_start() - 2.0 / zoom).abs() < 1e-5);
+    }
+    ui.invoke_waveform_zoom_requested(4.0);
+    ui.invoke_waveform_pan_requested(0.75);
+    ui.invoke_peak_style_requested();
+    ui.invoke_waveform_resize_requested(777, 123);
+    let win = ui.as_weak();
+    run_until(&ui, move || {
+        let ui = win.unwrap();
+        (ui.get_view_start() - 1.125).abs() < 1e-5 && ui.get_waveform_image().size().width == 777
+    });
+    assert_eq!(ui.get_waveform_image().size().height, 123);
+    ui.invoke_theme_requested(crate::theme::theme_index(STUDIO_THEME));
+    let win = ui.as_weak();
+    run_until(&ui, move || {
+        win.unwrap().get_waveform_mask().size().width > 0
+    });
+    // Switching themes relays the real panel size to the controller.
+    assert_eq!(
+        ui.get_waveform_mask().size(),
+        ui.get_waveform_image().size()
+    );
+    assert!(ui.get_waveform_info().contains("6 ch"));
+    assert!(ui.get_waveform_ready());
+    assert_eq!(ui.get_waveform_progress(), 1.0);
+    assert!(!source_token.load(Ordering::Acquire));
+    assert!(
+        !virtual_path.exists(),
+        "Waveform created a local audition copy"
+    );
+    // The same worker must also navigate a local recording after the original
+    // becomes unavailable. Only the owned temporary WAV is moved here.
+    *controller.selected.lock().unwrap() = Some(external_waveform.clone());
+    controller.queue_waveform(&external_waveform);
+    let win = ui.as_weak();
+    run_until(&ui, move || {
+        win.unwrap().get_waveform_ready() && win.unwrap().get_waveform_info().contains("24.0 kHz")
+    });
+    std::fs::rename(&external_path, root.join("unmounted.wav")).unwrap();
+    let source_token = controller.waveform_cancel.lock().unwrap().clone();
+    for _ in 0..7 {
+        ui.invoke_waveform_wheel_zoom_requested(2.0, 0.4);
+    }
+    let win = ui.as_weak();
+    run_until(&ui, move || win.unwrap().get_wave_zoom() == 128.0);
+    ui.invoke_waveform_zoom_requested(0.0);
+    let win = ui.as_weak();
+    run_until(&ui, move || win.unwrap().get_wave_zoom() == 1.0);
+    assert_eq!(ui.get_view_start(), 0.0);
+    assert_eq!(ui.get_view_end(), 2.0);
+    assert!(ui.get_waveform_ready());
+    assert!(!source_token.load(Ordering::Acquire));
     controller.shutdown();
     audiolib_audio::unregister_stream_source(&virtual_path);
 }

@@ -1,5 +1,5 @@
 // app/audiolib-desktop/src/progressive_waveform.rs
-//! Bounded remote Waveform ranges and partial images on a fixed source timeline.
+//! Assemble bounded remote Waveform ranges into one complete source timeline.
 use audiolib_audio::{WaveformData, WaveformPeak, WaveformRequest};
 use std::{
     sync::atomic::{AtomicBool, Ordering},
@@ -8,14 +8,14 @@ use std::{
 
 const UPDATE_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Fetch a small first range, then grow batches to bound round trips for long files.
-/// Publication happens on this worker; the caller marshals images to the UI thread.
+/// Fetch consecutive source ranges, reporting progress without exposing incomplete peaks.
 pub(crate) fn load(
     request: WaveformRequest,
     sample_rate: u32,
+    batch_columns: usize,
     cancel: &AtomicBool,
     mut fetch: impl FnMut(WaveformRequest, u32) -> Result<WaveformData, String>,
-    mut publish: impl FnMut(&WaveformData, f64),
+    mut progress: impl FnMut(f64),
 ) -> Result<WaveformData, String> {
     let frames = request
         .end_frame
@@ -23,13 +23,12 @@ pub(crate) fn load(
         .saturating_sub(request.start_frame);
     let spp = u64::from(request.samples_per_pixel.max(1));
     let bins = frames.div_ceil(spp) as usize;
-    if bins == 0 || bins > 8192 || sample_rate == 0 {
+    if bins == 0 || bins > crate::waveform_peaks::MAX_COLUMNS || sample_rate == 0 {
         return Err("Invalid progressive Waveform range".into());
     }
     let mut data: Option<WaveformData> = None;
     let mut offset = 0;
-    let mut batch = u64::from(sample_rate).div_ceil(2 * spp).max(1) as usize;
-    let max_batch = bins.div_ceil(16).max(batch);
+    let batch = batch_columns.clamp(1, 8192);
     let mut last_update = None;
     while offset < bins {
         check_cancel(cancel)?;
@@ -61,15 +60,13 @@ pub(crate) fn load(
         }
         merge(output, &part, offset, count, end - start);
         offset += count;
-        // First usable range immediately, then at most twice per second. The caller
-        // publishes the completed result once, including wholly cached requests.
+        // Progress feedback is throttled independently of image publication.
         if offset < bins
             && last_update.is_none_or(|time: Instant| time.elapsed() >= UPDATE_INTERVAL)
         {
-            publish(output, end as f64 / frames as f64);
+            progress(end as f64 / frames as f64);
             last_update = Some(Instant::now());
         }
-        batch = batch.saturating_mul(2).min(max_batch);
     }
     Ok(data.expect("nonempty validated range"))
 }
@@ -128,7 +125,6 @@ pub(crate) fn validate_part(part: &WaveformData, frames: u64, rate: u32) -> Resu
 }
 
 /// Rebin smaller server buckets without losing transients, weighting RMS by overlap.
-/// Unloaded columns remain empty; the renderer always sees the entire viewport.
 fn merge(output: &mut WaveformData, part: &WaveformData, offset: usize, count: usize, frames: u64) {
     if part.frames == 0 {
         return;
@@ -136,6 +132,13 @@ fn merge(output: &mut WaveformData, part: &WaveformData, offset: usize, count: u
     let scale = part.frames as f64 / frames as f64;
     let source_spp = f64::from(part.samples_per_pixel);
     for (target, source) in output.peaks.iter_mut().zip(&part.peaks) {
+        if part.frames == frames
+            && part.samples_per_pixel == output.samples_per_pixel
+            && source.len() == count
+        {
+            target[offset..offset + count].clone_from_slice(source);
+            continue;
+        }
         for index in 0..count {
             let start = index as f64 * f64::from(output.samples_per_pixel) * scale;
             let end = (((index + 1) as u64 * u64::from(output.samples_per_pixel)).min(frames))
@@ -219,18 +222,16 @@ mod tests {
         let data = load(
             request.clone(),
             48000,
+            64,
             &AtomicBool::new(false),
             |part, buckets| {
                 assert_eq!(part.start_frame, next);
                 next = part.end_frame.unwrap();
                 Ok(response(&part, buckets))
             },
-            |data, progress| {
+            |progress| {
                 partials += 1;
                 assert!(progress > 0.0 && progress < 1.0);
-                assert_eq!(data.frames, 480017);
-                assert_eq!(data.peaks[0].last().unwrap().max, 0.0);
-                assert_eq!(data.peaks[0][0].max, 0.9);
             },
         )
         .unwrap();
@@ -251,12 +252,13 @@ mod tests {
         load(
             request(48000 * 3600),
             48000,
+            8192,
             &AtomicBool::new(false),
             |part, buckets| {
                 calls += 1;
                 Ok(response(&part, buckets))
             },
-            |_, _| {},
+            |_| {},
         )
         .unwrap();
         assert!(calls <= 24, "{calls}");
@@ -264,12 +266,13 @@ mod tests {
         let result = load(
             request(480000),
             48000,
+            128,
             &cancel,
             |part, buckets| {
                 cancel.store(true, Ordering::Release);
                 Ok(response(&part, buckets))
             },
-            |_, _| panic!("cancelled result published"),
+            |_| panic!("cancelled result published"),
         );
         assert!(result.is_err());
     }
@@ -323,6 +326,7 @@ mod tests {
         let data = load(
             request,
             192000,
+            96,
             &AtomicBool::new(false),
             |part, buckets| {
                 calls += 1;
@@ -353,7 +357,7 @@ mod tests {
                     buckets,
                 ))
             },
-            |_, _| {},
+            |_| {},
         )
         .unwrap();
         assert!(empty_tail);
@@ -395,6 +399,7 @@ mod tests {
         let data = load(
             source.clone(),
             original_rate,
+            128,
             &AtomicBool::new(false),
             |part, buckets| {
                 let mut data = response(
@@ -408,7 +413,7 @@ mod tests {
                 data.sample_rate = preview_rate;
                 Ok(data)
             },
-            |_, _| {},
+            |_| {},
         )
         .unwrap();
         assert_eq!(data.sample_rate, original_rate);
@@ -474,6 +479,7 @@ mod tests {
                 include_colors: true,
             },
             48000,
+            24,
             &cancel,
             |part, buckets| {
                 let reply = client
@@ -494,11 +500,8 @@ mod tests {
                 };
                 Ok(serde_json::from_slice(&json).unwrap())
             },
-            |data, progress| {
+            |progress| {
                 assert_eq!(progress, 0.5);
-                assert_eq!(data.peaks[0].len(), 48);
-                assert!(data.peaks[0][..24].iter().any(|p| p.max == 1.0));
-                assert!(data.peaks[0][24..].iter().all(|p| p.max == 0.0));
                 published.send(()).unwrap();
             },
         )
@@ -515,12 +518,13 @@ mod tests {
         let result = load(
             request(480000),
             48000,
+            128,
             &cancel,
             |part, buckets| {
                 calls += 1;
                 Ok(response(&part, buckets))
             },
-            |_, _| cancel.store(true, Ordering::Release),
+            |_| cancel.store(true, Ordering::Release),
         );
         assert!(result.is_err());
         assert_eq!(calls, 1);

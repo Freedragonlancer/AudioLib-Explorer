@@ -3238,28 +3238,28 @@ impl Controller {
     /// the server cannot answer is it computed from the audition stream.
     pub(super) fn remote_waveform(
         &self,
-        file_id: i64,
-        sample_rate: u32,
+        file: &AudioFile,
         request: WaveformRequest,
         cancel: &AtomicBool,
         version: &audiolib_remote::OriginalVersion,
-        publish: impl FnMut(&WaveformData, f64),
+        progress: impl FnMut(f64),
     ) -> Result<WaveformData, String> {
         let mut deferred_audio = false;
         crate::progressive_waveform::load(
             request,
-            sample_rate,
+            file.sample_rate,
+            8192.min(32768 / usize::from(file.channels.max(1))),
             cancel,
             |part, buckets| {
                 self.remote_waveform_versioned_segment(
-                    (file_id, sample_rate),
+                    (file.id, file.sample_rate),
                     (part, buckets),
                     cancel,
                     &mut deferred_audio,
                     version,
                 )
             },
-            publish,
+            progress,
         )
     }
 

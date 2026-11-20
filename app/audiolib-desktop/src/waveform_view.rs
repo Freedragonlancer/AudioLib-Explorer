@@ -208,22 +208,32 @@ fn ruler_label(seconds: f64, decimals: usize, hours: bool) -> String {
     text
 }
 
-pub(crate) fn render_waveform(
+type WavePixels = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
+
+/// Rasterize the spectral/normal image and optional Studio coverage in one pass.
+pub(crate) fn render_waveform_layers(
     data: &WaveformData,
     width: u32,
     height: u32,
     view: WaveView,
-) -> Vec<u8> {
-    let mut rgba = vec![0_u8; (width * height * 4) as usize];
-    for pixel in rgba.chunks_exact_mut(4) {
-        pixel.copy_from_slice(if view.spectral {
-            &SPECTRAL_BACKGROUND
-        } else {
-            &NORMAL_BACKGROUND
-        });
+    studio: bool,
+) -> (WavePixels, Option<WavePixels>) {
+    let count = width as usize * height as usize;
+    let background = if view.spectral {
+        SPECTRAL_BACKGROUND
+    } else {
+        NORMAL_BACKGROUND
+    };
+    let mut image = WavePixels::new(width, height);
+    let mut coverage = studio.then(|| WavePixels::new(width, height));
+    if count == 0 {
+        return (image, coverage);
     }
-    if width == 0 || height == 0 {
-        return rgba;
+    let rgba = image.make_mut_slice();
+    rgba.fill(slint::Rgba8Pixel::from(background));
+    let mut mask = coverage.as_mut().map(WavePixels::make_mut_slice);
+    if let Some(pixels) = &mut mask {
+        pixels.fill(slint::Rgba8Pixel::new(255, 255, 255, 0));
     }
     let channels = data.peaks.len().max(1);
     let lane = height as f32 / channels as f32;
@@ -236,18 +246,21 @@ pub(crate) fn render_waveform(
             .saturating_sub(1)
             .min(height - 1);
         for x in 0..width {
-            let put = |rgba: &mut Vec<u8>, y: u32, color: [u8; 3]| {
-                let index = ((y * width + x) * 4) as usize;
-                rgba[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 255]);
+            let mut put = |y: u32, color: [u8; 3], coverage: u8| {
+                let index = (y * width + x) as usize;
+                rgba[index] = slint::Rgba8Pixel::new(color[0], color[1], color[2], 255);
+                if let Some(mask) = &mut mask {
+                    mask[index].a = coverage;
+                }
             };
             put(
-                &mut rgba,
                 center.min((height - 1) as f32) as u32,
                 if view.spectral {
                     [98, 111, 116]
                 } else {
                     [55, 66, 72]
                 },
+                45,
             );
             let Some(peak) = peaks.get(x as usize * peaks.len() / width as usize) else {
                 continue;
@@ -275,54 +288,43 @@ pub(crate) fn render_waveform(
             } else {
                 rgb
             };
+            let core_color = color.map(|v| (v as f32 * 0.78) as u8);
             for y in high.min(low)..=high.max(low) {
                 // Slightly darker RMS core leaves transients readable without
                 // manufacturing a spectrogram or changing amplitude geometry.
                 let core = (y as f32 - center).abs() < peak.rms * gain * amplitude;
-                put(
-                    &mut rgba,
-                    y,
-                    if core {
-                        color.map(|v| (v as f32 * 0.78) as u8)
-                    } else {
-                        color
-                    },
-                );
+                put(y, if core { core_color } else { color }, 255);
             }
         }
     }
-    rgba
+    (image, coverage)
 }
 
-/// Neutral alpha coverage of the same source peaks, channel lanes and display gain.
-/// Studio recolors and clips this layer on playback ticks without reading audio or
-/// rerendering peaks; the default and spectral frequency renderers remain unchanged.
+#[cfg(test)]
+pub(crate) fn render_waveform(
+    data: &WaveformData,
+    width: u32,
+    height: u32,
+    view: WaveView,
+) -> Vec<u8> {
+    render_waveform_layers(data, width, height, view, false)
+        .0
+        .as_bytes()
+        .to_vec()
+}
+
+#[cfg(test)]
 pub(crate) fn render_waveform_mask(
     data: &WaveformData,
     width: u32,
     height: u32,
     view: WaveView,
 ) -> Vec<u8> {
-    let mut pixels = render_waveform(
-        data,
-        width,
-        height,
-        WaveView {
-            spectral: false,
-            ..view
-        },
-    );
-    for pixel in pixels.chunks_exact_mut(4) {
-        let alpha = if pixel == NORMAL_BACKGROUND {
-            0
-        } else if pixel[..3] == [55, 66, 72] {
-            45
-        } else {
-            255
-        };
-        pixel.copy_from_slice(&[255, 255, 255, alpha]);
-    }
-    pixels
+    render_waveform_layers(data, width, height, view, true)
+        .1
+        .unwrap()
+        .as_bytes()
+        .to_vec()
 }
 
 pub(crate) fn db_from_gain(gain: f32) -> f32 {

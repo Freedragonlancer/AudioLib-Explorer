@@ -20,12 +20,6 @@ fn pending_waveform(controller: &Arc<Controller>, ui: &AppWindow, file: &AudioFi
     *controller.waveform_cancel.lock().unwrap() = cancel.clone();
     let job = WaveJob {
         source: waveform_selection::WaveSource::capture(controller, file),
-        path: PathBuf::from(&file.file_path),
-        remote_id: None,
-        sample_rate: file.sample_rate,
-        frames: 1,
-        start_frame: 0,
-        end_frame: 1,
         duration: file.duration,
         view: WaveView::default(),
         generation,
@@ -35,8 +29,8 @@ fn pending_waveform(controller: &Arc<Controller>, ui: &AppWindow, file: &AudioFi
     };
     {
         let mut pending = controller.waveform_job.lock().unwrap();
-        *pending = Some(job.clone());
-        assert_eq!(pending.as_ref().unwrap().generation, generation);
+        pending.pending = Some(job.clone());
+        assert_eq!(pending.pending.as_ref().unwrap().generation, generation);
     }
     ui.set_waveform_ready(false);
     ui.set_waveform_info("pending previous task".into());
