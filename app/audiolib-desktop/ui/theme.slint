@@ -169,7 +169,7 @@ export component ThemedSlider inherits Rectangle {
     // Fluent's standard Slider owns input with a fixed 20px thumb. Keep the
     // painted thumb and its travel identical: a larger painted thumb would make
     // its edges act as track clicks and jump the value before a drag begins.
-    private property <length> thumb-size: 20px;
+    out property <length> thumb-size: 20px;
     // Slint's native accessibility actions call SliderBase setters directly,
     // bypassing its pointer/key enabled checks. Guard before mutating bound state.
     function accessible-set-value(value: float) {

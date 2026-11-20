@@ -735,6 +735,73 @@ fn click_transform_value(ui: &AppWindow, anchor: &ElementHandle, editor: &Elemen
 }
 
 #[test]
+fn transform_sliders_double_click_reset_only_the_open_parameter() {
+    init_backend();
+    for theme in [DEFAULT_THEME, STUDIO_THEME] {
+        let ui = fixture(false);
+        apply_theme(&ui, theme);
+        ui.show().unwrap();
+        let submissions = Rc::new(RefCell::new(Vec::new()));
+        let seen = submissions.clone();
+        ui.on_transform_requested(move |pitch, rate, _, _| seen.borrow_mut().push((pitch, rate)));
+
+        for (label, minimum, exact, reset) in [
+            ("Adjust pitch", -2400.0, "Exact cents", "0"),
+            ("Adjust speed", 0.25, "Exact speed", "1.00"),
+        ] {
+            ui.set_pitch_text("-4.50".into());
+            ui.set_speed_text("0.80".into());
+            let anchor = player_action(&ui, label);
+            anchor.mock_single_click(PointerEventButton::Left);
+            let slider = ElementHandle::find_by_accessible_label(&ui, label)
+                .find(|item| item.accessible_value_minimum() == Some(minimum))
+                .unwrap();
+            let center = transform_popup_point(&ui, &anchor, &slider);
+            let point =
+                slint::LogicalPosition::new(center.x + 0.22 * slider.size().width, center.y);
+
+            // For pitch, drag the thumb here first. For speed, double-click the bare track.
+            if minimum < 0.0 {
+                submissions.borrow_mut().clear();
+                pointer_down(&ui, center);
+                ui.window()
+                    .dispatch_event(WindowEvent::PointerMoved { position: point });
+                assert!(submissions.borrow().is_empty());
+                pointer_up(&ui, point);
+                assert_eq!(submissions.borrow().len(), 1);
+                assert!(ui.get_pitch_text().parse::<f32>().unwrap() > 0.0);
+            }
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(800));
+            for _ in 0..2 {
+                pointer_down(&ui, point);
+                pointer_up(&ui, point);
+                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(40));
+            }
+
+            let editor = ElementHandle::find_by_accessible_label(&ui, exact)
+                .next()
+                .unwrap();
+            assert_eq!(editor.accessible_value().as_deref(), Some(reset));
+            let (pitch, rate) = if minimum < 0.0 {
+                ("0.00", "0.80")
+            } else {
+                ("-4.50", "1.00")
+            };
+            assert_eq!(
+                (ui.get_pitch_text().as_str(), ui.get_speed_text().as_str()),
+                (pitch, rate)
+            );
+            assert_eq!(
+                submissions.borrow().last(),
+                Some(&(pitch.into(), rate.into()))
+            );
+            key(&ui, Key::Escape.into());
+        }
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
 fn transform_popups_apply_integer_cents_and_speed_in_both_themes() {
     init_backend();
     for (theme, snapshot) in [(DEFAULT_THEME, "classic"), (STUDIO_THEME, "studio")] {

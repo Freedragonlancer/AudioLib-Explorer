@@ -286,6 +286,50 @@ component PlayToggle inherits Rectangle {
 }
 component Caption inherits Text { color: Theme.text(4, 1, Theme.dim); font-size: Theme.font(11); vertical-alignment: center; }
 
+// Keep the themed slider's keyboard and accessibility actions. Its pointer
+// surface also accepts a double-click anywhere along the track or on the thumb.
+component TransformSlider inherits Slider {
+    in property <float> reset-value;
+    private property <length> travel: max(1px, root.width - root.thumb-size);
+    function preview(next: float) {
+        if next != root.value {
+            root.value = next;
+            root.changed(root.value);
+        }
+    }
+    pointer := TouchArea {
+        enabled: root.enabled;
+        property <length> grab-offset;
+        property <float> start-value;
+        property <bool> dragging;
+        function update-position() {
+            let fraction = clamp((self.mouse-x - self.grab-offset - root.thumb-size / 2) / root.travel, 0, 1);
+            let steps = round(fraction * (root.maximum - root.minimum) / root.step);
+            root.preview(clamp(root.minimum + steps * root.step, root.minimum, root.maximum));
+        }
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.cancel && self.dragging {
+                self.dragging = false;
+                root.preview(self.start-value);
+            } else if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                root.focus();
+                self.start-value = root.value;
+                self.dragging = true;
+                let center = root.thumb-size / 2 + root.travel * (root.value - root.minimum) / (root.maximum - root.minimum);
+                let offset = self.mouse-x - center;
+                self.grab-offset = abs(offset) <= root.thumb-size / 2 ? offset : 0px;
+                if abs(offset) > root.thumb-size / 2 { self.update-position(); }
+            } else if event.button == PointerEventButton.left && event.kind == PointerEventKind.up && self.dragging {
+                self.dragging = false;
+                root.released(root.value);
+            }
+        }
+        moved => { if self.dragging { self.update-position(); } }
+        // Slint dispatches double-clicked before pointer-up commits the value.
+        double-clicked => { root.preview(root.reset-value); }
+    }
+}
+
 // The transport contract uses semitones; the editor exposes whole cents.
 component TransformField inherits Rectangle {
     in property <bool> pitch;
@@ -379,9 +423,10 @@ component TransformField inherits Rectangle {
                         }
                     }
                     HorizontalLayout { spacing: 6px * Theme.ui-scale;
-                        Slider {
+                        TransformSlider {
+                            reset-value: root.pitch ? 0 : 1;
                             input-label: root.label; surface: Theme.panel; minimum: root.minimum; maximum: root.maximum; step: root.pitch ? 1 : 0.01;
-                            value: root.preview;
+                            value <=> root.preview;
                             changed(value) => { root.draft = root.formatted(value); root.invalid = false; }
                             released(value) => { root.apply(root.formatted(value)); }
                         }
