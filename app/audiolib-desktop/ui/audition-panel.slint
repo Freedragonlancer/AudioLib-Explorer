@@ -350,7 +350,15 @@ component TransformField inherits Rectangle {
     pure function formatted(value: float) -> string {
         return root.pitch ? "\{round(value)}" : Clock.fixed2(value);
     }
-    public function refuse() { root.invalid = true; }
+    public function refuse() {
+        root.invalid = true;
+        rejection-feedback.running = true;
+        rejection-feedback.restart();
+    }
+    rejection-feedback := Timer {
+        running: false; interval: 900ms;
+        triggered => { self.running = false; }
+    }
     function open() {
         if !root.enabled { return; }
         trigger.focus();
@@ -380,7 +388,7 @@ component TransformField inherits Rectangle {
     width: title-text.preferred-width + widest-number.preferred-width + unit-text.preferred-width + 19px * Theme.ui-scale;
     height: max(22px * Theme.ui-scale, Theme.font(12) + 8px * Theme.ui-scale);
     border-radius: 3px * Theme.ui-scale; border-width: 1phx;
-    border-color: trigger.has-focus ? Theme.accent : transparent;
+    border-color: rejection-feedback.running ? Theme.warning : trigger.has-focus ? Theme.accent : transparent;
     background: hit.pressed ? Theme.trough : hit.has-hover ? Theme.hover : transparent;
     opacity: root.enabled ? 1 : 0.45;
     animate border-color, background { duration: Theme.motion-fast; }
