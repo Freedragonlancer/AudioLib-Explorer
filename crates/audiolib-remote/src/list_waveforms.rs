@@ -1850,6 +1850,22 @@ mod tests {
             patches.lock().unwrap()[0],
             serde_json::json!({"pregenerate_list_waveforms": true})
         );
+        let legacy_server = client.library_settings().unwrap();
+        assert_eq!(legacy_server.legacy_snapshot_enabled, None);
+        assert_eq!(legacy_server.list_waveform_pause_stats_on_playback, None);
+        client
+            .set_library_setting(crate::ServerLibrarySetting::LegacySnapshot, Some(false))
+            .unwrap();
+        client
+            .set_library_setting(crate::ServerLibrarySetting::PauseWaveformStats, None)
+            .unwrap();
+        assert_eq!(
+            &patches.lock().unwrap()[1..],
+            &[
+                serde_json::json!({"legacy_snapshot_enabled": false}),
+                serde_json::json!({"list_waveform_pause_stats_on_playback": null}),
+            ]
+        );
         let status = client.list_waveform_status().unwrap();
         assert_eq!(
             (status.state.as_str(), status.cached, status.remaining),

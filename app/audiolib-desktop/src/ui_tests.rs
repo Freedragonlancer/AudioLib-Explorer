@@ -346,7 +346,7 @@ fn server_cache_page_hides_local_scans_and_shared_audition_preferences() {
                 "增量扫描…",
                 "全量扫描…",
                 "试听开始后 3 秒内暂缓列表波形批量请求",
-                "扫描请到「服务器音效库」页。",
+                "扫描请到「目录与扫描」页。",
                 "试听/性能",
             )
         } else {
@@ -355,7 +355,7 @@ fn server_cache_page_hides_local_scans_and_shared_audition_preferences() {
                 "Incremental scan…",
                 "Full scan…",
                 "Hold list-waveform batch requests during first 3 s after audition start",
-                "Scans are on the Server library page.",
+                "Scans are on the Roots and scans page.",
                 "Audition / performance",
             )
         };
@@ -4844,6 +4844,74 @@ pub(crate) fn click_connection_field(ui: &AppWindow, label: &str) {
 }
 
 #[test]
+fn unified_source_window_database_controls_follow_the_selected_server() {
+    slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+        i_slint_backend_testing::TestingBackendOptions {
+            mock_time: true,
+            threading: false,
+            renderer_name: Some("software".into()),
+        },
+    )))
+    .unwrap();
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+    ui.set_remote_mode(true);
+    ui.set_sm_sources(source_rows(true));
+    ui.invoke_open_library(0);
+    ui.set_sm_selected(1);
+    ui.show().unwrap();
+    ui.set_sm_wave_supported(true);
+    ui.set_sm_wave_can_change(true);
+    ui.set_vendor_import_available(true);
+    let changes = Rc::new(RefCell::new(Vec::new()));
+    let observed = changes.clone();
+    ui.on_sm_legacy_setting(move |value| observed.borrow_mut().push(value));
+    for chinese in [false, true] {
+        ui.set_chinese(chinese);
+        let (tab, legacy, migration) = if chinese {
+            ("数据库与后台", "为旧客户端提供兼容快照", "数据库迁移…")
+        } else {
+            (
+                "Database & jobs",
+                "Serve snapshots to older clients",
+                "Database migration…",
+            )
+        };
+        ui.set_sm_page(0);
+        click_label(&ui, tab);
+        assert_eq!(ui.get_sm_page(), 3);
+        assert!(has_label(&ui, migration));
+        ui.set_sm_db_legacy_supported(false);
+        assert!(!has_label(&ui, legacy));
+        ui.set_sm_db_legacy_supported(true);
+        ui.set_sm_db_stat_supported(true);
+        ui.set_sm_db_legacy(false);
+        ui.set_sm_db_can_change(false);
+        changes.borrow_mut().clear();
+        click_label(&ui, legacy);
+        assert!(changes.borrow().is_empty());
+        ui.set_sm_db_can_change(true);
+        click_label(&ui, legacy);
+        assert_eq!(*changes.borrow(), [1]);
+        if let Some(directory) = std::env::var_os("AUDIOLIB_SERVER_SETTINGS_SNAPSHOTS") {
+            let pixels = ui.window().take_snapshot().unwrap();
+            image::save_buffer(
+                std::path::Path::new(&directory).join(format!("database-{chinese}.png")),
+                pixels.as_bytes(),
+                pixels.width(),
+                pixels.height(),
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        }
+        ui.set_sm_sources(source_rows(false));
+        assert!(!has_label(&ui, legacy));
+        assert!(!has_label(&ui, migration));
+        ui.set_sm_sources(source_rows(true));
+    }
+}
+
+#[test]
 fn unified_source_window_lists_sources_and_shows_server_pages_in_both_languages() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();
@@ -4949,9 +5017,9 @@ fn unified_source_window_lists_sources_and_shows_server_pages_in_both_languages(
         click_label(
             &ui,
             if chinese {
-                "服务器音效库"
+                "目录与扫描"
             } else {
-                "Server library"
+                "Roots and scans"
             },
         );
         assert_eq!(ui.get_sm_page(), 1);

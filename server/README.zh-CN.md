@@ -31,7 +31,7 @@
 - `/albums/{id}/artwork` 按共享专辑返回内嵌 JPEG/PNG 封面（可选 `?side=`），以 `album_entity_artwork` 能力、库身份和专辑 namespace 绑定。兼容 `/audio/{id}/artwork` 保留原语义；图片不写入数据库，缓存在库目录旁的 `artwork/`。schema 8 升级须配套更新客户端，并保留原库回退备份；见[共享专辑与存储](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Shared_Albums.md)。
 - 元数据写入（播放历史只在客户端本地记录；`POST /audio/{id}/plays` 已弃用为空操作，`GET /history/plays` 总是空）、远程扫描（开始/暂停/继续/取消）、记录与文件夹移除（可用 `manage_mode` 限制）。
 - Token 鉴权三种模式（`off`、`external`、`all`），token 在管理页生成（只保存哈希）或来自环境变量，可选原生 TLS 监听。
-- 内置管理页（`/admin`，仅局域网）：公网地址、鉴权模式、token、库根目录。
+- 内置管理页（`/admin`，仅局域网）：按运行概览、目录与扫描、数据库、波形与资源、连接与权限分栏。数据库页可调整旧客户端兼容快照、查看迁移状态和控制迁移。波形页可调整预生成与试听期间的文件属性读取。
 
 ## 下载预编译服务端
 

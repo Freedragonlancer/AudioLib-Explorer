@@ -423,7 +423,47 @@ fn endpoint_missing(error: RemoteError, context: &str) -> RemoteError {
     }
 }
 
+/// Library and background settings reported by GET /settings. Older servers omit the switches.
+#[derive(Debug, Deserialize)]
+pub struct ServerLibrarySettings {
+    /// Whether this connection may change server settings.
+    pub can_change: bool,
+    /// Schema-8 read representation served to older clients.
+    pub legacy_snapshot_enabled: Option<bool>,
+    /// Pause list Waveform file-stat reads during playback prebuffering.
+    pub list_waveform_pause_stats_on_playback: Option<bool>,
+}
+
+/// Individually editable server settings; resetting one preserves the others.
+#[derive(Clone, Copy, Debug)]
+pub enum ServerLibrarySetting {
+    LegacySnapshot,
+    PauseWaveformStats,
+}
+
 impl RemoteClient {
+    /// Read the effective library settings and permission for this connection.
+    pub fn library_settings(&self) -> Result<ServerLibrarySettings> {
+        self.manage_json("GET", "/settings", None)
+    }
+
+    /// Save one setting, or restore its configured value when value is None.
+    pub fn set_library_setting(
+        &self,
+        setting: ServerLibrarySetting,
+        value: Option<bool>,
+    ) -> Result<ServerLibrarySettings> {
+        let key = match setting {
+            ServerLibrarySetting::LegacySnapshot => "legacy_snapshot_enabled",
+            ServerLibrarySetting::PauseWaveformStats => "list_waveform_pause_stats_on_playback",
+        };
+        self.manage_json(
+            "PATCH",
+            "/settings",
+            Some(&serde_json::json!({ (key): value })),
+        )
+    }
+
     /// One management request; `None` for an empty (`204`) reply. Writes are never
     /// retried here.
     pub(crate) fn manage_call(

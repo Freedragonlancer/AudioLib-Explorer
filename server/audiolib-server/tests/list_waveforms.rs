@@ -791,6 +791,35 @@ async fn settings_follow_config_admin_overrides_and_manage_mode() {
     assert_eq!(status_body["pregenerate_list_waveforms_source"], "default");
     let response = admin(r#"{"pregenerate_list_waveforms":3}"#).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let changed: serde_json::Value = ok(admin(
+        r#"{"legacy_snapshot_enabled":false,"list_waveform_pause_stats_on_playback":true}"#,
+    )
+    .await
+    .unwrap())
+    .await;
+    assert_eq!(changed["legacy_snapshot_enabled_source"], "admin");
+    assert_eq!(changed["list_waveform_pause_stats_on_playback"], true);
+    assert!(!f.state.legacy_snapshots_enabled());
+    f.state.list_waveforms().note_playback_start();
+    assert!(f.state.list_waveforms().stat_pause_remaining().is_some());
+    let reopened = audiolib_server::Security::from_config(&f.config, None);
+    assert!(!reopened.legacy_snapshot_enabled().0);
+    assert!(reopened.list_waveform_pause_stats_on_playback().0);
+    let reset: serde_json::Value = ok(call(
+        f.state.clone(),
+        Method::PATCH,
+        "/settings",
+        &[],
+        LAN,
+        Some(r#"{"legacy_snapshot_enabled":null}"#),
+    )
+    .await)
+    .await;
+    assert_eq!(reset["legacy_snapshot_enabled"], true);
+    assert_eq!(reset["legacy_snapshot_enabled_source"], "config");
+    assert_eq!(reset["list_waveform_pause_stats_on_playback"], true);
+    assert!(f.state.legacy_snapshots_enabled());
 }
 
 #[tokio::test]

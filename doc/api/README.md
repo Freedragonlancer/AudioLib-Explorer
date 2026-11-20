@@ -1168,6 +1168,13 @@ schema 8 使用共享专辑实体：优先按 WAV Metadata 的 `library` 归组�
 
 服务端设置 `pregenerate_list_waveforms`（bool，默认 `false`）。来源规则与 `manage_mode` 相同（§2.3、§6.9）：`config.toml` 给默认值，管理页或下面的 `PATCH /settings` 写入 `admin-settings.json` 覆盖（`null` = 删除覆盖、回到 `config.toml`），立即生效、无需重启。
 
+服务端数据库与后台读取策略也使用同一设置接口。以下两个布尔字段由 `GET /settings` 和 `GET /admin/api/status` 返回，并各带一个 `_source` 字段（`config` 包括配置文件未指定时的内置值，`admin` 表示已保存的覆盖值）。桌面通过受 `manage_mode` 约束的 `PATCH /settings` 修改，局域网管理页通过 `PUT /admin/api/settings` 修改。只更新提交的字段，`null` 恢复配置值，立即生效。旧服务端可以缺少这两个字段。
+
+| 字段 | 配置默认值 | 作用 |
+| --- | --- | --- |
+| `legacy_snapshot_enabled` | true | 允许 schema 9 源库提供派生的只读 schema 8 快照，见 §2 |
+| `list_waveform_pause_stats_on_playback` | false | 流或试听开始后的 3 秒预缓冲期内推迟列表波形的文件属性读取 |
+
 - **关闭**（默认）：只有 `POST /waveforms` 未命中的项进入按需队列；服务端不主动读取没人请求的文件。
 - **开启**：后台以最低优先级为库中所有非 missing 记录补齐缺失的列表缩略图（已有且键一致的跳过；判断键需要 `stat`，所以第一轮会对每个文件 `stat` 一次）。扫描（§6.6）发现的新增或内容变化的记录，在扫描结束后加入预生成队列。**没有每日巡检，没有定时重扫**：之后在磁盘上被直接修改的文件，只在下一次扫描或下一次被请求时（§9.1 惰性检测）重算。注意：开启后服务端会按限速读取所有文件的音频数据，补齐期间 NAS 会保持唤醒。
 
@@ -1254,7 +1261,7 @@ schema 8 使用共享专辑实体：优先按 WAV Metadata 的 `library` 归组�
 2. **`pending` 重试**：只对**仍可见**的行按 `retry_after`（1..=5 秒）重试，每个 id 最多重试 5 次；滚出视图的行不再请求；已发出的请求不取消（结果照常存入缓存）；每个客户端同时最多 1 个 `POST /waveforms`；503 `BUSY` 按 `Retry-After` 退避。
 3. **客户端缓存**：`cache/waveforms/server/<library_id 的哈希>/list/`，分片存储，客户端私有格式；上限 640 MB，按分片淘汰；按 `etag` 失效（回传 `known`）。`pending` 和 `root_offline` 时继续显示旧副本，`root_offline` 的行变暗显示。
 4. **显示**：`n < 128` 时横向拉伸填满列宽；`n = 0` 画一条中心线。
-5. **设置页**：服务器模式下在「服务器音效库」页显示 `pregenerate_list_waveforms` 开关和预生成进度；`GET /settings` 的 `can_change` 为假时只读显示。只在该页打开时每 5 秒轮询一次 `GET /waveforms/status`。
+5. **设置页**：服务器模式下在「数据库与后台」页显示 `pregenerate_list_waveforms` 开关和预生成进度；`GET /settings` 的 `can_change` 为假时只读显示。只在该页打开时每 5 秒轮询一次 `GET /waveforms/status`。
 6. **多声道**：各声道 min/max 包络的并集满足显示需求，不需要分声道。
 
 **实现与上文的已知差异**（都不影响接口约定）：

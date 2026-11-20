@@ -40,26 +40,63 @@
   #fs-list div:hover { background: #8882; }
   .inline-error { color: var(--bad); min-height: 1.4em; white-space: pre-wrap; }
   .hidden { display: none; }
+
+  :root { --border: #c9d4da; --muted: #546671; --accent: #17635d; --bad: #aa342e; --ok: #216c57; --page: #f1f5f5; --surface: #fff; --ink: #172d38; --tint: #e5f2ee; }
+  @media (prefers-color-scheme: dark) { :root { --border: #394f5a; --muted: #adc0c6; --accent: #87d4c0; --bad: #ffa097; --ok: #92d5b9; --page: #121c22; --surface: #1c2931; --ink: #edf4f5; --tint: #293e3d; } }
+  * { box-sizing: border-box; }
+  html { background: var(--page); color: var(--ink); }
+  body { max-width: 1060px; padding: clamp(12px, 3vw, 36px); font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+  header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 24px; margin-bottom: 18px; }
+  h1 { margin: 0 0 4px; font-size: clamp(20px, 3vw, 28px); }
+  h2 { font-size: 17px; margin: 0 0 12px; }
+  section { background: var(--surface); padding: clamp(14px, 2.5vw, 24px); margin: 14px 0; border-radius: 10px; }
+  section p { margin: 0 0 12px; color: var(--muted); }
+  .row { gap: 8px 12px; margin: 10px 0; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { cursor: default; opacity: .55; }
+  button.primary, .badge { color: var(--surface); }
+  button:focus-visible, input:focus-visible, [role=tabpanel]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  input { accent-color: var(--accent); }
+  [role=tablist] { display: flex; gap: 4px; border-bottom: 1px solid var(--border); overflow-x: auto; padding: 4px 2px 8px; }
+  [role=tab] { white-space: nowrap; border: 0; font-weight: 600; padding: 8px 14px; color: var(--muted); }
+  [role=tab][aria-selected=true] { background: var(--tint); color: var(--accent); box-shadow: inset 0 -2px var(--accent); }
+  [hidden] { display: none !important; }
+  .table-scroll { overflow-x: auto; }
+  #roots td:nth-child(2), #files { overflow-wrap: anywhere; }
+  th { font-weight: 600; }
+  tbody th { width: 24%; }
+  .actions { display: inline-flex; flex-wrap: wrap; gap: 8px; }
+  .actions:empty { display: none; }
+  footer { margin: 20px 0; }
+  @media (max-width: 580px) {
+    [role=tablist] { flex-wrap: wrap; }
+    [role=tab] { padding-inline: 10px; }
+    .row label.k { width: 100%; }
+    input[type=text], input[type=number] { min-width: min(175px, 100%); max-width: 100%; }
+    #roots td:last-child { min-width: 6em; }
+  }
 </style>
 </head>
 <body>
-<h1>AudioLib 服务端管理</h1>
-<div class="muted">只能在局域网内直接打开（经反向代理或公网访问一律 403）。版本 <span id="version">…</span> · 库状态 <span id="library">…</span></div>
-<div id="warnings" class="warn"></div>
-
-<section aria-live="polite">
-  <h2>程序更新</h2>
-  <div id="update-status">正在读取更新状态…</div>
-  <div id="update-skipped" class="muted hidden"></div>
-  <div class="muted">每次启动检查 GitHub Release。确认后下载、校验并自动部署；现有资料库、音频、配置和令牌保留。部署期间连接会短暂中断。</div>
-  <div class="row"><button id="update-check">检查更新</button><button id="update-install" class="primary" disabled>下载并更新服务端</button><a id="update-release" class="hidden" target="_blank" rel="noreferrer noopener">发布说明</a></div>
-</section>
-
+<header>
+  <div><h1>AudioLib 服务端管理</h1><div class="muted">仅限局域网直连</div></div>
+  <div>版本 <strong id="version">…</strong> · 库状态 <strong id="library">…</strong></div>
+</header>
+<div id="warnings" class="warn" role="status"></div>
+<div role="tablist" aria-label="服务器管理设置">
+  <button role="tab" id="tab-overview" aria-controls="overview" aria-selected="true" tabindex="0">运行概览</button>
+  <button role="tab" id="tab-roots" aria-controls="scan-roots" aria-selected="false" tabindex="-1">目录与扫描</button>
+  <button role="tab" id="tab-database" aria-controls="database" aria-selected="false" tabindex="-1">数据库</button>
+  <button role="tab" id="tab-waveforms" aria-controls="waveforms" aria-selected="false" tabindex="-1">波形与资源</button>
+  <button role="tab" id="tab-network" aria-controls="network" aria-selected="false" tabindex="-1">连接与权限</button>
+</div>
+<main>
+<div role="tabpanel" id="overview" aria-labelledby="tab-overview" tabindex="0">
 <section aria-live="polite">
   <h2>运行状态</h2>
   <div class="muted">只读取服务端内存中的状态（不扫描、不遍历磁盘），每 5 秒自动刷新；页面切到后台时暂停。<span id="rt-updated"></span></div>
   <div class="inline-error" id="rt-error"></div>
-  <table>
+  <div class="table-scroll"><table>
     <tbody>
       <tr><th>列表波形预生成</th><td id="rt-list"></td></tr>
       <tr><th>并发占用</th><td id="rt-slots"></td></tr>
@@ -68,37 +105,121 @@
       <tr><th>根目录在线</th><td id="rt-roots"></td></tr>
       <tr><th>最近更新检查</th><td id="rt-update"></td></tr>
     </tbody>
-  </table>
+  </table></div>
 </section>
-
-<section>
-  <h2>列表波形与资源限制</h2>
-  <div class="row"><label class="k">预生成列表波形</label><label><input type="checkbox" id="pregen"> 后台为全部音频预先生成列表缩略波形</label></div>
-  <div class="row"><label class="k">生成速率</label><input id="lw-rate" type="number" min="1" max="1000" placeholder="文件/秒"><span class="muted">文件/秒（1–1000）</span></div>
-  <div class="muted">建议使用 40 文件/秒（或更低）以保持较低的 CPU / 磁盘占用；留空 = 回到 config.toml 的值。保存后立即生效（从下一个文件起），无需重启。</div>
-  <div class="row"><button class="primary" id="save-lw">保存</button><button id="reset-lw">恢复配置文件默认</button><span class="muted" id="lw-source"></span></div>
-  <div class="muted" style="margin-top:8px">以下限制只能在 config.toml 中修改（只读显示）：</div>
-  <table><tbody id="rt-limits"></tbody></table>
+<section aria-live="polite">
+  <h2>程序更新</h2>
+  <div id="update-status">正在读取更新状态…</div>
+  <div id="update-skipped" class="muted hidden"></div>
+  <div class="muted">每次启动检查 GitHub Release。确认后下载、校验并自动部署；现有资料库、音频、配置和令牌保留。部署期间连接会短暂中断。</div>
+  <div class="row"><button id="update-check">检查更新</button><button id="update-install" class="primary" disabled>下载并更新服务端</button><a id="update-release" class="hidden" target="_blank" rel="noreferrer noopener">发布说明</a></div>
 </section>
-
+</div>
+<div role="tabpanel" id="scan-roots" aria-labelledby="tab-roots" tabindex="0" hidden>
 <section>
   <h2>库根目录</h2>
   <div class="muted">服务端扫描并共享给客户端的目录（客户端「根目录」列表即来自这里）。添加后立即生效，无需重启；移除只让库忘记该根目录下的记录（文件夹与音频记录、播放历史等），<b>绝不删除任何音频文件</b>，重新添加并扫描即可恢复。可选择服务器上的本地磁盘或已挂载的网络共享（SMB）。</div>
-  <table>
+  <div class="table-scroll"><table>
     <thead><tr><th>名称</th><th>路径</th><th>状态</th><th>文件</th><th>缺失</th><th>最近扫描</th><th></th></tr></thead>
     <tbody id="roots"></tbody>
-  </table>
+  </table></div>
   <div id="scan-box" class="secret hidden">
     <div><b>扫描中：<span id="scan-root"></span></b> <span class="muted" id="scan-state"></span></div>
     <div class="bar"><div id="scan-bar"></div></div>
     <div class="muted mono" id="scan-detail"></div>
     <div class="row"><button id="scan-pause">暂停</button><button id="scan-resume">继续</button><button class="danger" id="scan-cancel">取消</button></div>
   </div>
-  <div class="row"><label class="k">添加根目录</label><input id="root-path" class="mono" type="text" placeholder="服务器上的绝对路径，如 /srv/audiolib/music/Sounds"><button id="root-browse">浏览服务器…</button></div>
-  <div class="row"><label class="k">名称</label><input id="root-name" type="text" maxlength="128" placeholder="客户端看到的名称，默认取文件夹名"><button class="primary" id="root-add">添加</button></div>
+  <div class="row"><label class="k" for="root-path">添加根目录</label><input id="root-path" class="mono" type="text" placeholder="服务器上的绝对路径，如 /srv/audiolib/music/Sounds"><button id="root-browse">浏览服务器…</button></div>
+  <div class="row"><label class="k" for="root-name">名称</label><input id="root-name" type="text" maxlength="128" placeholder="客户端看到的名称，默认取文件夹名"><button class="primary" id="root-add">添加</button></div>
   <div class="inline-error" id="roots-error"></div>
 </section>
-
+</div>
+<div role="tabpanel" id="database" aria-labelledby="tab-database" tabindex="0" hidden>
+<section>
+  <h2>快照兼容性</h2>
+  <p>为旧客户端提供只读的 schema 8 快照，其中只包含 WAV。关闭后，旧客户端会保留上次同步的缓存，支持 schema 9 的客户端继续同步原生快照。</p>
+  <div class="row"><label><input id="legacy" type="checkbox" disabled> 为旧客户端提供兼容快照</label><button id="reset-legacy" disabled>使用配置值</button></div>
+  <div class="muted" id="legacy-source"></div>
+</section>
+<section>
+  <h2>数据库迁移</h2>
+  <p>升级到 schema 9 时，服务端先预检和备份，再建立目录搜索索引。</p>
+  <div class="row"><strong id="migration-state" aria-live="polite">正在读取…</strong><span id="migration-progress" class="muted"></span></div>
+  <div id="migration-error" class="warn" role="status"></div>
+  <div class="row"><span class="actions" id="migration-actions"></span><button id="migration-refresh">刷新状态</button></div>
+</section>
+</div>
+<div role="tabpanel" id="waveforms" aria-labelledby="tab-waveforms" tabindex="0" hidden>
+<section>
+  <h2>列表波形</h2>
+  <div class="row"><label class="k">预生成列表波形</label><label><input type="checkbox" id="pregen"> 后台为全部音频预先生成列表缩略波形</label></div>
+  <div class="row"><label class="k" for="lw-rate">生成速率</label><input id="lw-rate" type="number" min="1" max="1000" placeholder="文件/秒"><span class="muted">文件/秒（1–1000）</span></div>
+  <div class="muted">建议使用 40 文件/秒（或更低）以保持较低的 CPU / 磁盘占用；留空 = 回到 config.toml 的值。保存后立即生效（从下一个文件起），无需重启。</div>
+  <div class="row"><button class="primary" id="save-lw">保存</button><button id="reset-lw">恢复配置文件默认</button><span class="muted" id="lw-source"></span></div>
+  <div class="row"><label><input id="stat-pause" type="checkbox" disabled> 试听开始后 3 秒暂缓列表波形的文件属性读取</label><button id="reset-stat-pause" disabled>使用配置值</button></div>
+  <div class="muted" id="stat-pause-source"></div>
+</section>
+<section>
+  <h2>资源限制</h2>
+  <div class="muted">以下限制只能在 config.toml 中修改（只读显示）：</div>
+  <div class="table-scroll"><table><tbody id="rt-limits"></tbody></table></div>
+</section>
+</div>
+<div role="tabpanel" id="network" aria-labelledby="tab-network" tabindex="0" hidden>
+<section>
+  <h2>客户端连接</h2>
+  <div class="muted">客户端「服务器地址」填下面其中一个（只填到端口或路径前缀，不要加 <code>/api/v1</code>）。</div>
+  <div class="row"><label class="k" for="conn-public">外网地址</label><input id="conn-public" class="mono" type="text" readonly><button data-copy="conn-public">复制</button></div>
+  <div class="row"><label class="k" for="conn-lan">局域网地址</label><input id="conn-lan" class="mono" type="text" readonly><button data-copy="conn-lan">复制</button></div>
+  <div class="row"><label class="k">鉴权</label><span id="conn-auth"></span></div>
+</section>
+<section>
+  <h2>公网地址</h2>
+  <div class="muted">外网客户端使用的地址，例如 <code>https://audiolib.example.com:8443</code>，可带路径前缀（如 <code>https://example.com/audiolib</code>）。由反向代理转发到本机 8790 端口；反代要求见 API 文档「外网反代要求」。保存后 <code>/api/v1/health</code> 的 <code>public_url</code> 立即更新。</div>
+  <div class="row"><label class="k" for="public-url">公网地址</label><input id="public-url" class="mono" type="text" placeholder="https://audiolib.example.com:8443"><button class="primary" id="save-public">保存</button><button id="clear-public">清除</button></div>
+  <div class="row"><label class="k" for="lan-url">局域网地址</label><input id="lan-url" class="mono" type="text" placeholder="留空 = 自动检测"><button id="save-lan">保存</button><button id="clear-lan">自动检测</button></div>
+  <div class="muted" id="lan-candidates"></div>
+  <div class="muted" id="public-source"></div>
+</section>
+<section>
+  <h2>原生 HTTPS（可选）</h2>
+  <div class="muted">一般用反向代理提供 HTTPS，这里不用填。若要服务端自己监听 HTTPS：填证书链 PEM、私钥 PEM 的绝对路径和端口（如 8791），8790 的 HTTP 照常。保存前会校验文件，保存后立即生效，无需重启。<b>注意：本版本客户端只信任公共 CA 签发的证书（如 Let's Encrypt），自签名证书客户端不会接受。</b></div>
+  <div class="row"><label class="k" for="tls-cert">证书 PEM</label><input id="tls-cert" class="mono" type="text" placeholder="/path/to/fullchain.pem"></div>
+  <div class="row"><label class="k" for="tls-key">私钥 PEM</label><input id="tls-key" class="mono" type="text" placeholder="/path/to/privkey.pem"></div>
+  <div class="row"><label class="k" for="tls-port">HTTPS 端口</label><input id="tls-port" type="number" min="1" max="65535" placeholder="8791"></div>
+  <div class="row"><button class="primary" id="save-tls">校验并启用</button><button class="danger" id="disable-tls">停用</button><span id="tls-state"></span></div>
+</section>
+<section>
+  <h2>鉴权模式</h2>
+  <div class="row"><label><input type="radio" name="mode" value="off"> off：任何请求都不需要令牌</label></div>
+  <div class="row"><label><input type="radio" name="mode" value="external"> external（默认）：局域网直连不需要令牌（带了也忽略）；经反向代理或来自公网的请求需要 <code>Authorization: Bearer &lt;令牌&gt;</code></label></div>
+  <div class="row"><label><input type="radio" name="mode" value="all"> all：除 <code>/health</code> 外全部需要令牌（局域网也要）</label></div>
+  <div class="row"><button class="primary" id="save-mode">保存模式</button><button id="reset-mode">恢复配置文件默认</button><span class="muted" id="mode-source"></span></div>
+  <div class="warn" id="mode-warning"></div>
+</section>
+<section>
+  <h2>库管理权限</h2>
+  <div class="muted">控制谁可以远程扫描（开始 / 暂停 / 继续 / 取消）以及「从库中移除」记录或目录（只删除库记录，不删除文件，重新扫描会恢复）。标注编辑和播放计数不受此设置影响（只按上面的鉴权模式）。保存后立即生效。</div>
+  <div class="row"><label><input type="radio" name="manage" value="all"> all：所有通过鉴权的客户端都可以</label></div>
+  <div class="row"><label><input type="radio" name="manage" value="lan"> lan（默认）：仅局域网直连的客户端可以；经反向代理或来自公网的请求返回 403（客户端按钮显示「仅局域网可用」）</label></div>
+  <div class="row"><label><input type="radio" name="manage" value="off"> off：任何客户端都不可以（403），只能在服务端本机操作</label></div>
+  <div class="row"><button class="primary" id="save-manage">保存</button><button id="reset-manage">恢复配置文件默认</button><span class="muted" id="manage-source"></span></div>
+</section>
+<section>
+  <h2>访问令牌</h2>
+  <div class="muted">生成后明文只显示这一次，服务端只保存 SHA-256 哈希。撤销立即生效。<span id="env-token"></span></div>
+  <div class="row"><label class="k" for="token-name">名称</label><input id="token-name" type="text" maxlength="64" placeholder="例如：办公室笔记本"><button class="primary" id="create-token">生成令牌</button></div>
+  <div id="new-secret" class="secret hidden">
+    <div><b>新令牌「<span id="new-secret-name"></span>」</b>（只显示这一次，请立即复制到客户端）：</div>
+    <div class="row"><input id="new-secret-value" class="mono" type="text" readonly><button class="primary" data-copy="new-secret-value">复制</button><button id="hide-secret">我已保存</button></div>
+  </div>
+  <div class="table-scroll"><table>
+    <thead><tr><th>名称</th><th>生成时间</th><th>最近使用</th><th></th></tr></thead>
+    <tbody id="tokens"></tbody>
+  </table></div>
+</section>
+</div>
+</main>
 <div id="modal"><div class="box">
   <h2>选择服务器目录</h2>
   <div id="fs-crumbs"></div>
@@ -108,66 +229,8 @@
   <div class="row"><button class="primary" id="fs-select">选择此文件夹</button><button id="fs-up">上一级</button><button id="fs-home">起点</button><label class="muted"><input type="checkbox" id="fs-hidden"> 显示隐藏目录</label><button id="fs-cancel" style="margin-left:auto">取消</button></div>
 </div></div>
 
-<section>
-  <h2>客户端连接</h2>
-  <div class="muted">客户端「服务器地址」填下面其中一个（只填到端口或路径前缀，不要加 <code>/api/v1</code>）。</div>
-  <div class="row"><label class="k">外网地址</label><input id="conn-public" class="mono" type="text" readonly><button data-copy="conn-public">复制</button></div>
-  <div class="row"><label class="k">局域网地址</label><input id="conn-lan" class="mono" type="text" readonly><button data-copy="conn-lan">复制</button></div>
-  <div class="row"><label class="k">鉴权</label><span id="conn-auth"></span></div>
-</section>
-
-<section>
-  <h2>公网地址</h2>
-  <div class="muted">外网客户端使用的地址，例如 <code>https://audiolib.example.com:8443</code>，可带路径前缀（如 <code>https://example.com/audiolib</code>）。由反向代理转发到本机 8790 端口；反代要求见 API 文档「外网反代要求」。保存后 <code>/api/v1/health</code> 的 <code>public_url</code> 立即更新。</div>
-  <div class="row"><label class="k">公网地址</label><input id="public-url" class="mono" type="text" placeholder="https://audiolib.example.com:8443"><button class="primary" id="save-public">保存</button><button id="clear-public">清除</button></div>
-  <div class="row"><label class="k">局域网地址</label><input id="lan-url" class="mono" type="text" placeholder="留空 = 自动检测"><button id="save-lan">保存</button><button id="clear-lan">自动检测</button></div>
-  <div class="muted" id="lan-candidates"></div>
-  <div class="muted" id="public-source"></div>
-</section>
-
-<section>
-  <h2>鉴权模式</h2>
-  <div class="row"><label><input type="radio" name="mode" value="off"> off：任何请求都不需要令牌</label></div>
-  <div class="row"><label><input type="radio" name="mode" value="external"> external（默认）：局域网直连不需要令牌（带了也忽略）；经反向代理或来自公网的请求需要 <code>Authorization: Bearer &lt;令牌&gt;</code></label></div>
-  <div class="row"><label><input type="radio" name="mode" value="all"> all：除 <code>/health</code> 外全部需要令牌（局域网也要）</label></div>
-  <div class="row"><button class="primary" id="save-mode">保存模式</button><button id="reset-mode">恢复配置文件默认</button><span class="muted" id="mode-source"></span></div>
-  <div class="warn" id="mode-warning"></div>
-</section>
-
-<section>
-  <h2>库管理权限</h2>
-  <div class="muted">控制谁可以远程扫描（开始 / 暂停 / 继续 / 取消）以及「从库中移除」记录或目录（只删除库记录，不删除文件，重新扫描会恢复）。标注编辑和播放计数不受此设置影响（只按上面的鉴权模式）。保存后立即生效。</div>
-  <div class="row"><label><input type="radio" name="manage" value="all"> all：所有通过鉴权的客户端都可以</label></div>
-  <div class="row"><label><input type="radio" name="manage" value="lan"> lan（默认）：仅局域网直连的客户端可以；经反向代理或来自公网的请求返回 403（客户端按钮显示「仅局域网可用」）</label></div>
-  <div class="row"><label><input type="radio" name="manage" value="off"> off：任何客户端都不可以（403），只能在服务端本机操作</label></div>
-  <div class="row"><button class="primary" id="save-manage">保存</button><button id="reset-manage">恢复配置文件默认</button><span class="muted" id="manage-source"></span></div>
-</section>
-
-<section>
-  <h2>访问令牌</h2>
-  <div class="muted">生成后明文只显示这一次，服务端只保存 SHA-256 哈希。撤销立即生效。<span id="env-token"></span></div>
-  <div class="row"><label class="k">名称</label><input id="token-name" type="text" maxlength="64" placeholder="例如：办公室笔记本"><button class="primary" id="create-token">生成令牌</button></div>
-  <div id="new-secret" class="secret hidden">
-    <div><b>新令牌「<span id="new-secret-name"></span>」</b>（只显示这一次，请立即复制到客户端）：</div>
-    <div class="row"><input id="new-secret-value" class="mono" type="text" readonly><button class="primary" data-copy="new-secret-value">复制</button><button id="hide-secret">我已保存</button></div>
-  </div>
-  <table>
-    <thead><tr><th>名称</th><th>生成时间</th><th>最近使用</th><th></th></tr></thead>
-    <tbody id="tokens"></tbody>
-  </table>
-</section>
-
-<section>
-  <h2>原生 HTTPS（可选）</h2>
-  <div class="muted">一般用反向代理提供 HTTPS，这里不用填。若要服务端自己监听 HTTPS：填证书链 PEM、私钥 PEM 的绝对路径和端口（如 8791），8790 的 HTTP 照常。保存前会校验文件，保存后立即生效，无需重启。<b>注意：本版本客户端只信任公共 CA 签发的证书（如 Let's Encrypt），自签名证书客户端不会接受。</b></div>
-  <div class="row"><label class="k">证书 PEM</label><input id="tls-cert" class="mono" type="text" placeholder="/path/to/fullchain.pem"></div>
-  <div class="row"><label class="k">私钥 PEM</label><input id="tls-key" class="mono" type="text" placeholder="/path/to/privkey.pem"></div>
-  <div class="row"><label class="k">HTTPS 端口</label><input id="tls-port" type="number" min="1" max="65535" placeholder="8791"></div>
-  <div class="row"><button class="primary" id="save-tls">校验并启用</button><button class="danger" id="disable-tls">停用</button><span id="tls-state"></span></div>
-</section>
-
-<div class="muted">根目录改动也保存在设置文件中（一旦在这里改过，就以这里的列表为准，不再读 config.toml 的 [[roots]]）。设置文件：<span id="files" class="mono"></span>（不修改 config.toml；这里的设置覆盖 config.toml 中的同名项）</div>
-<div id="toast"></div>
+<footer class="muted">设置保存于 <span id="files" class="mono"></span>。管理页设置优先于 config.toml。首次编辑根目录后，以管理页的目录列表为准。</footer>
+<div id="toast" role="status"></div>
 <script src="/admin/admin.js"></script>
 </body>
 </html>
