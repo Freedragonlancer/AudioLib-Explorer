@@ -3,6 +3,7 @@ import { TextEdit, ComboBox, ListView, ScrollView, Palette, SpinBox } from "std-
 
 import { Theme, ThemedLineEdit as LineEdit, ThemedCheckBox as CheckBox } from "theme.slint";
 
+import { FolderBreadcrumbs, CrumbRow } from "folder-breadcrumbs.slint";
 import { AuditionPanel, PeakSettings, RulerTick } from "audition-panel.slint";
 import { AppearanceEditor, ThemePreview } from "appearance-editor.slint";
 import { SearchTaskTab } from "search-task-tabs.slint";
@@ -41,7 +42,7 @@ export struct AudioRow {
 export struct FolderRow { name: string, count: string, path: string, depth: int, expanded: bool, has-children: bool }
 /// One declared library/album and how many present records carry it.
 export struct AlbumRow { id: string, name: string, count: string, cover: image }
-export struct CrumbRow { name: string }
+export { CrumbRow }
 export struct DisplayTagRow { tags: [string] }
 export struct SearchTaskRow { id: string, name: string, favorite: bool, modified: bool, active: bool, keywords: string, index-name: string, library-index: bool, summary: string, searched: bool }
 export struct SavedSearchTaskRow { id: string, name: string, summary: string }
@@ -3534,17 +3535,10 @@ main-scroll := ScrollView {
                         }
                     }
                 }
-                if root.crumbs.length > 0: HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 4px * Theme.ui-scale;
-                    Action { text-module: 2; width: 64px * Theme.ui-scale; subtle: true; label: root.chinese ? "素材库" : "Library"; clicked => { root.all-library-requested(); } }
-                    // Deep hierarchies remain navigable without forcing the window wider.
-                    ScrollView { horizontal-stretch: 1; viewport-height: 30px * Theme.ui-scale;
-                        HorizontalLayout { spacing: 4px * Theme.ui-scale;
-                            for crumb[index] in root.crumbs: HorizontalLayout {
-                                Label { text-module: 2; width: 10px * Theme.ui-scale; text: "›"; horizontal-alignment: center; }
-                                Action { text-module: 2; subtle: true; label: crumb.name; width: 110px * Theme.ui-scale; clicked => { root.crumb-requested(index); } }
-                            }
-                        }
-                    }
+                if root.crumbs.length > 0: FolderBreadcrumbs {
+                    items: root.crumbs; chinese: root.chinese;
+                    library-requested => { root.all-library-requested(); }
+                    folder-requested(i) => { root.crumb-requested(i); }
                 }
                 // Above 1.0, keeps the sound list usable; the main view scrolls for the rest. At 1.0 the
                 // compact 1080x700 layout keeps fitting without scrolling; filters live in the sidebar.
@@ -4408,17 +4402,10 @@ main-scroll := ScrollView {
                 }
                 Rectangle { height: 32px * Theme.ui-scale; background: Theme.table-toolbar-surface;
                     HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-                        if root.crumbs.length > 0: HorizontalLayout { horizontal-stretch: 1; min-width: 80px * Theme.ui-scale; height: 30px * Theme.ui-scale; spacing: 4px * Theme.ui-scale;
-                            StudioAction { text-module: 2; width: 64px * Theme.ui-scale; subtle: true; label: root.chinese ? "素材库" : "Library"; clicked => { root.all-library-requested(); } }
-                            // Deep hierarchies remain navigable without forcing the window wider.
-                            ScrollView { horizontal-stretch: 1; viewport-height: 30px * Theme.ui-scale;
-                                HorizontalLayout { spacing: 4px * Theme.ui-scale;
-                                    for crumb[index] in root.crumbs: HorizontalLayout {
-                                        Label { text-module: 2; width: 10px * Theme.ui-scale; text: "›"; horizontal-alignment: center; }
-                                        StudioAction { text-module: 2; subtle: true; label: crumb.name; width: 110px * Theme.ui-scale; clicked => { root.crumb-requested(index); } }
-                                    }
-                                }
-                            }
+                        if root.crumbs.length > 0: FolderBreadcrumbs {
+                            items: root.crumbs; chinese: root.chinese;
+                            library-requested => { root.all-library-requested(); }
+                            folder-requested(i) => { root.crumb-requested(i); }
                         }
                         if root.checked-count <= 1 && root.crumbs.length == 0: Text { horizontal-stretch: 1; min-width: 0px; overflow: elide; text: root.favorites-only ? (root.chinese ? "我的收藏" : "Favorites") : (root.chinese ? "声音列表" : "Sounds"); color: Theme.text(2, 0, Theme.ink); font-size: Theme.font(14); font-weight: 600; vertical-alignment: center; }
                         if root.checked-count > 1: studio-selection-actions := StudioAction { text-module: 2;

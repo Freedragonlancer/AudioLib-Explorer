@@ -5282,6 +5282,7 @@ impl Controller {
                         .iter()
                         .map(|folder| CrumbRow {
                             name: folder.name.clone().into(),
+                            path: folder.path.clone().into(),
                         })
                         .collect::<Vec<_>>(),
                 )));

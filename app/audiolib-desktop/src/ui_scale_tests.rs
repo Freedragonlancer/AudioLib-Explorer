@@ -166,6 +166,124 @@ fn save_snapshot(ui: &AppWindow, file: &str) {
 }
 
 #[test]
+fn folder_breadcrumbs_resize_and_navigate_collapsed_ancestors() {
+    use audiolib_core::config::{DEFAULT_THEME, STUDIO_THEME};
+    use i_slint_backend_testing::ElementHandle;
+    use std::{cell::Cell, rc::Rc, time::Duration};
+
+    init_software_backend();
+    let names = [
+        "FX",
+        "Bluezone Corporation — Advanced Minimal Techno",
+        "音效素材_Long_Production_Directory",
+        "Bluezone_Corporation_Cinematic_Collection",
+        "_(WAVs)_Metal_Cinematic_Sequence_(120_BPM)",
+    ];
+    for (theme, chinese) in [(DEFAULT_THEME, true), (STUDIO_THEME, false)] {
+        let ui = AppWindow::new().unwrap();
+        crate::theme::apply_theme(&ui, theme);
+        ui.set_chinese(chinese);
+        let mut path = String::from("/Volumes/Audio");
+        let rows = names.map(|name| {
+            path.push('/');
+            path.push_str(name);
+            crate::CrumbRow {
+                name: name.into(),
+                path: path.clone().into(),
+            }
+        });
+        ui.set_crumbs(ModelRc::new(VecModel::from(rows.to_vec())));
+        let destination = Rc::new(Cell::new(-2));
+        let observed = destination.clone();
+        ui.on_crumb_requested(move |i| observed.set(i));
+        let observed = destination.clone();
+        ui.on_all_library_requested(move || observed.set(-1));
+        ui.show().unwrap();
+        ui.window()
+            .set_size(slint::LogicalSize::new(1920.0, 1000.0));
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(20));
+        let find = |label: &str| ElementHandle::find_by_accessible_label(&ui, label).next();
+        let home = if chinese { "素材库" } else { "Library" };
+        let more = if chinese {
+            "上级目录"
+        } else {
+            "Parent folders"
+        };
+        let leaf = names.last().unwrap();
+        save_snapshot(&ui, &format!("crumbs-wide-{theme}.png"));
+        assert!(
+            find(more).is_none(),
+            "{theme} wide table {}",
+            ui.get_table_visible_width()
+        );
+        let short = find(names[0]).unwrap();
+        let long = find(names[1]).unwrap();
+        assert!(short.size().width < long.size().width / 2.0);
+        long.invoke_accessible_default_action();
+        assert_eq!(destination.get(), 1);
+        let home_button = ElementHandle::find_by_element_id(&ui, "FolderBreadcrumbs::home")
+            .next()
+            .unwrap();
+        assert_eq!(home_button.accessible_label().as_deref(), Some(home));
+        home_button.invoke_accessible_default_action();
+        assert_eq!(destination.get(), -1);
+        let wide_leaf = find(leaf).unwrap().size().width;
+
+        ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(20));
+        save_snapshot(&ui, &format!("crumbs-narrow-{theme}.png"));
+        let current = find(leaf).expect("current folder must stay visible");
+        assert!(current.size().width > 0.0 && current.size().width <= wide_leaf);
+        assert_eq!(
+            current.accessible_description().as_deref(),
+            Some(path.as_str())
+        );
+        let start = current.absolute_position();
+        let size = current.size();
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(
+                    start.x + size.width / 2.0,
+                    start.y + size.height / 2.0,
+                ),
+            });
+        for ms in [600, 0, 20] {
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(ms));
+        }
+        save_snapshot(&ui, &format!("crumbs-hover-{theme}.png"));
+        assert!(
+            find(&path).is_some(),
+            "tooltip must display the literal path"
+        );
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(1.0, 1.0),
+            });
+        current.invoke_accessible_default_action();
+        assert_eq!(destination.get(), 4);
+        assert!(find(names[0]).is_none());
+        let overflow = find(more).expect("hidden ancestors must be reachable");
+        overflow.invoke_accessible_default_action();
+        let menu_row = find(names[0]).expect("first hidden folder in menu");
+        let popup = overflow.absolute_position();
+        let item = menu_row.absolute_position();
+        crate::ui_tests::click_at(
+            &ui,
+            slint::LogicalPosition::new(
+                popup.x + item.x + menu_row.size().width / 2.0,
+                popup.y + overflow.size().height + item.y + menu_row.size().height / 2.0,
+            ),
+        );
+        assert_eq!(destination.get(), 0);
+        ui.window()
+            .set_size(slint::LogicalSize::new(1920.0, 1000.0));
+        ui.window().take_snapshot().unwrap();
+        assert!(find(more).is_none() && find(names[0]).is_some());
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
 fn detail_fields_stay_clear_of_the_hovered_scrollbar() {
     use audiolib_core::config::{DEFAULT_THEME, STUDIO_THEME};
     use i_slint_backend_testing::{ElementHandle, mock_elapsed_time};
