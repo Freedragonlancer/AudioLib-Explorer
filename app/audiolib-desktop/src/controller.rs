@@ -12,7 +12,7 @@ use crate::list_waveforms::{
     ListWaveformCell, ListWaveformHost, ListWaveforms, render_list_waveform, window_ids,
 };
 use crate::waveform_view::{
-    WaveView, db_from_gain, gain_from_db, render_waveform, render_waveform_mask, ruler_marks,
+    WaveView, db_from_gain, gain_from_db, render_waveform_layers, ruler_marks,
 };
 use crate::{AlbumRow, AppWindow, AudioRow, CrumbRow, FolderRow, LocalScanRootRow, RulerTick};
 use audiolib_audio::{
@@ -581,14 +581,6 @@ impl FolderFacets {
 #[derive(Clone)]
 struct WaveJob {
     source: waveform_selection::WaveSource,
-    path: PathBuf,
-    /// Server mode: the record whose waveform the server computes (`/waveform`).
-    remote_id: Option<i64>,
-    /// Sample rate of the record (frames are in the original's frames).
-    sample_rate: u32,
-    frames: u64,
-    start_frame: u64,
-    end_frame: u64,
     duration: f64,
     view: WaveView,
     generation: u64,
@@ -596,6 +588,13 @@ struct WaveJob {
     width: u32,
     height: u32,
 }
+#[derive(Default)]
+struct WaveQueue {
+    loading_remote: bool,
+    source_key: String,
+    pending: Option<WaveJob>,
+}
+
 #[derive(Clone, Default)]
 struct TreeState {
     matches: Arc<Vec<Folder>>,
@@ -931,7 +930,7 @@ pub struct Controller {
     window_coverage: Mutex<Option<result_window::WindowCoverage>>,
     waveform_generation: AtomicU64,
     waveform_cancel: Mutex<Arc<AtomicBool>>,
-    waveform_job: Mutex<Option<WaveJob>>,
+    waveform_job: Mutex<WaveQueue>,
     waveform_wake: Condvar,
     waveform_size: Mutex<(u32, u32)>,
     wave_view: Mutex<(String, WaveView)>,
@@ -1260,7 +1259,7 @@ impl Controller {
             window_coverage: Mutex::new(None),
             waveform_generation: AtomicU64::new(0),
             waveform_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
-            waveform_job: Mutex::new(None),
+            waveform_job: Mutex::new(WaveQueue::default()),
             waveform_wake: Condvar::new(),
             waveform_size: Mutex::new((1300, 100)),
             wave_view: Mutex::new((String::new(), WaveView::default())),
@@ -1443,7 +1442,7 @@ impl Controller {
                 && let Some(file) =
                     c.waveform_refresh_file(&c.audio.status(), ui.get_waveform_ready())
             {
-                c.queue_waveform(&file);
+                c.refresh_waveform(&file);
             }
             *c.single_click_play_pending.lock().unwrap() = true;
             c.single_click_play_wake.notify_one();
@@ -1942,6 +1941,9 @@ impl Controller {
         });
         let c = self.clone();
         ui.on_waveform_zoom_requested(move |factor| {
+            if c.waveform_job.lock().unwrap().loading_remote {
+                return;
+            }
             let Some(ui) = c.ui.upgrade() else {
                 return;
             };
@@ -1960,10 +1962,13 @@ impl Controller {
                         .zoom_at(f64::from(factor), status.position, file.duration);
                 }
             }
-            c.queue_waveform(&file);
+            c.refresh_waveform(&file);
         });
         let c = self.clone();
         ui.on_waveform_wheel_zoom_requested(move |factor, fraction| {
+            if c.waveform_job.lock().unwrap().loading_remote {
+                return;
+            }
             let Some(ui) = c.ui.upgrade() else {
                 return;
             };
@@ -1976,16 +1981,17 @@ impl Controller {
                 zoom_waveform_at_pointer(&ui, &mut state.1, factor, fraction, file.duration);
                 state.1
             };
-            // Later wheel steps anchor to the range drawn from now on.
-            publish_wave_target(&ui, view, file.duration);
             let (start, end) = view.range(file.duration);
             if !(start..=end).contains(&status.position) {
                 c.wave_follow_paused.store(true, Ordering::Release);
             }
-            c.queue_waveform(&file);
+            c.refresh_waveform(&file);
         });
         let c = self.clone();
         ui.on_waveform_pan_requested(move |scroll| {
+            if c.waveform_job.lock().unwrap().loading_remote {
+                return;
+            }
             let Some(ui) = c.ui.upgrade() else {
                 return;
             };
@@ -1993,7 +1999,7 @@ impl Controller {
             c.wave_view.lock().unwrap().1.scroll = f64::from(scroll.clamp(0.0, 1.0));
             if let Some(file) = c.waveform_refresh_file(&c.audio.status(), ui.get_waveform_ready())
             {
-                c.queue_waveform(&file);
+                c.refresh_waveform(&file);
             }
         });
         let c = self.clone();
@@ -2011,7 +2017,7 @@ impl Controller {
                 if let Some(file) =
                     c.waveform_refresh_file(&c.audio.status(), ui.get_waveform_ready())
                 {
-                    c.queue_waveform(&file);
+                    c.refresh_waveform(&file);
                 }
             }
         });
@@ -2047,7 +2053,7 @@ impl Controller {
                 && let Some(file) =
                     c.waveform_refresh_file(&c.audio.status(), ui.get_waveform_ready())
             {
-                c.queue_waveform(&file);
+                c.refresh_waveform(&file);
             }
         });
     }
@@ -3066,7 +3072,7 @@ impl Controller {
             }
             self.queue_artwork(&file);
             if !file.missing {
-                self.queue_waveform(&file);
+                self.refresh_waveform(&file);
             }
         } else {
             *self.selected.lock().unwrap() = None;
@@ -4124,95 +4130,7 @@ impl Controller {
         let c = self.clone();
         std::thread::Builder::new()
             .name("audiolib-waveform".into())
-            .spawn(move || {
-                loop {
-                    let mut pending = c.waveform_job.lock().unwrap();
-                    while pending.is_none() && !c.shutdown.load(Ordering::Acquire) {
-                        pending = c.waveform_wake.wait(pending).unwrap();
-                    }
-                    if c.shutdown.load(Ordering::Acquire) {
-                        return;
-                    }
-                    let mut job = pending.take().unwrap();
-                    drop(pending);
-                    if job.cancel.load(Ordering::Acquire) {
-                        continue;
-                    }
-                    if let Err(error) = job.source.bind_source_version(&c, &job.cancel) {
-                        if !c.shutdown.load(Ordering::Acquire)
-                            && !job.cancel.load(Ordering::Acquire)
-                            && c.waveform_generation.load(Ordering::Acquire) == job.generation
-                        {
-                            let cancel = job.cancel.clone();
-                            let generation = job.generation;
-                            c.status_when(error, move |controller| {
-                                !cancel.load(Ordering::Acquire)
-                                    && controller.waveform_generation.load(Ordering::Acquire)
-                                        == generation
-                            });
-                        }
-                        continue;
-                    }
-                    let request = WaveformRequest {
-                        samples_per_pixel: job
-                            .frames
-                            .div_ceil(job.width as u64)
-                            .max(1)
-                            .min(u32::MAX as u64) as u32,
-                        start_frame: job.start_frame,
-                        end_frame: Some(job.end_frame),
-                        include_colors: true,
-                    };
-                    let chinese = c.chinese.load(Ordering::Acquire);
-                    let result = survive_panic(
-                        || match job.remote_id {
-                            // Server mode: the server's waveform of the original, drawn as soon
-                            // as it arrives, whatever the audition stream is doing.
-                            Some(id) => c.remote_waveform(
-                                id,
-                                job.sample_rate,
-                                request,
-                                &job.cancel,
-                                job.source
-                                    .remote_version
-                                    .as_ref()
-                                    .expect("Remote Waveform version was bound"),
-                                |data, progress| {
-                                    c.publish_waveform(&job, data, progress);
-                                },
-                            ),
-                            None => {
-                                let cache = c.config.lock().unwrap().paths.cache.join("waveforms");
-                                audiolib_audio::cached_waveform_with_cancel(
-                                    &job.path,
-                                    &cache,
-                                    request,
-                                    &job.cancel,
-                                )
-                                .map_err(|error| error.to_string())
-                            }
-                        },
-                        || internal_error(chinese, "绘制 Waveform", "Drawing the Waveform"),
-                    );
-                    if job.cancel.load(Ordering::Acquire)
-                        || c.waveform_generation.load(Ordering::Acquire) != job.generation
-                    {
-                        continue;
-                    }
-                    let result =
-                        result.and_then(|data| job.source.check_local_version().map(|_| data));
-                    match result {
-                        Ok(data) => c.publish_waveform(&job, &data, 1.0),
-                        Err(error) => {
-                            c.status_when(error, move |controller| {
-                                !job.cancel.load(Ordering::Acquire)
-                                    && controller.waveform_generation.load(Ordering::Acquire)
-                                        == job.generation
-                            });
-                        }
-                    }
-                }
-            })
+            .spawn(move || c.run_waveform_worker())
             .expect("spawn waveform worker");
 
         let c = self.clone();
@@ -4347,7 +4265,7 @@ impl Controller {
                                 && state.1.follow(status.position, file.duration)
                         };
                         if moved {
-                            c.queue_waveform(&file);
+                            c.refresh_waveform(&file);
                         }
                     }
                     let playback_error =
@@ -5859,7 +5777,112 @@ impl Controller {
         reload_target(&mut self.audio_reload.lock().unwrap(), selected)
     }
 
-    /// Publish the image and its source timeline together; stale partials never win.
+    fn run_waveform_worker(self: &Arc<Self>) {
+        let mut resident: Option<(
+            Arc<AtomicBool>,
+            waveform_selection::WaveSource,
+            crate::waveform_peaks::ResidentPeaks,
+        )> = None;
+        loop {
+            let mut queue = self.waveform_job.lock().unwrap();
+            while queue.pending.is_none() && !self.shutdown.load(Ordering::Acquire) {
+                if resident
+                    .as_ref()
+                    .is_some_and(|(cancel, _, _)| cancel.load(Ordering::Acquire))
+                {
+                    resident = None;
+                }
+                queue = self.waveform_wake.wait(queue).unwrap();
+            }
+            if self.shutdown.load(Ordering::Acquire) {
+                return;
+            }
+            let mut job = queue.pending.take().unwrap();
+            drop(queue);
+            if job.cancel.load(Ordering::Acquire) {
+                continue;
+            }
+            if !resident
+                .as_ref()
+                .is_some_and(|(cancel, _, _)| Arc::ptr_eq(cancel, &job.cancel))
+            {
+                resident = None;
+                let result = survive_panic(
+                    || self.load_waveform_source(&mut job),
+                    || {
+                        internal_error(
+                            self.chinese.load(Ordering::Acquire),
+                            "绘制 Waveform",
+                            "Drawing the Waveform",
+                        )
+                    },
+                );
+                match result {
+                    Ok(peaks) => resident = Some((job.cancel.clone(), job.source.clone(), peaks)),
+                    Err(error) => {
+                        self.status_when(error, move |_| !job.cancel.load(Ordering::Acquire));
+                        continue;
+                    }
+                }
+            }
+            // While loading, wheel/resize/follow may have changed the desired
+            // viewport many times. Render the most recent one from this same source.
+            let mut queue = self.waveform_job.lock().unwrap();
+            if job.cancel.load(Ordering::Acquire) {
+                continue;
+            }
+            if let Some(newer) = queue.pending.take() {
+                job = newer;
+            }
+            drop(queue);
+            let (_, source, peaks) = resident.as_ref().unwrap();
+            job.source = source.clone();
+            let (start, end) = job.view.range(job.duration);
+            self.publish_waveform(&job, &peaks.viewport(start, end, job.width), 1.0);
+        }
+    }
+
+    fn load_waveform_source(
+        self: &Arc<Self>,
+        job: &mut WaveJob,
+    ) -> Result<crate::waveform_peaks::ResidentPeaks, String> {
+        job.source.bind_source_version(self, &job.cancel)?;
+        let request = job.source.peak_request();
+        let data = match &job.source.remote_version {
+            Some(version) => self.remote_waveform(
+                &job.source.file,
+                request,
+                &job.cancel,
+                version,
+                |partial, progress| {
+                    if job.cancel.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let mut preview = job.clone();
+                    (preview.width, preview.height) = *self.waveform_size.lock().unwrap();
+                    self.publish_waveform(
+                        &preview,
+                        &crate::waveform_peaks::loading_overview(partial, preview.width),
+                        progress,
+                    );
+                },
+            )?,
+            None => {
+                let cache = self.config.lock().unwrap().paths.cache.join("waveforms");
+                audiolib_audio::cached_waveform_with_cancel(
+                    Path::new(&job.source.file.file_path),
+                    &cache,
+                    request,
+                    &job.cancel,
+                )
+                .map_err(|error| error.to_string())?
+            }
+        };
+        job.source.check_local_version()?;
+        Ok(crate::waveform_peaks::ResidentPeaks::new(data))
+    }
+
+    /// Publish the complete viewport and its time ruler in one event-loop callback.
     fn publish_waveform(
         self: &Arc<Self>,
         job: &WaveJob,
@@ -5873,9 +5896,8 @@ impl Controller {
         }
         let job = job.clone();
         let c2 = self.clone();
-        let pixels = render_waveform(data, job.width, job.height, job.view);
         let studio = *self.theme.lock().unwrap() == STUDIO_THEME;
-        let mask = studio.then(|| render_waveform_mask(data, job.width, job.height, job.view));
+        let (pixels, mask) = render_waveform_layers(data, job.width, job.height, job.view, studio);
         let info = format!(
             "{} ch · {:.1} kHz · {}",
             data.channels,
@@ -5894,15 +5916,9 @@ impl Controller {
                 return;
             }
             c2.publish_wave_source(&ui, &job.source);
-            ui.set_waveform_image(Image::from_rgba8(
-                SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&pixels, job.width, job.height),
-            ));
+            ui.set_waveform_image(Image::from_rgba8(pixels));
             let mask = if ui.global::<crate::Theme>().get_modern_player() {
-                mask.map_or_else(Image::default, |mask| {
-                    Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-                        &mask, job.width, job.height,
-                    ))
-                })
+                mask.map_or_else(Image::default, Image::from_rgba8)
             } else {
                 Image::default()
             };
@@ -5910,21 +5926,34 @@ impl Controller {
             let (start, end) = job.view.range(job.duration);
             ui.set_view_start(start as f32);
             ui.set_view_end(end as f32);
-            ui.set_wave_zoom(job.view.zoom as f32);
-            ui.set_wave_scroll(job.view.scroll as f32);
-            ui.set_waveform_progress(progress as f32);
+            publish_wave_target(&ui, job.view, job.duration);
+            if progress >= 1.0 {
+                let mut queue = c2.waveform_job.lock().unwrap();
+                if job.cancel.load(Ordering::Acquire) {
+                    return;
+                }
+                queue.loading_remote = false;
+                drop(queue);
+                ui.set_waveform_progress(1.0);
+            } else {
+                ui.set_waveform_progress((progress as f32).min(1.0 - f32::EPSILON));
+            }
             ui.set_waveform_ready(true);
             ui.set_waveform_info(info.into());
         });
     }
 
     fn invalidate_waveform(&self) {
+        let mut queue = self.waveform_job.lock().unwrap();
         self.waveform_generation.fetch_add(1, Ordering::AcqRel);
         self.waveform_cancel
             .lock()
             .unwrap()
             .store(true, Ordering::Release);
-        *self.waveform_job.lock().unwrap() = None;
+        queue.pending = None;
+        queue.source_key.clear();
+        queue.loading_remote = false;
+        self.waveform_wake.notify_one();
     }
 
     fn waveform_file(&self, status: &audiolib_audio::PlaybackStatus) -> Option<AudioFile> {
@@ -6002,21 +6031,38 @@ impl Controller {
     }
 
     fn queue_waveform(&self, file: &AudioFile) {
+        self.schedule_waveform(file, true);
+    }
+
+    fn refresh_waveform(&self, file: &AudioFile) {
+        self.schedule_waveform(file, false);
+    }
+
+    fn schedule_waveform(&self, file: &AudioFile, reload: bool) {
         if !self.available() || file.missing {
             return;
         }
-        self.waveform_cancel
-            .lock()
-            .unwrap()
-            .store(true, Ordering::Release);
-        let cancel = Arc::new(AtomicBool::new(false));
-        *self.waveform_cancel.lock().unwrap() = cancel.clone();
-        let generation = self.waveform_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let source = waveform_selection::WaveSource::capture(self, file);
+        let mut queue = self.waveform_job.lock().unwrap();
+        let mut token = self.waveform_cancel.lock().unwrap();
+        let new_source =
+            reload || token.load(Ordering::Acquire) || queue.source_key != source.request_key();
+        let initial_remote = new_source && self.remote_read_only() && file.id > 0;
+        if new_source {
+            queue.loading_remote = initial_remote;
+            token.store(true, Ordering::Release);
+            *token = Arc::new(AtomicBool::new(false));
+            self.waveform_generation.fetch_add(1, Ordering::AcqRel);
+            queue.source_key = source.request_key().to_owned();
+        }
+        let generation = self.waveform_generation.load(Ordering::Acquire);
+        let cancel = token.clone();
+        drop(token);
         let (width, height) = *self.waveform_size.lock().unwrap();
         let (view, changed) = {
             let mut state = self.wave_view.lock().unwrap();
             let changed = state.0 != file.file_path;
-            if changed {
+            if changed || initial_remote {
                 state.0 = file.file_path.clone();
                 state.1.zoom = 1.0;
                 state.1.scroll = 0.0;
@@ -6024,17 +6070,8 @@ impl Controller {
             }
             (state.1, changed)
         };
-        let (start, end) = view.range(file.duration);
-        let start_frame = (start * file.sample_rate as f64).round() as u64;
-        let end_frame = (end * file.sample_rate as f64).round() as u64;
-        *self.waveform_job.lock().unwrap() = Some(WaveJob {
-            source: waveform_selection::WaveSource::capture(self, file),
-            path: PathBuf::from(&file.file_path),
-            remote_id: (self.remote_read_only() && file.id > 0).then_some(file.id),
-            sample_rate: file.sample_rate,
-            frames: end_frame.saturating_sub(start_frame),
-            start_frame,
-            end_frame,
+        queue.pending = Some(WaveJob {
+            source,
             duration: file.duration,
             view,
             generation,
@@ -6042,22 +6079,21 @@ impl Controller {
             width,
             height,
         });
-        // The requested range and its ruler show at once; the old image is drawn
-        // inside it until this render lands. A newer request supersedes this one.
-        let duration = file.duration;
-        let superseded = cancel;
-        post(self.ui.clone(), move |ui| {
-            if superseded.load(Ordering::Acquire) {
-                return;
-            }
-            if changed {
-                ui.set_waveform_ready(false);
-                ui.set_waveform_progress(0.0);
-                ui.set_waveform_image(Image::default());
-                ui.set_waveform_mask(Image::default());
-            }
-            publish_wave_target(&ui, view, duration);
-        });
+        if new_source {
+            let duration = file.duration;
+            post(self.ui.clone(), move |ui| {
+                if cancel.load(Ordering::Acquire) {
+                    return;
+                }
+                if initial_remote || changed || !ui.get_waveform_ready() {
+                    ui.set_waveform_ready(false);
+                    ui.set_waveform_progress(if initial_remote { 0.0 } else { 1.0 });
+                    ui.set_waveform_image(Image::default());
+                    ui.set_waveform_mask(Image::default());
+                    publish_wave_target(&ui, view, duration);
+                }
+            });
+        }
         self.waveform_wake.notify_one();
     }
 
@@ -9076,8 +9112,7 @@ fn output_route(status: &audiolib_audio::PlaybackStatus) -> (&'static str, Strin
     (backend, rate)
 }
 
-/// Publish the requested Waveform range, its zoom and its ruler ticks. The panel
-/// draws the last image inside this range until the render for it lands.
+/// Publish the source range, zoom and ruler for the visible Waveform frame.
 pub(crate) fn publish_wave_target(ui: &AppWindow, view: WaveView, duration: f64) {
     let (start, end) = view.range(duration);
     ui.set_wave_target_start(start as f32);
@@ -9619,12 +9654,6 @@ mod tests {
         present_file(&ui, present);
         let mut job = WaveJob {
             source: waveform_selection::WaveSource::capture(&controller, present),
-            path: PathBuf::from(&present.file_path),
-            remote_id: Some(present.id),
-            sample_rate: 48000,
-            frames: 1,
-            start_frame: 0,
-            end_frame: 1,
             duration: present.duration,
             view: WaveView::default(),
             generation: controller.waveform_generation.load(Ordering::Acquire),
@@ -11717,7 +11746,7 @@ mod tests {
             samples_per_pixel: 2,
             peaks: vec![vec![peak(239.0); 4], vec![peak(36.0); 4]],
         };
-        let pixels = render_waveform(
+        let pixels = crate::waveform_view::render_waveform(
             &data,
             4,
             20,

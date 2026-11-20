@@ -350,7 +350,15 @@ component TransformField inherits Rectangle {
     pure function formatted(value: float) -> string {
         return root.pitch ? "\{round(value)}" : Clock.fixed2(value);
     }
-    public function refuse() { root.invalid = true; }
+    public function refuse() {
+        root.invalid = true;
+        rejection-feedback.running = true;
+        rejection-feedback.restart();
+    }
+    rejection-feedback := Timer {
+        running: false; interval: 900ms;
+        triggered => { self.running = false; }
+    }
     function open() {
         if !root.enabled { return; }
         trigger.focus();
@@ -380,7 +388,7 @@ component TransformField inherits Rectangle {
     width: title-text.preferred-width + widest-number.preferred-width + unit-text.preferred-width + 19px * Theme.ui-scale;
     height: max(22px * Theme.ui-scale, Theme.font(12) + 8px * Theme.ui-scale);
     border-radius: 3px * Theme.ui-scale; border-width: 1phx;
-    border-color: trigger.has-focus ? Theme.accent : transparent;
+    border-color: rejection-feedback.running ? Theme.warning : trigger.has-focus ? Theme.accent : transparent;
     background: hit.pressed ? Theme.trough : hit.has-hover ? Theme.hover : transparent;
     opacity: root.enabled ? 1 : 0.45;
     animate border-color, background { duration: Theme.motion-fast; }
@@ -1292,6 +1300,7 @@ component ClassicAuditionPanel inherits Rectangle {
     in property <float> playback-rate: 1;
     in property <image> waveform;
     in property <bool> waveform-ready;
+    in property <float> waveform-progress: 1;
     in property <string> name;
     in property <string> info;
     in property <string> output;
@@ -1391,7 +1400,7 @@ component ClassicAuditionPanel inherits Rectangle {
     changed progress-clock => { root.sync-progress(false); }
     function wheel-zoom(delta: length, fraction: float) -> EventResult {
         if root.selection-gesture { return accept; }
-        if root.ready && root.duration > 0 && delta != 0px {
+        if root.waveform-progress >= 1 && root.ready && root.duration > 0 && delta != 0px {
             // Pixel deltas support both mouse detents and precision touchpads.
             root.zoom-at(Math.pow(2, clamp(delta / 120px, -2, 2)), clamp(fraction, 0, 1));
             return accept;
@@ -1494,6 +1503,10 @@ component ClassicAuditionPanel inherits Rectangle {
                     x: (root.view-start - root.shown-start) / root.shown-span * parent.width;
                     width: max(0px, (root.view-end - root.view-start) / root.shown-span * parent.width);
                 }
+                if root.waveform-progress > 0 && root.waveform-progress < 1: Rectangle {
+                    y: 0px; height: 1px * Theme.ui-scale; width: parent.width * root.waveform-progress;
+                    background: Theme.accent.with-alpha(0.55);
+                }
                 if !root.waveform-ready: Text { text: root.busy || root.missing || root.state == 1 || root.state == 7 ? root.unavailable : root.ready ? (root.spectral ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.chinese ? "正在分析波形…" : "Analyzing waveform…")) : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition")); color: Theme.text(4, 1, Theme.dim); horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(11); }
                 // These overlays are paint-only, leaving click/scroll ownership to scrub.
                 if root.ready && root.duration > 0: PlayedRegion {
@@ -1526,9 +1539,9 @@ component ClassicAuditionPanel inherits Rectangle {
                         return accept;
                     }
                     if event.text == Key.Home { root.seek(0); return accept; }
-                    if event.text == "+" || event.text == "=" { root.zoom-change(2); return accept; }
-                    if event.text == "-" && root.zoom > 1 { root.zoom-change(0.5); return accept; }
-                    if event.text == "0" { root.zoom-change(0); return accept; }
+                    if root.waveform-progress >= 1 && (event.text == "+" || event.text == "=") { root.zoom-change(2); return accept; }
+                    if root.waveform-progress >= 1 && event.text == "-" && root.zoom > 1 { root.zoom-change(0.5); return accept; }
+                    if root.waveform-progress >= 1 && event.text == "0" { root.zoom-change(0); return accept; }
                     reject
                 }
                 scrub := WaveSelectionOverlay {
@@ -1549,7 +1562,7 @@ component ClassicAuditionPanel inherits Rectangle {
                         drag-ended => { root.selection-drag-ended(); }
                         cancel-requested => { root.selection-cancel-requested(); }
                         seek-play(time) => { root.seek-play(time); }
-                        zoom-at(factor, fraction) => { root.zoom-at(factor, fraction); }
+                        zoom-at(factor, fraction) => { if root.waveform-progress >= 1 { root.zoom-at(factor, fraction); } }
                         cursor-changed(value) => { root.selection-cursor-changed(value); }
                         pointer-feedback-changed => { root.selection-pointer-feedback-changed(); }
                     }
@@ -1567,10 +1580,10 @@ component ClassicAuditionPanel inherits Rectangle {
         HorizontalLayout { height: 16px * Theme.ui-scale; spacing: 7px * Theme.ui-scale;
             Caption { width: 42px * Theme.ui-scale; text: Math.round(root.zoom * 10) / 10 + "×"; font-size: Theme.font(10); }
             if root.ready: Caption { text: root.chinese ? "滚轮缩放" : "Scroll to zoom"; font-size: Theme.font(9); }
-            Slider { input-label: root.chinese ? "波形可视范围" : "Visible waveform range"; horizontal-stretch: 1; minimum: 0; maximum: 1; step: 0.005; enabled: root.ready && root.zoom > 1; value <=> root.scroll; changed => { root.pan(self.value); } }
-            ClassicTool { width: 24px * Theme.ui-scale; height: 18px * Theme.ui-scale; symbol: "−"; label: root.chinese ? "缩小波形" : "Zoom out"; enabled: root.ready && root.zoom > 1; clicked => { root.zoom-change(0.5); } }
-            ClassicTool { width: 24px * Theme.ui-scale; height: 18px * Theme.ui-scale; symbol: "+"; label: root.chinese ? "放大波形" : "Zoom in"; enabled: root.ready && root.zoom < 128; clicked => { root.zoom-change(2); } }
-            ClassicTool { width: 38px * Theme.ui-scale; height: 18px * Theme.ui-scale; icon: @image-url("icons/fit.svg"); label: root.chinese ? "显示完整声音" : "Fit entire sound"; enabled: root.ready; clicked => { root.zoom-change(0); } }
+            Slider { input-label: root.chinese ? "波形可视范围" : "Visible waveform range"; horizontal-stretch: 1; minimum: 0; maximum: 1; step: 0.005; enabled: root.waveform-progress >= 1 && root.ready && root.zoom > 1; value <=> root.scroll; changed => { root.pan(self.value); } }
+            ClassicTool { width: 24px * Theme.ui-scale; height: 18px * Theme.ui-scale; symbol: "−"; label: root.chinese ? "缩小波形" : "Zoom out"; enabled: root.waveform-progress >= 1 && root.ready && root.zoom > 1; clicked => { root.zoom-change(0.5); } }
+            ClassicTool { width: 24px * Theme.ui-scale; height: 18px * Theme.ui-scale; symbol: "+"; label: root.chinese ? "放大波形" : "Zoom in"; enabled: root.waveform-progress >= 1 && root.ready && root.zoom < 128; clicked => { root.zoom-change(2); } }
+            ClassicTool { width: 38px * Theme.ui-scale; height: 18px * Theme.ui-scale; icon: @image-url("icons/fit.svg"); label: root.chinese ? "显示完整声音" : "Fit entire sound"; enabled: root.waveform-progress >= 1 && root.ready; clicked => { root.zoom-change(0); } }
         }
         HorizontalLayout { height: 25px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
             Text { accessible-role: text; accessible-label: root.chinese ? "试听时间" : "Audition time"; width: 208px * Theme.ui-scale; height: 25px * Theme.ui-scale; text: root.time + "  /  " + root.end-time; color: Theme.text(4, 0, Theme.ink); font-family: Theme.font-family == "" ? "Consolas" : Theme.font-family; font-size: Theme.font(14); vertical-alignment: center; }
@@ -1725,7 +1738,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
     changed progress-clock => { root.sync-progress(false); }
     function wheel-zoom(delta: length, fraction: float) -> EventResult {
         if root.selection-gesture { return accept; }
-        if root.ready && root.duration > 0 && delta != 0px {
+        if root.waveform-progress >= 1 && root.ready && root.duration > 0 && delta != 0px {
             // Pixel deltas support both mouse detents and precision touchpads.
             root.zoom-at(Math.pow(2, clamp(delta / 120px, -2, 2)), clamp(fraction, 0, 1));
             return accept;
@@ -1901,9 +1914,9 @@ component WorkbenchAuditionPanel inherits Rectangle {
                     select-mode(mono, pair) => { root.mono = mono; root.stereo-pair = pair; root.transform(root.pitch-text, root.rate-text, mono, root.repeat); }
                 }
                 Rectangle { width: 1px; height: 14px * Theme.ui-scale; y: (parent.height - self.height) / 2; background: Theme.border; }
-                Tool { width: 22px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; symbol: "−"; symbol-size: Theme.font(14); label: root.chinese ? "缩小波形" : "Zoom out"; enabled: root.ready && root.zoom > 1; clicked => { root.zoom-change(0.5); } }
-                Tool { width: 22px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; symbol: "+"; symbol-size: Theme.font(14); label: root.chinese ? "放大波形" : "Zoom in"; enabled: root.ready && root.zoom < 128; clicked => { root.zoom-change(2); } }
-                Tool { width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; icon: @image-url("icons/fit.svg"); icon-size: 16px * Theme.ui-scale; label: root.chinese ? "显示完整声音" : "Fit entire sound"; enabled: root.ready; clicked => { root.zoom-change(0); } }
+                Tool { width: 22px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; symbol: "−"; symbol-size: Theme.font(14); label: root.chinese ? "缩小波形" : "Zoom out"; enabled: root.waveform-progress >= 1 && root.ready && root.zoom > 1; clicked => { root.zoom-change(0.5); } }
+                Tool { width: 22px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; symbol: "+"; symbol-size: Theme.font(14); label: root.chinese ? "放大波形" : "Zoom in"; enabled: root.waveform-progress >= 1 && root.ready && root.zoom < 128; clicked => { root.zoom-change(2); } }
+                Tool { width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; icon: @image-url("icons/fit.svg"); icon-size: 16px * Theme.ui-scale; label: root.chinese ? "显示完整声音" : "Fit entire sound"; enabled: root.waveform-progress >= 1 && root.ready; clicked => { root.zoom-change(0); } }
                 Rectangle { width: 1px; height: 14px * Theme.ui-scale; y: (parent.height - self.height) / 2; background: Theme.border; }
                 Tool { width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; icon-size: 17px * Theme.ui-scale; icon: @image-url("icons/peaks.svg"); label: root.chinese ? "波形显示设置" : "Peak display settings"; tip-align: 1; clicked => { root.peaks(); } }
                 Tool { width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; icon-size: 17px * Theme.ui-scale; icon: root.expanded ? @image-url("icons/chevron-down.svg") : @image-url("icons/chevron-up.svg"); label: root.expanded ? (root.chinese ? "收起试听波形" : "Compact audition waveform") : (root.chinese ? "展开试听波形" : "Expand audition waveform"); tip-align: 1; active: root.expanded; clicked => { root.expanded-requested(!root.expanded); } }
@@ -1986,8 +1999,8 @@ component WorkbenchAuditionPanel inherits Rectangle {
                         Rectangle { y: parent.height * 0.25 - 1px; height: 2px; background: parent.lane; }
                         Rectangle { y: parent.height * 0.75 - 1px; height: 2px; background: parent.lane; }
                     }
-                    // Render progress while a partial Waveform is already on screen.
-                    if root.ready && root.waveform-ready && root.waveform-progress < 1: Rectangle {
+                    // First-load progress is independent of the complete Waveform image.
+                    if root.waveform-progress > 0 && root.waveform-progress < 1: Rectangle {
                         y: 0px; height: 2px * Theme.ui-scale; background: #00000020;
                         Rectangle { x: 0px; height: parent.height; width: parent.width * clamp(root.waveform-progress, 0, 1); background: Theme.accent; animate width { duration: Theme.motion-base; } }
                     }
@@ -2034,9 +2047,9 @@ component WorkbenchAuditionPanel inherits Rectangle {
                             return accept;
                         }
                         if event.text == Key.Home { root.seek(0); return accept; }
-                        if event.text == "+" || event.text == "=" { root.zoom-change(2); return accept; }
-                        if event.text == "-" && root.zoom > 1 { root.zoom-change(0.5); return accept; }
-                        if event.text == "0" { root.zoom-change(0); return accept; }
+                        if root.waveform-progress >= 1 && (event.text == "+" || event.text == "=") { root.zoom-change(2); return accept; }
+                        if root.waveform-progress >= 1 && event.text == "-" && root.zoom > 1 { root.zoom-change(0.5); return accept; }
+                        if root.waveform-progress >= 1 && event.text == "0" { root.zoom-change(0); return accept; }
                         reject
                     }
                     scrub := WaveSelectionOverlay {
@@ -2057,7 +2070,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                         drag-ended => { root.selection-drag-ended(); }
                         cancel-requested => { root.selection-cancel-requested(); }
                         seek-play(time) => { root.seek-play(time); }
-                        zoom-at(factor, fraction) => { root.zoom-at(factor, fraction); }
+                        zoom-at(factor, fraction) => { if root.waveform-progress >= 1 { root.zoom-at(factor, fraction); } }
                         cursor-changed(value) => { root.selection-cursor-changed(value); }
                         pointer-feedback-changed => { root.selection-pointer-feedback-changed(); }
                     }
@@ -2126,7 +2139,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                 Rectangle { horizontal-stretch: 1;
                     OverviewBar {
                         width: parent.width; height: parent.height;
-                        chinese: root.chinese; zoom: root.zoom; enabled: root.ready; scroll <=> root.scroll;
+                        chinese: root.chinese; zoom: root.zoom; enabled: root.waveform-progress >= 1 && root.ready; scroll <=> root.scroll;
                         pan(value) => { root.pan(value); }
                     }
                 }
@@ -2268,7 +2281,7 @@ export component AuditionPanel inherits Rectangle {
     property <bool> modern-player: Theme.modern-player;
     changed modern-player => { root.presenter-volume-adjusting = false; root.presenter-selection-gesture = false; root.reset-pointer-feedback(); }
     changed active => { if !root.active { root.presenter-volume-adjusting = false; root.presenter-selection-gesture = false; root.reset-pointer-feedback(); } }
-    height: Theme.modern-player ? (root.expanded ? 286px : 114px) * Theme.ui-scale
+    height: Theme.modern-player ? 114px * (root.expanded ? Theme.max-audition-height-factor : 1) * Theme.ui-scale
         : (root.compact ? 176px : 204px) * Theme.ui-scale;
     if root.active && !Theme.modern-player: ClassicAuditionPanel {
         width: parent.width; height: parent.height;
@@ -2306,6 +2319,7 @@ export component AuditionPanel inherits Rectangle {
         playback-rate: root.playback-rate;
         waveform: root.waveform;
         waveform-ready: root.waveform-ready;
+        waveform-progress: root.waveform-progress;
         name: root.name;
         info: root.info;
         output: root.output;
@@ -2336,7 +2350,7 @@ export component AuditionPanel inherits Rectangle {
         volume(value) => { root.volume(value); }
         resize(width, height) => { root.resize(width, height); }
         zoom-change(value) => { root.zoom-change(value); }
-        zoom-at(factor, fraction) => { root.zoom-at(factor, fraction); }
+        zoom-at(factor, fraction) => { if root.waveform-progress >= 1 { root.zoom-at(factor, fraction); } }
         pan(value) => { root.pan(value); }
         peaks => { root.peaks(); }
         output-settings => { root.output-settings(); }
@@ -2423,7 +2437,7 @@ export component AuditionPanel inherits Rectangle {
         volume(value) => { root.volume(value); }
         resize(width, height) => { root.resize(width, height); }
         zoom-change(value) => { root.zoom-change(value); }
-        zoom-at(factor, fraction) => { root.zoom-at(factor, fraction); }
+        zoom-at(factor, fraction) => { if root.waveform-progress >= 1 { root.zoom-at(factor, fraction); } }
         pan(value) => { root.pan(value); }
         peaks => { root.peaks(); }
         output-settings => { root.output-settings(); }

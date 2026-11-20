@@ -53,6 +53,7 @@ mod ui_scale_tests;
 mod ui_tests;
 mod updates;
 mod waveform_cursor;
+mod waveform_peaks;
 #[cfg(test)]
 mod waveform_selection_ui_tests;
 mod waveform_view;

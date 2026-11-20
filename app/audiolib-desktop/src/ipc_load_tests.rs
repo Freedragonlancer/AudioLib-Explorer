@@ -361,12 +361,7 @@ fn child_ipc_waveform_publication() {
         audiolib_audio::waveform(Path::new(&a.file_path), WaveformRequest::default()).unwrap();
     let job = WaveJob {
         source: waveform_selection::WaveSource::capture(&controller, &a),
-        path: PathBuf::from(&a.file_path),
-        remote_id: None,
-        sample_rate: a.sample_rate,
-        frames: data.frames,
-        start_frame: 0,
-        end_frame: data.frames,
+
         duration: a.duration,
         view: WaveView::default(),
         generation: controller.waveform_generation.load(Ordering::Acquire),

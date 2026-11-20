@@ -19,7 +19,7 @@ fn window(modern: bool) -> AppWindow {
     ui.set_play_duration(30.0);
     ui.set_view_start(0.0);
     ui.set_view_end(20.0);
-    ui.set_audition_preferred_height(114.0);
+    ui.set_studio_audition_height_factor(1.0);
     ui.set_wave_selection_identity("library-a:file-42:version-1".into());
     ui.show().unwrap();
     settle();
@@ -599,7 +599,7 @@ fn source_view_selection_and_wheel_work_with_empty_or_shorter_transport() {
             for transport_duration in [0.0, 1.0] {
                 let ui = window(modern);
                 ui.set_audition_expanded(expanded);
-                ui.set_audition_preferred_height(if expanded { 286.0 } else { 114.0 });
+                ui.set_studio_audition_height_factor(if expanded { 2.5 } else { 1.0 });
                 if !expanded {
                     ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
                 }
@@ -1122,32 +1122,9 @@ fn export_folder_choice_is_reachable_in_both_languages() {
     }
 }
 
-/// Export focused pointer crops at GUI zoom 1/1.5/2 with physical DPI fixed at 1.
-/// No audio source, library or device is opened; each theme gets one comparison
-/// matrix with rows for GUI zoom and columns for hover/draw/resize/open/held/wait.
-#[test]
-#[ignore = "explicit PNG export for visual acceptance of the Waveform pointer"]
-fn export_waveform_pointer_visual_previews() {
+pub(super) fn synthetic_waveform_images() -> (slint::Image, slint::Image) {
     use crate::waveform_view::{WaveView, render_waveform, render_waveform_mask};
     use audiolib_audio::{WaveformData, WaveformPeak};
-    use audiolib_core::config::{DEFAULT_THEME, STUDIO_THEME};
-    use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};
-    use std::path::Path;
-
-    let directory = std::env::var_os("AUDIOLIB_WAVE_SELECTION_SNAPSHOT_DIR")
-        .expect("Set AUDIOLIB_WAVE_SELECTION_SNAPSHOT_DIR to an owned absolute output directory");
-    let directory = Path::new(&directory);
-    assert!(
-        directory.is_absolute(),
-        "The PNG output directory must be absolute"
-    );
-    std::fs::create_dir_all(directory).unwrap();
-    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
-        mock_time: true,
-        threading: false,
-        renderer_name: Some("software".into()),
-    })))
-    .expect("platform already initialized");
 
     let waveform = WaveformData {
         sample_rate: 48_000,
@@ -1189,6 +1166,35 @@ fn export_waveform_pointer_visual_previews() {
     let waveform_mask = slint::Image::from_rgba8(
         slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&mask, 1440, 160),
     );
+    (waveform_image, waveform_mask)
+}
+
+/// Export focused pointer crops at GUI zoom 1/1.5/2 with physical DPI fixed at 1.
+/// No audio source, library or device is opened; each theme gets one comparison
+/// matrix with rows for GUI zoom and columns for hover/draw/resize/open/held/wait.
+#[test]
+#[ignore = "explicit PNG export for visual acceptance of the Waveform pointer"]
+fn export_waveform_pointer_visual_previews() {
+    use audiolib_core::config::{DEFAULT_THEME, STUDIO_THEME};
+    use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};
+    use std::path::Path;
+
+    let directory = std::env::var_os("AUDIOLIB_WAVE_SELECTION_SNAPSHOT_DIR")
+        .expect("Set AUDIOLIB_WAVE_SELECTION_SNAPSHOT_DIR to an owned absolute output directory");
+    let directory = Path::new(&directory);
+    assert!(
+        directory.is_absolute(),
+        "The PNG output directory must be absolute"
+    );
+    std::fs::create_dir_all(directory).unwrap();
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .expect("platform already initialized");
+
+    let (waveform_image, waveform_mask) = synthetic_waveform_images();
     const FOCUS: u32 = 64;
     const MAGNIFICATION: u32 = 3;
     const GAP: u32 = 8;
@@ -1230,7 +1236,7 @@ fn export_waveform_pointer_visual_previews() {
             ui.set_waveform_mask(waveform_mask.clone());
             ui.set_peak_mode(0);
             ui.set_audition_expanded(modern);
-            ui.set_audition_preferred_height((if modern { 286.0 } else { 114.0 }) * gui_scale);
+            ui.set_studio_audition_height_factor(if modern { 2.5 } else { 1.0 });
             let ranges = accept_ranges(&ui);
             settle();
             let mut capture = |column: usize, position: LogicalPosition, kind: i32| {
