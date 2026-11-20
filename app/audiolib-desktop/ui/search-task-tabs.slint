@@ -29,7 +29,8 @@ component TaskTabIcon inherits Rectangle {
 export component SearchTaskTab inherits Rectangle {
     in property <string> name;
     in property <string> keywords;
-    in property <string> folder;
+    in property <string> index-name;
+    in property <bool> library-index;
     in property <string> summary;
     in property <bool> searched: false;
     in property <bool> active: false;
@@ -84,18 +85,18 @@ export component SearchTaskTab inherits Rectangle {
         x: 12px * Theme.ui-scale; y: 3px * Theme.ui-scale;
         width: max(0px, parent.width - 78px * Theme.ui-scale); height: parent.height - 6px * Theme.ui-scale;
         clip: true;
-        // Keep tinted keywords and the > directory together at the left edge.
-        // Directory context yields to long keywords; the tooltip stays complete.
+        // Keep keywords and the active sidebar index together at the left edge.
+        // Index context yields to long keywords; the tooltip stays complete.
         keyword-label := Text {
             x: 0px;
             width: directory-label.visible && root.keywords != "" ? min(parent.width, self.preferred-width) : parent.width;
             height: parent.height; visible: root.keywords != "";
             text: root.keywords;
-            color: Theme.text(1, !root.enabled ? 3 : task-hit.has-hover ? 4 : root.active ? 5 : 6, Theme.accent-hover); font-size: Theme.font(11);
+            color: Theme.text(1, !root.enabled ? 3 : task-hit.has-hover ? 4 : root.active ? 5 : 6, Theme.mint); font-size: Theme.font(11);
             horizontal-alignment: left; vertical-alignment: center; overflow: elide;
         }
         directory-separator := Text {
-            visible: directory-label.visible && (root.keywords != "" || root.folder != "");
+            visible: directory-label.visible && (root.keywords != "" || root.index-name != "");
             x: root.keywords != "" ? keyword-label.width + 6px * Theme.ui-scale : 0px;
             width: self.preferred-width; height: parent.height;
             text: ">"; color: Theme.text(1, 1, Theme.dim); font-size: Theme.font(11);
@@ -105,10 +106,12 @@ export component SearchTaskTab inherits Rectangle {
             visible: root.keywords == "" || parent.width >= keyword-label.preferred-width + directory-separator.preferred-width + min(96px * Theme.ui-scale, self.preferred-width) + 12px * Theme.ui-scale;
             width: root.keywords == "" ? max(0px, parent.width - self.x) : min(96px * Theme.ui-scale, self.preferred-width);
             x: root.keywords != "" ? keyword-label.preferred-width + directory-separator.preferred-width + 12px * Theme.ui-scale
-                : (root.folder != "" ? directory-separator.preferred-width + 6px * Theme.ui-scale : 0px);
+                : (root.index-name != "" ? directory-separator.preferred-width + 6px * Theme.ui-scale : 0px);
             height: parent.height;
-            text: root.folder != "" ? root.folder : (root.keywords != "" ? (root.chinese ? "全部目录" : "All folders") : (root.chinese ? "筛选" : "Filters"));
-            color: root.folder != "" || root.keywords != "" ? Theme.text(1, 8, Theme.warning) : Theme.text(1, 4, Theme.accent-hover);
+            text: root.index-name != "" ? root.index-name : (root.keywords != "" ? (root.chinese ? "全部声音" : "All sounds") : (root.chinese ? "筛选" : "Filters"));
+            color: root.library-index ? Theme.text(1, 0, Theme.coral)
+                : root.index-name != "" ? Theme.text(1, 8, Theme.apricot)
+                : Theme.text(1, 1, Theme.dim);
             font-size: Theme.font(11); horizontal-alignment: left; vertical-alignment: center; overflow: elide;
         }
     }

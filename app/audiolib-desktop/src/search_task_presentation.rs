@@ -5,7 +5,8 @@ use audiolib_core::{FileVisibility, SearchFilters, SortOrder, search_workspace::
 pub(super) struct TaskPresentation {
     pub(super) name: String,
     pub(super) keywords: Vec<String>,
-    pub(super) folder: String,
+    pub(super) index_name: String,
+    pub(super) library_index: bool,
     pub(super) summary: String,
     pub(super) searched: bool,
 }
@@ -81,10 +82,8 @@ pub(super) fn task_presentation(task: &SearchTask, chinese: bool) -> TaskPresent
     } else {
         task.title.clone()
     };
-    let folder = definition
-        .folder
-        .as_ref()
-        .map_or_else(String::new, |folder| folder_label(&folder.path));
+    let album = super::album_bindings::album_label(definition, chinese);
+    let library_index = album.is_some();
     let mut lines = vec![name.clone()];
     lines.push(format!(
         "{}: {}",
@@ -95,47 +94,35 @@ pub(super) fn task_presentation(task: &SearchTask, chinese: bool) -> TaskPresent
             &definition.query
         }
     ));
-    lines.push(format!(
-        "{}: {}",
-        text("目录", "Folder"),
-        definition
+    let index_name = if let Some(album) = album {
+        lines.push(format!("{}: {album}", text("音效库", "Library")));
+        match definition.album_binding.as_ref() {
+            Some(binding) if !binding.unavailable && binding.folder_path.is_some() => {
+                folder_label(&album)
+            }
+            _ => album,
+        }
+    } else {
+        let path = definition
             .folder
             .as_ref()
-            .map_or(text("全部目录", "All folders"), |folder| folder
-                .path
-                .as_str())
-    ));
-    lines.push(
-        text(
-            if definition.include_subfolders {
-                "包含子目录"
-            } else {
-                "仅当前目录"
-            },
-            if definition.include_subfolders {
-                "Include subfolders"
-            } else {
-                "Current folder only"
-            },
-        )
-        .to_owned(),
-    );
-    let filters = &definition.filters;
-    if let Some(binding) = &definition.album_binding {
+            .map(|folder| folder.path.as_str());
         lines.push(format!(
             "{}: {}",
-            text("专辑", "Album"),
-            super::album_bindings::binding_label(binding, chinese)
+            text("目录", "Folder"),
+            path.unwrap_or(text("全部目录", "All folders"))
         ));
-    } else if let Some(name) = &filters.album {
-        lines.push(format!("{}: {name}", text("专辑", "Album")));
-    } else if let Some(id) = filters.album_id {
-        lines.push(format!(
-            "{}: {id} ({})",
-            text("专辑", "Album"),
-            text("身份不可用", "identity unavailable")
-        ));
-    }
+        lines.push(
+            if definition.include_subfolders {
+                text("包含子目录", "Include subfolders")
+            } else {
+                text("仅当前目录", "Current folder only")
+            }
+            .to_owned(),
+        );
+        path.map(folder_label).unwrap_or_default()
+    };
+    let filters = &definition.filters;
     lines.push(format!(
         "{}: {}",
         text("文件状态", "File status"),
@@ -205,7 +192,8 @@ pub(super) fn task_presentation(task: &SearchTask, chinese: bool) -> TaskPresent
     TaskPresentation {
         name,
         keywords: query_keywords(&definition.query),
-        folder,
+        index_name,
+        library_index,
         summary: lines.join("\n"),
         searched: !definition.query.trim().is_empty()
             || definition.folder.is_some()
@@ -290,7 +278,8 @@ mod tests {
                 display.keywords,
                 ["hard", "metal hit", "汽车 经过", "pass-by"]
             );
-            assert_eq!(display.folder, label);
+            assert_eq!(display.index_name, label);
+            assert!(!display.library_index);
             assert!(display.summary.contains(&task.definition.query));
             assert!(display.summary.contains(path));
             assert!(display.searched);

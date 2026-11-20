@@ -24,12 +24,12 @@ add `album_id` / `album_entity`. Search accepts either the legacy album name or 
 positive album ID, never both. Sidebar facets carry their ID and matching count
 in one provider query and retain the current search and other filters.
 
-The two sidebar indexes are cross-filters: folder counts retain the keyword and
-album conditions while ignoring the selected folder itself; album counts retain
-the keyword and folder conditions while ignoring the selected album itself.
-"All sounds" clears both folder and album scope, including a retained task album
-binding, and keeps the keyword and other filters. Audio-favorites navigation uses
-the same scope reset while retaining its favorites-only condition.
+The desktop sidebar offers two alternative indexes. Selecting a folder replaces
+the active album, and selecting an album replaces the active folder. Both lists
+show counts for the keyword and other filters across all folders and albums, so
+a user can switch directly to a scope with no overlap. "All sounds" clears the
+active scope and keeps the keyword and other filters. Audio-favorites navigation
+uses the same scope reset while retaining its favorites-only condition.
 
 Album IDs are scoped by a persistent random namespace. An allocator high-water
 mark prevents ID reuse after removal and restore. Root relinking preserves the

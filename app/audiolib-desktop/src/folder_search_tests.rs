@@ -536,6 +536,7 @@ fn directory_cache_key_tracks_filters_and_refresh_but_not_navigation() {
         revision: 7,
         database_revision: Some(10),
         query: request.query.clone(),
+        scope: request.scope,
         filters: request.filters.clone(),
         folders: Arc::new(Vec::new()),
     };
@@ -551,6 +552,9 @@ fn directory_cache_key_tracks_filters_and_refresh_but_not_navigation() {
     request.filters.favorites_only = true;
     assert!(!cache.matches(&request, 7, Some(10), &provider));
     request.filters.favorites_only = false;
+    request.scope = SearchScope::Path;
+    assert!(!cache.matches(&request, 7, Some(10), &provider));
+    request.scope = cache.scope;
     request.query = "wind".into();
     assert!(!cache.matches(&request, 7, Some(10), &provider));
     drop(provider);

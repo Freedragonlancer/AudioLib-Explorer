@@ -56,6 +56,31 @@ pub(super) fn binding_label(binding: &AlbumFilterBinding, chinese: bool) -> Stri
     }
 }
 
+pub(super) fn album_label(definition: &SearchTaskDefinition, chinese: bool) -> Option<String> {
+    if let Some(binding) = &definition.album_binding {
+        return Some(binding_label(binding, chinese));
+    }
+    if definition.filters.album.as_deref() == Some("") {
+        return Some(
+            if chinese {
+                "无音效库名称"
+            } else {
+                "No library name"
+            }
+            .into(),
+        );
+    }
+    definition.filters.album.clone().or_else(|| {
+        definition.filters.album_id.map(|id| {
+            if chinese {
+                format!("音效库身份不可用 (#{id})")
+            } else {
+                format!("Unavailable library (#{id})")
+            }
+        })
+    })
+}
+
 pub(super) fn album_filter_unavailable(definition: &SearchTaskDefinition) -> bool {
     definition.filters.album_id.is_some()
         && definition
@@ -69,6 +94,11 @@ pub(super) fn resolve_album_filter(
     provider: &SqliteProvider,
     definition: &mut SearchTaskDefinition,
 ) -> Result<bool, String> {
+    // Older workspaces could stack both sidebar indexes. Keep the explicit
+    // library condition (including an unresolved identity) across tabs and favorites.
+    if definition.filters.album_id.is_some() || definition.filters.album.is_some() {
+        definition.folder = None;
+    }
     let Some(id) = definition.filters.album_id else {
         definition.album_binding = None;
         return Ok(false);
@@ -165,45 +195,6 @@ impl Controller {
         state.unavailable_album = None;
         state.restore_failed = false;
         true
-    }
-
-    pub(in crate::controller) fn task_album_choices_only(&self, request: &SearchRequest) -> bool {
-        let state = self.task_workspace.lock().unwrap();
-        !state.loading
-            && !state.restoring
-            && !state.restore_failed
-            && state.unavailable_folder.is_none()
-            && state
-                .unavailable_album
-                .is_some_and(|id| request.filters.album_id == Some(id))
-    }
-
-    /// The existing bounded facet worker may refresh choices while results stay blocked.
-    pub(in crate::controller) fn queue_unavailable_album_choices(
-        &self,
-        ui: &AppWindow,
-        generation: u64,
-    ) {
-        let mut request = self.request.lock().unwrap().clone();
-        if !ui.get_album_filter_unavailable() || !self.task_album_choices_only(&request) {
-            return;
-        }
-        request.query = ui.get_query().to_string();
-        let cancel = Arc::new(AtomicBool::new(false));
-        std::mem::replace(&mut *self.search_cancel.lock().unwrap(), cancel.clone())
-            .store(true, Ordering::Release);
-        *self.facet_job.lock().unwrap() = Some(SearchJob {
-            window: None,
-            backward_before: None,
-            path_probe: None,
-            request,
-            generation,
-            not_before: Instant::now(),
-            cancel,
-            facet_revision: self.facet_revision.load(Ordering::Acquire),
-            provider: self.provider(),
-        });
-        self.facet_wake.notify_one();
     }
 
     /// Accept owned facet identities after the publication generation check.
