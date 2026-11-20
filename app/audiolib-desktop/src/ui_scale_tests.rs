@@ -166,6 +166,97 @@ fn save_snapshot(ui: &AppWindow, file: &str) {
 }
 
 #[test]
+fn detail_fields_stay_clear_of_the_hovered_scrollbar() {
+    use audiolib_core::config::{DEFAULT_THEME, STUDIO_THEME};
+    use i_slint_backend_testing::{ElementHandle, mock_elapsed_time};
+    use slint::{LogicalPosition, LogicalSize, platform::WindowEvent};
+    use std::time::Duration;
+
+    init_software_backend();
+    for (theme, prefix, width, height) in [
+        (DEFAULT_THEME, "", 1080.0, 700.0),
+        (STUDIO_THEME, "studio-", 1440.0, 900.0),
+    ] {
+        for scale in [1.0, 1.5] {
+            let ui = AppWindow::new().unwrap();
+            crate::theme::apply_theme(&ui, theme);
+            ui.global::<crate::Theme>().set_ui_scale(scale);
+            ui.window()
+                .set_size(LogicalSize::new(width * scale, height * scale));
+            ui.set_inspector_preferred_width(240.0 * scale);
+            ui.set_chinese(true);
+            ui.set_has_selection(true);
+            ui.set_selected_id("42".into());
+            ui.set_selected_name("AEROHeli_Drone_Chopper.wav".into());
+            ui.set_selected_album("Aircraft library".into());
+            ui.set_selected_path("Aircraft/Helicopter/AEROHeli_Drone_Chopper.wav".into());
+            ui.set_selected_format("96.0 kHz / 24 bit / 2 ch / 01:08.266".into());
+            ui.set_selected_description("Drone, Chopper, Dark".into());
+            ui.set_selected_source_tags("Drone · Chopper · Dark · Aircraft · Helicopter".into());
+            ui.set_annotation_editor_visible(true);
+            ui.set_notes_visible(true);
+            ui.show().unwrap();
+            // Allow the theme switch to finish restoring the inspector viewport.
+            for _ in 0..3 {
+                mock_elapsed_time(Duration::from_millis(20));
+            }
+
+            let find = |id: &str| {
+                ElementHandle::find_by_element_id(&ui, &format!("AppWindow::{prefix}{id}")).next()
+            };
+            let scroll = find("inspector-scroll").expect("details viewport");
+            // A text editor may have its own scrollbar. The outer track ends at the viewport edge.
+            let right = scroll.absolute_position().x + scroll.size().width;
+            let track = scroll
+                .query_descendants()
+                .match_id("ScrollView::vertical-bar")
+                .find_all()
+                .into_iter()
+                .find(|bar| (bar.absolute_position().x + bar.size().width - right).abs() < 0.5)
+                .expect("overflowing details should have a scrollbar");
+            let position = LogicalPosition::new(
+                track.absolute_position().x + track.size().width / 2.0,
+                track.absolute_position().y + track.size().height / 2.0,
+            );
+            ui.window()
+                .dispatch_event(WindowEvent::PointerMoved { position });
+            mock_elapsed_time(Duration::from_millis(200));
+            let wheel = || {
+                ui.window().dispatch_event(WindowEvent::PointerScrolled {
+                    position,
+                    delta_x: 0.0,
+                    delta_y: -48.0 * scale,
+                });
+                mock_elapsed_time(Duration::from_millis(16));
+            };
+            save_snapshot(&ui, &format!("details-top-{theme}-{scale}.png"));
+            wheel();
+            assert!(
+                ui.get_task_inspector_scroll_y() < 0.0,
+                "{theme} at {scale}×: wheel at {position:?}"
+            );
+            // Studio places the description below its audio parameters and tags.
+            let field = (0..20)
+                .find_map(|_| {
+                    if let Some(field) = find("source-description") {
+                        return Some(field);
+                    }
+                    wheel();
+                    None
+                })
+                .expect("description is reachable by scrolling");
+            save_snapshot(&ui, &format!("details-scroll-{theme}-{scale}.png"));
+            assert!(field.size().width > 0.0);
+            assert!(
+                field.absolute_position().x + field.size().width < track.absolute_position().x,
+                "{theme} at {scale}×: description overlaps the scrollbar"
+            );
+            ui.hide().unwrap();
+        }
+    }
+}
+
+#[test]
 fn ai_skill_settings_render_in_both_languages_and_compact_windows() {
     init_software_backend();
     for chinese in [false, true] {
