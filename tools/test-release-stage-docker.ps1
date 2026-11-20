@@ -49,7 +49,7 @@ function Set-Ready($TestCase, [string]$Architecture) {
     [IO.File]::Move("$receipt.tmp", $receipt)
 }
 
-function Start-Coordinator($TestCase) {
+function Start-Coordinator($TestCase, [switch]$BlockGitCheck) {
     $start = [Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })))
     $start.WorkingDirectory = $repo
     $start.UseShellExecute = $false
@@ -57,7 +57,8 @@ function Start-Coordinator($TestCase) {
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
     $start.Environment['AUDIOLIB_TEST_DOCKER_CONTROL'] = $TestCase.Control
-    foreach ($argument in '-NoProfile','-File',(Join-Path $tools 'release-stage-docker.ps1'),
+    $entry = if ($BlockGitCheck) { 'coordinator-git-gate.ps1' } else { 'release-stage-docker.ps1' }
+    foreach ($argument in '-NoProfile','-File',(Join-Path $tools $entry),
         '-Tag',$tag,'-DraftId',"$($TestCase.Draft)",'-NotesFile',$TestCase.Notes,'-AssetDirectory',$TestCase.Assets,
         '-ReadyDirectory',$TestCase.Ready,'-Bash',$Bash,'-WaitSeconds','40') { $start.ArgumentList.Add($argument) }
     $process = [Diagnostics.Process]::Start($start)
@@ -240,6 +241,17 @@ case "$scenario:$arch:$attempt" in
     reset_upload ;;
   starter:amd64:1|conflict:amd64:1)
     reset_upload ;;
+  dispatch-starter:amd64:1|dispatch-conflict:amd64:1)
+    wait_gate first.amd64
+    reset_message
+    timing 1 1 42 "$archive"
+    record finish
+    if [ "$scenario" = dispatch-starter ]; then
+      fail 'release-create: Remote asset is incomplete: upload state starter'
+    fi
+    fail 'release-create: Remote asset size/SHA256 conflicts with accepted local asset' ;;
+  dispatch-*:arm64:1)
+    record post ;;
   mixed:amd64:1)
     reset_message
     printf 'gh: HTTP 422 while uploading %s.sha256\n' "$archive" >&2
@@ -252,6 +264,28 @@ if [ -f "$control/archive-stored.$arch" ]; then timing 1 0 0; else timing 2 0 0;
 record finish
 '@
     [IO.File]::WriteAllText((Join-Path $tools 'release-create.sh'), ($fakeWorker -replace '\r\n', [string][char]10))
+    $gitGate = @'
+$ErrorActionPreference = 'Stop'
+function git {
+    $control = $env:AUDIOLIB_TEST_DOCKER_CONTROL
+    if ($args[-1] -ceq 'HEAD' -and (Test-Path -LiteralPath (Join-Path $control 'block.git.dispatch'))) {
+        # This check runs inside the coordinator's launch preflight after its active-worker poll.
+        if ($active.Count -ne 1) { throw 'Expected one live uploader before dispatch.' }
+        $blocked = Join-Path $control 'git.dispatch.blocked'
+        [IO.File]::WriteAllText("$blocked.tmp", [string]$active[0].Process.Id)
+        [IO.File]::Move("$blocked.tmp", $blocked)
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        while (!(Test-Path -LiteralPath (Join-Path $control 'allow.git.dispatch'))) {
+            if ($timer.Elapsed.TotalSeconds -gt 20) { throw 'Timed out waiting for the synthetic Git gate.' }
+            Start-Sleep -Milliseconds 50
+        }
+    }
+    $application = Get-Command git -CommandType Application | Select-Object -First 1
+    & $application.Source @args
+}
+& (Join-Path $PSScriptRoot 'release-stage-docker.ps1') @args
+'@
+    [IO.File]::WriteAllText((Join-Path $tools 'coordinator-git-gate.ps1'), $gitGate)
     & git -C $repo init --quiet
     if ($LASTEXITCODE -ne 0) { throw 'Could not initialize the synthetic release repository.' }
     & git -C $repo -c core.autocrlf=false add --all
@@ -296,6 +330,33 @@ record finish
             if (!($checks -like "status $arch * finish")) { throw "Missing recovery pair verification for $arch before retry." }
         }
     } finally { Close-Coordinator $run }
+
+    $dispatchConflicts = [ordered]@{
+        'dispatch-starter' = 'upload state starter'
+        'dispatch-conflict' = 'size/SHA256 conflicts'
+    }
+    foreach ($scenario in $dispatchConflicts.Keys) {
+        $testCase = New-TestCase $scenario
+        Set-Ready $testCase 'amd64'
+        $run = Start-Coordinator $testCase -BlockGitCheck
+        try {
+            $null = Wait-WorkerMarker $testCase $run 'upload.amd64.1.start'
+            [IO.File]::WriteAllText((Join-Path $testCase.Control 'block.git.dispatch'), '')
+            Set-Ready $testCase 'arm64'
+            $null = Wait-WorkerMarker $testCase $run 'git.dispatch.blocked'
+            $processId = [int](Get-Content -LiteralPath (Join-Path $testCase.Control 'git.dispatch.blocked') -Raw)
+            $uploader = [Diagnostics.Process]::GetProcessById($processId)
+            try {
+                Let-WorkerFinish $testCase 'first.amd64'
+                if (!$uploader.WaitForExit(10000)) { throw 'The first worker did not exit while Git verification was blocked.' }
+            } finally { $uploader.Dispose() }
+            Let-WorkerFinish $testCase 'git.dispatch'
+            Assert-CoordinatorResult $run $false $dispatchConflicts[$scenario]
+            if ((Test-WorkerMarker $testCase 'upload.arm64.1.start') -or (Test-WorkerMarker $testCase 'upload.arm64.1.post')) {
+                throw "A new uploader reached dispatch after the first uploader had already stopped on $scenario."
+            }
+        } finally { Close-Coordinator $run }
+    }
 
     $scenarios = [ordered]@{
         stored = ''
@@ -352,7 +413,7 @@ record finish
         }
     } finally { Close-Coordinator $run }
 
-    'Docker staging mock tests passed (readiness, live sibling drain, serial recovery, proven assets, hard conflicts and persisted recovery).'
+    'Docker staging mock tests passed (readiness, live sibling drain, serial recovery, proven assets, hard conflicts during dispatch and persisted recovery).'
 } finally {
     $absolute = [IO.Path]::GetFullPath($fixture)
     if (!$absolute.StartsWith((Join-Path $tempParent 'AudioLibDockerStageTest-'),[StringComparison]::Ordinal) -or

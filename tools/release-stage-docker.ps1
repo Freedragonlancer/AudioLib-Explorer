@@ -130,6 +130,10 @@ function Start-PairStage($Pair, [switch]$Probe) {
     foreach ($argument in @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'release-stage.ps1'), '-CommandFile', $commandFile)) {
         $start.ArgumentList.Add($argument)
     }
+    # A worker may have exited while this launch was being prepared.
+    foreach ($worker in $active) {
+        if ($worker.Process.HasExited) { return }
+    }
     $process = [Diagnostics.Process]::Start($start)
     return [pscustomobject]@{
         Archive = $Pair.Archive
@@ -216,7 +220,7 @@ try {
 
     $failure = $null
     $idle = [Diagnostics.Stopwatch]::StartNew()
-    while ($completed.Count -lt $archives.Count) {
+    :staging while ($completed.Count -lt $archives.Count) {
         foreach ($worker in $active.ToArray()) {
             if (!$worker.Process.HasExited) { continue }
             $null = $active.Remove($worker)
@@ -276,7 +280,9 @@ try {
                 if ($completed.Contains($pair.Archive)) { continue }
                 $state.accepted[$pair.Archive] = $pair.Digest
                 Save-UploadState
-                $active.Add((Start-PairStage $pair))
+                $worker = Start-PairStage $pair
+                if (!$worker) { continue staging }
+                $active.Add($worker)
                 Write-Host "Started $($state.mode) Docker staging for $($pair.Archive) on draft $DraftId."
                 $idle.Restart()
             }
