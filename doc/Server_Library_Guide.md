@@ -113,7 +113,7 @@ The snapshot contains the indexed rows: paths, embedded Metadata, sidecar-v1 fie
 
 A file that failed to scan, or that the scan has not seen yet, is absent until a later scan indexes it. A clean full scan can mark a deleted file missing; the row remains, with `missing` set, until something removes the record. Removing a root or a record deletes those rows. After the next sync the client stops listing them. The WAV/FLAC/Ogg file is still on the server disk.
 
-A schema 9 library can still serve older clients a separate WAV-only schema 8 snapshot while `legacy_snapshot_enabled` remains on (the default). Those clients do not see non-WAV rows in that projection, and they cannot write the schema 9 source. Turning the compatibility snapshot off leaves them on their last valid cache. Current clients that accept schema 9 receive the native snapshot.
+The web admin **数据库** tab and the desktop **Database & jobs** tab control snapshot compatibility. Both use the same persisted server setting. A schema 9 library can still serve older clients a separate WAV-only schema 8 snapshot while `legacy_snapshot_enabled` remains on (the default). Those clients do not see non-WAV rows in that projection, and they cannot write the schema 9 source. Turning the compatibility snapshot off leaves them on their last valid cache. Current clients that accept schema 9 receive the native snapshot.
 
 Preparing a large snapshot can take longer than `snapshot_wait_secs` (default 90). The request then returns 503 `BUSY` with `Retry-After` while preparation continues. The client retries.
 

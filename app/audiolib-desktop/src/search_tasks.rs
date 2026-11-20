@@ -2024,7 +2024,11 @@ impl Controller {
             let tree = self.tree.lock().unwrap();
             (tree.visible.clone(), tree.expanded.clone())
         };
-        ui.set_folders(ModelRc::new(FolderTreeModel { visible, expanded }));
+        ui.set_folders(ModelRc::new(FolderTreeModel {
+            visible,
+            expanded,
+            matches: Weak::new(),
+        }));
         ui.set_crumbs(ModelRc::new(VecModel::<CrumbRow>::default()));
         ui.set_result_summary(
             cache

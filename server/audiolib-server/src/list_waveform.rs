@@ -1318,6 +1318,7 @@ pub struct ListWaveforms {
     hints: Mutex<HashMap<i64, StatHint>>,
     workers: usize,
     pause_stats_on_playback: bool,
+    server_settings: Option<Arc<crate::Security>>,
     last_playback_start: Mutex<Option<Instant>>,
     stop: AtomicBool,
     worker_handles: Mutex<Vec<std::thread::JoinHandle<()>>>,
@@ -1480,6 +1481,14 @@ pub struct SettingsResponse {
     pub list_waveform_rate: u32,
     /// `default`, `config` or `admin`.
     pub list_waveform_rate_source: Source,
+    /// Offer a read-only schema-8 snapshot to older clients.
+    pub legacy_snapshot_enabled: bool,
+    /// Source of the effective value.
+    pub legacy_snapshot_enabled_source: Source,
+    /// Defer list Waveform file-stat reads during the playback prebuffer.
+    pub list_waveform_pause_stats_on_playback: bool,
+    /// Source of the effective value.
+    pub list_waveform_pause_stats_on_playback_source: Source,
     /// Whether this client may change the settings (`manage_mode`; a hint).
     pub can_change: bool,
 }
@@ -1495,7 +1504,7 @@ pub struct ListOptions {
     /// `list_waveform_rate` of `config.toml` (informational: the effective rate is read
     /// from [`crate::Security::list_waveform_rate`] for every file, §9.5.4).
     pub rate: u32,
-    /// `list_waveform_pause_stats_on_playback`.
+    /// Standalone playback prebuffer policy, overridden by the running server settings.
     pub pause_stats_on_playback: bool,
 }
 
@@ -1526,6 +1535,7 @@ impl ListWaveforms {
             hints: Mutex::new(HashMap::new()),
             workers: options.workers.max(1),
             pause_stats_on_playback: options.pause_stats_on_playback,
+            server_settings: None,
             last_playback_start: Mutex::new(None),
             stop: AtomicBool::new(false),
             worker_handles: Mutex::new(Vec::new()),
@@ -1631,10 +1641,21 @@ impl ListWaveforms {
             .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
     }
 
+    pub(crate) fn with_server_settings(mut self, settings: Arc<crate::Security>) -> Self {
+        self.server_settings = Some(settings);
+        self
+    }
+
     /// With `list_waveform_pause_stats_on_playback`: the rest of the prebuffer window of
     /// the latest stream/preview start, during which `POST /waveforms` reads no metadata.
     pub fn stat_pause_remaining(&self) -> Option<Duration> {
-        if !self.pause_stats_on_playback {
+        if !self
+            .server_settings
+            .as_ref()
+            .map_or(self.pause_stats_on_playback, |settings| {
+                settings.list_waveform_pause_stats_on_playback().0
+            })
+        {
             return None;
         }
         let started = (*self

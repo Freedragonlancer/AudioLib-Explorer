@@ -3,6 +3,7 @@ import { TextEdit, ComboBox, ListView, ScrollView, Palette, SpinBox } from "std-
 
 import { Theme, ThemedLineEdit as LineEdit, ThemedCheckBox as CheckBox } from "theme.slint";
 
+import { FolderBreadcrumbs, CrumbRow } from "folder-breadcrumbs.slint";
 import { AuditionPanel, PeakSettings, RulerTick } from "audition-panel.slint";
 import { AppearanceEditor, ThemePreview } from "appearance-editor.slint";
 import { SearchTaskTab } from "search-task-tabs.slint";
@@ -41,7 +42,7 @@ export struct AudioRow {
 export struct FolderRow { name: string, count: string, path: string, depth: int, expanded: bool, has-children: bool }
 /// One declared library/album and how many present records carry it.
 export struct AlbumRow { id: string, name: string, count: string, cover: image }
-export struct CrumbRow { name: string }
+export { CrumbRow }
 export struct DisplayTagRow { tags: [string] }
 export struct SearchTaskRow { id: string, name: string, favorite: bool, modified: bool, active: bool, keywords: string, index-name: string, library-index: bool, summary: string, searched: bool }
 export struct SavedSearchTaskRow { id: string, name: string, summary: string }
@@ -2252,7 +2253,16 @@ export component AppWindow inherits Window {
     // sm-selected -1 is a new, unsaved server.
     in property <[SourceRow]> sm-sources: [{ kind: 0, active: true }];
     in-out property <int> sm-selected: 0;
-    // Server pages: 0 连接与库信息, 1 服务器音效库, 2 缓存与导出 (试听/性能 lives on page 2).
+    // Server pages: connection (0), roots and scans (1), client cache and export (2), database and background work (3).
+    in property <bool> sm-db-legacy-supported;
+    in property <bool> sm-db-stat-supported;
+    in-out property <bool> sm-db-legacy;
+    in-out property <bool> sm-db-stat;
+    in property <bool> sm-db-can-change;
+    in property <bool> sm-db-busy;
+    in property <string> sm-db-message;
+    callback sm-legacy-setting(int);
+    callback sm-stat-setting(int);
     in-out property <int> sm-page: 0;
     in-out property <bool> sm-confirm-delete: false;
     in property <string> sm-local-path: "";
@@ -2275,7 +2285,7 @@ export component AppWindow inherits Window {
     callback sm-local-save-requested();
     property <bool> sm-new: root.sm-selected < 0;
     property <bool> sm-server: !root.sm-local-form && (root.sm-new || (root.sm-selected < root.sm-sources.length && root.sm-sources[root.sm-selected].kind == 1));
-    property <bool> sm-active: root.sm-selected >= 0 && root.sm-selected < root.sm-sources.length && root.sm-sources[root.sm-selected].active;
+    out property <bool> sm-active: root.sm-selected >= 0 && root.sm-selected < root.sm-sources.length && root.sm-sources[root.sm-selected].active;
     // The local library's management content shows only while local mode is active.
     // The library management content works on the open library: the local one, or in
     // server mode the snapshot (history, missing files, check, backup copy, export) on
@@ -2567,6 +2577,8 @@ export component AppWindow inherits Window {
     property <bool> short-layout: root.height < 800px * Theme.ui-scale;
     // Preferred widths survive temporary window constraints and inspector hiding.
     in-out property <length> sidebar-preferred-width: round(198 * Theme.ui-scale) * 1px;
+    // Fluent overlays a 14 logical-pixel scrollbar on the viewport, including its hover target.
+    private property <length> inspector-scroll-inset: 14px + 4px * Theme.ui-scale;
     in-out property <length> inspector-preferred-width: round(320 * Theme.ui-scale) * 1px;
     // The saved ratio survives collapsing a section and temporary window constraints.
     in-out property <bool> folders-section-expanded: true;
@@ -3532,17 +3544,10 @@ main-scroll := ScrollView {
                         }
                     }
                 }
-                if root.crumbs.length > 0: HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 4px * Theme.ui-scale;
-                    Action { text-module: 2; width: 64px * Theme.ui-scale; subtle: true; label: root.chinese ? "素材库" : "Library"; clicked => { root.all-library-requested(); } }
-                    // Deep hierarchies remain navigable without forcing the window wider.
-                    ScrollView { horizontal-stretch: 1; viewport-height: 30px * Theme.ui-scale;
-                        HorizontalLayout { spacing: 4px * Theme.ui-scale;
-                            for crumb[index] in root.crumbs: HorizontalLayout {
-                                Label { text-module: 2; width: 10px * Theme.ui-scale; text: "›"; horizontal-alignment: center; }
-                                Action { text-module: 2; subtle: true; label: crumb.name; width: 110px * Theme.ui-scale; clicked => { root.crumb-requested(index); } }
-                            }
-                        }
-                    }
+                if root.crumbs.length > 0: FolderBreadcrumbs {
+                    items: root.crumbs; chinese: root.chinese;
+                    library-requested => { root.all-library-requested(); }
+                    folder-requested(i) => { root.crumb-requested(i); }
                 }
                 // Above 1.0, keeps the sound list usable; the main view scrolls for the rest. At 1.0 the
                 // compact 1080x700 layout keeps fitting without scrolling; filters live in the sidebar.
@@ -3938,7 +3943,7 @@ main-scroll := ScrollView {
                         changed restore-revision => { if !Theme.modern-style { self.viewport-y = clamp(root.task-inspector-viewport-y, min(0px, self.visible-height - self.viewport-height), 0px); } }
                         property <string> displayed-id: root.selected-id;
                         changed displayed-id => { if !Theme.modern-style { if !root.task-restoring { self.viewport-y = 0px; } } }
-                        VerticalLayout { spacing: root.short-layout ? 4px * Theme.ui-scale : 7px * Theme.ui-scale; padding-right: 4px * Theme.ui-scale; alignment: start;
+                        VerticalLayout { spacing: root.short-layout ? 4px * Theme.ui-scale : 7px * Theme.ui-scale; padding-right: root.inspector-scroll-inset; alignment: start;
                             // The favorite belongs to this sound, so it sits beside its name.
                             HorizontalLayout { spacing: 6px * Theme.ui-scale;
                                 Text { horizontal-stretch: 1; min-width: 0px; min-height: 22px * Theme.ui-scale; max-height: (root.short-layout ? 22px : 40px) * Theme.ui-scale; vertical-stretch: 0; text: root.selected-name; color: Theme.text(3, 0, Theme.ink); font-size: Theme.font(13); font-weight: 600; wrap: word-wrap; overflow: elide; }
@@ -4406,17 +4411,10 @@ main-scroll := ScrollView {
                 }
                 Rectangle { height: 32px * Theme.ui-scale; background: Theme.table-toolbar-surface;
                     HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-                        if root.crumbs.length > 0: HorizontalLayout { horizontal-stretch: 1; min-width: 80px * Theme.ui-scale; height: 30px * Theme.ui-scale; spacing: 4px * Theme.ui-scale;
-                            StudioAction { text-module: 2; width: 64px * Theme.ui-scale; subtle: true; label: root.chinese ? "素材库" : "Library"; clicked => { root.all-library-requested(); } }
-                            // Deep hierarchies remain navigable without forcing the window wider.
-                            ScrollView { horizontal-stretch: 1; viewport-height: 30px * Theme.ui-scale;
-                                HorizontalLayout { spacing: 4px * Theme.ui-scale;
-                                    for crumb[index] in root.crumbs: HorizontalLayout {
-                                        Label { text-module: 2; width: 10px * Theme.ui-scale; text: "›"; horizontal-alignment: center; }
-                                        StudioAction { text-module: 2; subtle: true; label: crumb.name; width: 110px * Theme.ui-scale; clicked => { root.crumb-requested(index); } }
-                                    }
-                                }
-                            }
+                        if root.crumbs.length > 0: FolderBreadcrumbs {
+                            items: root.crumbs; chinese: root.chinese;
+                            library-requested => { root.all-library-requested(); }
+                            folder-requested(i) => { root.crumb-requested(i); }
                         }
                         if root.checked-count <= 1 && root.crumbs.length == 0: Text { horizontal-stretch: 1; min-width: 0px; overflow: elide; text: root.favorites-only ? (root.chinese ? "我的收藏" : "Favorites") : (root.chinese ? "声音列表" : "Sounds"); color: Theme.text(2, 0, Theme.ink); font-size: Theme.font(14); font-weight: 600; vertical-alignment: center; }
                         if root.checked-count > 1: studio-selection-actions := StudioAction { text-module: 2;
@@ -4830,7 +4828,7 @@ main-scroll := ScrollView {
                         changed restore-revision => { if Theme.modern-style { self.viewport-y = clamp(root.task-inspector-viewport-y, min(0px, self.visible-height - self.viewport-height), 0px); } }
                         property <string> displayed-id: root.selected-id;
                         changed displayed-id => { if Theme.modern-style { if !root.task-restoring { self.viewport-y = 0px; } } }
-                        VerticalLayout { spacing: 10px * Theme.ui-scale; padding-right: 4px * Theme.ui-scale; alignment: start;
+                        VerticalLayout { spacing: 10px * Theme.ui-scale; padding-right: root.inspector-scroll-inset; alignment: start;
                             if root.selected-album != "" || (root.artwork-enabled && root.album-cover-ready): HorizontalLayout { height: root.artwork-enabled && root.album-cover-ready ? 80px * Theme.ui-scale : 36px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
                                 Image { visible: root.artwork-enabled && root.album-cover-ready; width: root.artwork-enabled && root.album-cover-ready ? 76px * Theme.ui-scale : 0px; height: 76px * Theme.ui-scale; image-fit: cover; source: root.album-cover; }
                                 VerticalLayout { alignment: center; spacing: 5px * Theme.ui-scale;
@@ -5592,8 +5590,9 @@ main-scroll := ScrollView {
                             Action { text-module: 7; width: 110px * Theme.ui-scale; enabled: !root.ds-applying && !root.library-busy; label: root.chinese ? "编辑音效库…" : "Edit library…"; clicked => { root.sm-local-edit-requested(); } }
                         }
                         if root.library-visible && root.sm-server: HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-                            Action { text-module: 7; width: 96px * Theme.ui-scale; active: root.sm-page == 0; enabled: !root.ds-applying; label: root.chinese ? "连接与库信息" : "Connection & library"; clicked => { root.sm-page = 0; root.sm-page-selected(0); } }
-                            Action { text-module: 7; width: 120px * Theme.ui-scale; active: root.sm-page == 1; enabled: !root.ds-applying && !root.sm-new; label: root.chinese ? "服务器音效库" : "Server library"; clicked => { root.sm-page = 1; root.sm-page-selected(1); } }
+                            Action { text-module: 7; width: 96px * Theme.ui-scale; active: root.sm-page == 0; enabled: !root.ds-applying; label: root.chinese ? "连接设置" : "Connection"; clicked => { root.sm-page = 0; root.sm-page-selected(0); } }
+                            Action { text-module: 7; width: 120px * Theme.ui-scale; active: root.sm-page == 1; enabled: !root.ds-applying && !root.sm-new; label: root.chinese ? "目录与扫描" : "Roots and scans"; clicked => { root.sm-page = 1; root.sm-page-selected(1); } }
+                            Action { text-module: 7; width: 121px * Theme.ui-scale; active: root.sm-page == 3; enabled: !root.ds-applying && !root.sm-new; label: root.chinese ? "数据库与后台" : "Database & jobs"; clicked => { root.sm-page = 3; root.sm-page-selected(3); } }
                             Action { text-module: 7; width: 110px * Theme.ui-scale; active: root.sm-page == 2; enabled: !root.ds-applying && !root.sm-new; label: root.chinese ? "缓存与导出" : "Cache and export"; clicked => { root.sm-page = 2; root.sm-page-selected(2); } }
                             Rectangle { horizontal-stretch: 1; }
                         }
@@ -5617,7 +5616,7 @@ main-scroll := ScrollView {
                                     Rectangle { x: root.ds-progress >= 0 ? 0px : (parent.width - self.width) * root.ds-motion; width: root.ds-progress >= 0 ? parent.width * clamp(root.ds-progress, 0, 1) : parent.width * 0.3; height: parent.height; background: Theme.accent; border-radius: 3px * Theme.ui-scale; }
                                 }
                                 if root.sm-active: Label { text-module: 7; horizontal-stretch: 1; vertical-alignment: center; font-size: Theme.font(11); overflow: elide; text: root.ds-syncing && root.ds-elapsed != "" ? root.ds-sync-info + " · " + root.ds-elapsed : root.ds-sync-info; }
-                                if !root.sm-active: Label { text-module: 7; horizontal-stretch: 1; vertical-alignment: center; font-size: Theme.font(11); overflow: elide; text: root.chinese ? "切换到此数据源后，可在这里同步快照、管理波形缓存、查看历史、校验、备份和导出。" : "Switch to this source to sync, manage the Waveform cache, view history, check, back up and export here."; }
+                                if !root.sm-active: Label { text-module: 7; horizontal-stretch: 1; vertical-alignment: center; font-size: Theme.font(11); overflow: elide; text: root.chinese ? "切换到此数据源后，可在这里同步快照、查看历史、校验、备份和导出。" : "Switch to this source to sync, manage the Waveform cache, view history, check, back up and export here."; }
                                 Action { text-module: 7; width: 64px * Theme.ui-scale; subtle: true; active: root.sm-cache-details; label: root.sm-cache-details ? (root.chinese ? "收起" : "Less") : (root.chinese ? "详情" : "Details"); clicked => { root.sm-cache-details = !root.sm-cache-details; } }
                             }
                             if root.sm-active && root.ds-syncing && root.ds-decompression-info != "": VerticalLayout { vertical-stretch: 0; spacing: 6px * Theme.ui-scale;
@@ -5720,66 +5719,8 @@ main-scroll := ScrollView {
                                             }
                                             if root.remote-mode: Label { text-module: 7;
                                                 wrap: word-wrap; font-size: Theme.font(11); color: Theme.text(7, 2, Theme.muted);
-                                                text: root.chinese ? "扫描请到「服务器音效库」页。" : "Scans are on the Server library page.";
+                                                text: root.chinese ? "扫描请到「目录与扫描」页。" : "Scans are on the Roots and scans page.";
                                             }
-                                            if root.sm-server && root.sm-page == 2 && root.sm-wave-supported: VerticalLayout { spacing: 6px * Theme.ui-scale;
-                                                if root.sm-wave-supported: Text { height: 22px * Theme.ui-scale; text: root.chinese ? "列表简化波形（服务器）" : "List Waveforms (server)"; color: Theme.text(7, 0, Theme.ink); font-size: Theme.font(14); font-weight: 600; }
-                                                if root.sm-wave-supported: sm-wave-pregenerate-check := CheckBox { text-module: 7;
-                                                    height: 28px * Theme.ui-scale; enabled: root.sm-wave-can-change && !root.sm-wave-busy;
-                                                    text: root.chinese ? "服务器预生成列表波形" : "Pre-generate list Waveforms on the server";
-                                                    checked <=> root.sm-wave-pregenerate;
-                                                    toggled => { root.sm-wave-pregenerate-requested(self.checked); }
-                                                }
-                                                if root.sm-wave-supported: Label { text-module: 7; wrap: word-wrap; font-size: Theme.font(10); color: Theme.text(7, 2, Theme.muted);
-                                                    text: (root.chinese ? "服务器设置 pregenerate_list_waveforms：开启后服务器以最低优先级为全库补齐缩略波形（NAS 会保持唤醒），试听和扫描时让路；关闭时只计算客户端请求的行。" : "Server setting pregenerate_list_waveforms: when on, the server fills in thumbnails for the whole library at the lowest priority (the NAS stays awake), yielding to auditions and scans; when off it only computes rows clients ask for.") + (root.sm-wave-can-change ? "" : (root.chinese ? " 服务器不允许本机修改，只能查看。" : " The server does not allow this PC to change it; view only."));
-                                                }
-                                                if root.sm-wave-supported && root.sm-wave-status != "": Text { text: root.sm-wave-status; color: root.sm-wave-error ? Theme.text(7, 9, Theme.warning) : Theme.text(7, 1, Theme.dim); font-size: Theme.font(11); wrap: word-wrap; }
-                                                if root.sm-wave-supported && root.sm-wave-message != "": Label { text-module: 7; wrap: word-wrap; font-size: Theme.font(11); color: Theme.text(7, 8, Theme.warning); text: root.sm-wave-message; }
-                                                if root.sm-wave-supported && root.sm-wc-visible: VerticalLayout { spacing: 6px * Theme.ui-scale;
-                                                    Text { height: 20px * Theme.ui-scale; text: root.chinese ? "波形缓存" : "Waveform cache"; color: Theme.text(7, 0, Theme.ink); font-size: Theme.font(13); font-weight: 600; }
-                                                    Label { text-module: 7; text: (root.chinese ? "状态：" : "State: ") + root.sm-wc-run-state; }
-                                                    Rectangle { height: 8px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale; background: Theme.raised; border-width: 1px; border-color: Theme.border;
-                                                        accessible-role: progress-indicator; accessible-value: Math.round(max(0, min(1, root.sm-wc-progress)) * 100) + "%";
-                                                        Rectangle { x: 0px; y: 0px; height: parent.height; width: parent.width * max(0, min(1, root.sm-wc-progress)); border-radius: 4px * Theme.ui-scale; background: Theme.accent; }
-                                                    }
-                                                    if root.sm-wc-progress-text != "": Label { text-module: 7; wrap: word-wrap; text: root.sm-wc-progress-text; }
-                                                    if root.sm-wc-rate-text != "": Label { text-module: 7; wrap: word-wrap; text: root.sm-wc-rate-text; }
-                                                    if root.sm-wc-job-text != "": Label { text-module: 7; wrap: word-wrap; text: root.sm-wc-job-text; }
-                                                    if root.sm-wc-last-error != "": Label { text-module: 7; wrap: word-wrap; color: Theme.text(7, 9, Theme.warning); text: root.sm-wc-last-error; }
-                                                    if root.sm-wc-jobs && root.sm-wc-confirm == 0: HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-                                                        if root.sm-wc-offers-missing: Action { text-module: 7; width: 96px * Theme.ui-scale; enabled: root.sm-wc-ready && !root.sm-wc-job-active; label: root.chinese ? "补齐缺失" : "Fill missing"; clicked => { root.sm-wc-job-requested(0); } }
-                                                        if root.sm-wc-offers-failed: Action { text-module: 7; width: 96px * Theme.ui-scale; enabled: root.sm-wc-ready && !root.sm-wc-job-active && root.sm-wc-has-failed; label: root.chinese ? "重试失败" : "Retry failed"; clicked => { root.sm-wc-job-requested(1); } }
-                                                        if root.sm-wc-offers-rebuild: Action { text-module: 7; width: 104px * Theme.ui-scale; enabled: root.sm-wc-ready && !root.sm-wc-job-active; label: root.chinese ? "全部重建…" : "Rebuild all…"; clicked => { root.sm-wc-confirm = 1; } }
-                                                        Rectangle { horizontal-stretch: 1; }
-                                                    }
-                                                    if root.sm-wc-confirm == 1 || root.sm-wc-confirm == 2: Rectangle { border-radius: 5px * Theme.ui-scale; background: Theme.raised;
-                                                        VerticalLayout { padding: 8px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-                                                            Label { text-module: 7; wrap: word-wrap; color: Theme.text(7, 8, Theme.warning); text: root.sm-wc-confirm == 1 ? (root.chinese ? "全部重建会先清空服务器上本库的全部列表缩略波形缓存，再重新读取所有文件生成。确定要继续吗？" : "Rebuild all first clears this library's whole list thumbnail Waveform cache on the server, then reads every file again. Continue?") : (root.chinese ? "再次确认：现有缓存将被清空，服务器会重新读取所有文件，NAS 会长时间保持唤醒。" : "Confirm again: the existing cache is cleared and the server re-reads every file; the NAS stays awake for a long time."); }
-                                                            HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-                                                                Action { text-module: 7; width: 128px * Theme.ui-scale; primary: true; enabled: root.sm-wc-ready && !root.sm-wc-job-active; label: root.sm-wc-confirm == 1 ? (root.chinese ? "继续…" : "Continue…") : (root.chinese ? "确认全部重建" : "Rebuild all"); clicked => { if root.sm-wc-confirm == 1 { root.sm-wc-confirm = 2; } else { root.sm-wc-confirm = 0; root.sm-wc-rebuild-confirmed(); } } }
-                                                                Action { text-module: 7; width: 72px * Theme.ui-scale; label: root.chinese ? "取消" : "Cancel"; clicked => { root.sm-wc-confirm = 0; } }
-                                                                Rectangle { horizontal-stretch: 1; }
-                                                            }
-                                                        }
-                                                    }
-                                                    HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-                                                        Action { text-module: 7; width: 72px * Theme.ui-scale; enabled: root.sm-wc-ready && !root.sm-wc-paused && (!root.sm-wc-jobs || root.sm-wc-job-active); label: root.chinese ? "暂停" : "Pause"; clicked => { root.sm-wc-control-requested(0); } }
-                                                        Action { text-module: 7; width: 72px * Theme.ui-scale; enabled: root.sm-wc-ready && root.sm-wc-paused; label: root.chinese ? "继续" : "Resume"; clicked => { root.sm-wc-control-requested(1); } }
-                                                        if root.sm-wc-jobs: Action { text-module: 7; width: 72px * Theme.ui-scale; enabled: root.sm-wc-ready && root.sm-wc-job-active; label: root.chinese ? "停止" : "Stop"; clicked => { root.sm-wc-control-requested(2); } }
-                                                        if root.sm-wave-busy: Label { text-module: 7; text: root.chinese ? "处理中…" : "Working…"; }
-                                                        Rectangle { horizontal-stretch: 1; }
-                                                    }
-                                                    if root.sm-wc-jobs && root.sm-wc-rate-setting: HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-                                                        Label { text-module: 7; text: root.chinese ? "生成限速（文件/秒）" : "Rate limit (files/s)"; }
-                                                        LineEdit { text-module: 7; min-width: 100px * Theme.ui-scale; max-width: 100px * Theme.ui-scale; horizontal-stretch: 0; enabled: root.sm-wc-ready; input-label: root.chinese ? "生成限速" : "Rate limit"; placeholder-text: root.chinese ? "默认" : "default"; text <=> root.sm-wc-rate-draft; accepted => { root.sm-wc-rate-requested(root.sm-wc-rate-draft); } }
-                                                        Action { text-module: 7; width: 72px * Theme.ui-scale; enabled: root.sm-wc-ready; label: root.chinese ? "应用" : "Apply"; clicked => { root.sm-wc-rate-requested(root.sm-wc-rate-draft); } }
-                                                        Label { text-module: 7; text: root.chinese ? "1–1000，留空 = 恢复默认" : "1–1000, empty = default"; color: Theme.text(7, 2, Theme.muted); font-size: Theme.font(10); }
-                                                        Rectangle { horizontal-stretch: 1; }
-                                                    }
-                                                    if !root.sm-wc-can-manage: Label { text-module: 7; wrap: word-wrap; font-size: Theme.font(10); color: Theme.text(7, 2, Theme.muted); text: root.chinese ? "服务器不允许本机管理波形缓存（manage_mode），只能查看。" : "The server does not allow this PC to manage the Waveform cache (manage_mode); view only."; }
-                                                }
-                                            }
-                                            if root.sm-server && root.sm-page == 2 && !root.sm-wave-supported: Label { text-module: 7; wrap: word-wrap; font-size: Theme.font(11); color: root.sm-library-error ? Theme.text(7, 9, Theme.warning) : Theme.text(7, 2, Theme.muted); text: root.sm-library-loading ? (root.chinese ? "正在读取服务器的列表波形与波形缓存…" : "Loading the server list Waveforms and Waveform cache…") : root.sm-library-error ? root.sm-library-status : (root.chinese ? "此服务器未提供列表波形接口，无法管理波形缓存。" : "This server does not offer list Waveforms, so its Waveform cache cannot be managed."); }
                                             Rectangle { height: 1px; background: Theme.border; }
                                             HorizontalLayout { height: 62px * Theme.ui-scale; spacing: 16px * Theme.ui-scale;
                                                 VerticalLayout { horizontal-stretch: 1; spacing: 4px * Theme.ui-scale;
@@ -5830,7 +5771,7 @@ main-scroll := ScrollView {
                                                     Action { text-module: 7; horizontal-stretch: 1; enabled: !root.library-busy && !root.remote-mode; label: root.chinese ? "导入标注…" : "Import annotations…"; clicked => { root.library-action(10); } }
                                                     Action { text-module: 7; width: 92px * Theme.ui-scale; enabled: !root.library-busy; label: root.chinese ? "刷新信息" : "Refresh"; clicked => { root.library-action(0); } }
                                                 }
-                                                if root.vendor-import-available: HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
+                                                if !root.remote-mode && root.vendor-import-available: HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                                                     Action { text-module: 7; horizontal-stretch: 1; enabled: !root.library-busy; label: root.chinese ? "导入厂商资料…" : "Import vendor metadata…"; clicked => { root.vendor-import-requested(); } }
                                                 }
                                                 TextEdit { height: 110px * Theme.ui-scale; read-only: true; text: root.management-report; }
@@ -5946,6 +5887,93 @@ main-scroll := ScrollView {
                                     Rectangle { horizontal-stretch: 1; }
                                     Action { text-module: 7; width: 84px * Theme.ui-scale; enabled: root.sm-pending-select == -2 && root.ds-dirty && !root.ds-applying; label: root.chinese ? "还原" : "Revert"; clicked => { root.sm-revert-requested(); } }
                                     Action { text-module: 7; width: 132px * Theme.ui-scale; primary: true; enabled: root.sm-pending-select == -2 && !root.ds-applying && !root.library-busy; label: root.ds-applying ? (root.chinese ? "保存中…" : "Saving…") : (root.sm-new ? (root.chinese ? "保存为新服务器" : "Save new server") : (root.chinese ? "保存" : "Save")); clicked => { root.sm-save-requested(); } }
+                                }
+                            }
+                            if root.library-visible && root.sm-server && root.sm-page == 3: ScrollView { width: parent.width; height: parent.height; viewport-width: self.visible-width;
+                                VerticalLayout { padding-right: 8px * Theme.ui-scale; spacing: 12px * Theme.ui-scale; alignment: start;
+                                    if !root.sm-active || !root.remote-mode: Label { text-module: 7; wrap: word-wrap; text: root.chinese ? "切换到此服务器并同步快照后，即可查看数据库设置。" : "Switch to this server and sync its snapshot to view database settings."; }
+                                    if root.sm-active && root.remote-mode: VerticalLayout { spacing: 8px * Theme.ui-scale;
+                                        HorizontalLayout { height: 30px * Theme.ui-scale;
+                                            Label { text-module: 7; horizontal-stretch: 1; text: root.chinese ? "数据库与索引" : "Database and indexes"; font-size: Theme.font(15); }
+                                            Action { text-module: 7; width: 84px * Theme.ui-scale; enabled: !root.sm-db-busy; label: root.chinese ? "刷新" : "Refresh"; clicked => { root.sm-page-selected(3); } }
+                                        }
+                                        if root.sm-db-legacy-supported: VerticalLayout { spacing: 3px * Theme.ui-scale;
+                                            HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
+                                                CheckBox { text-module: 7; horizontal-stretch: 1; enabled: root.sm-db-can-change && !root.sm-db-busy; checked <=> root.sm-db-legacy; text: root.chinese ? "为旧客户端提供兼容快照" : "Serve snapshots to older clients"; toggled => { root.sm-legacy-setting(self.checked ? 1 : 0); } }
+                                                Action { text-module: 7; width: 102px * Theme.ui-scale; subtle: true; enabled: root.sm-db-can-change && !root.sm-db-busy; label: root.chinese ? "使用配置值" : "Use config"; clicked => { root.sm-legacy-setting(-1); } }
+                                            }
+                                            Label { text-module: 7; wrap: word-wrap; color: Theme.text(7, 1, Theme.dim); text: root.chinese ? "从 schema 9 音效库派生仅含 WAV 的 schema 8 快照。关闭后，旧客户端只能使用上次同步的缓存。" : "Serve a WAV-only schema 8 snapshot of a schema 9 library. When disabled, older clients keep their last synced cache."; }
+                                        }
+                                        HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
+                                            Action { text-module: 7; width: 158px * Theme.ui-scale; enabled: !root.library-busy && !root.ds-applying; label: root.chinese ? "数据库迁移…" : "Database migration…"; clicked => { root.migration-requested(); } }
+                                            if root.vendor-import-available: Action { text-module: 7; width: 158px * Theme.ui-scale; enabled: !root.library-busy && !root.ds-applying; label: root.chinese ? "导入厂商资料…" : "Import vendor metadata…"; clicked => { root.vendor-import-requested(); } }
+                                            Rectangle { horizontal-stretch: 1; }
+                                        }
+                                        if root.sm-db-busy || root.sm-db-message != "": Label { text-module: 7; wrap: word-wrap; text: root.sm-db-busy ? (root.chinese ? "正在与服务器通信…" : "Contacting server…") : root.sm-db-message; }
+                                        Rectangle { height: 1px; background: Theme.border; }
+                                        if root.sm-db-stat-supported || root.sm-wave-supported: Text { height: 22px * Theme.ui-scale; text: root.chinese ? "服务器波形与后台读取" : "Server Waveforms and background reads"; color: Theme.text(7, 0, Theme.ink); font-size: Theme.font(14); font-weight: 600; }
+                                        if root.sm-db-stat-supported: HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
+                                            CheckBox { text-module: 7; horizontal-stretch: 1; enabled: root.sm-db-can-change && !root.sm-db-busy; checked <=> root.sm-db-stat; text: root.chinese ? "试听起始 3 秒暂缓波形文件属性读取" : "Defer Waveform file stats for 3 s on playback"; toggled => { root.sm-stat-setting(self.checked ? 1 : 0); } }
+                                            Action { text-module: 7; width: 102px * Theme.ui-scale; subtle: true; enabled: root.sm-db-can-change && !root.sm-db-busy; label: root.chinese ? "使用配置值" : "Use config"; clicked => { root.sm-stat-setting(-1); } }
+                                        }
+                                        if root.sm-wave-supported: VerticalLayout { spacing: 6px * Theme.ui-scale;
+                                            sm-wave-pregenerate-check := CheckBox { text-module: 7;
+                                                height: 28px * Theme.ui-scale; enabled: root.sm-wave-can-change && !root.sm-wave-busy;
+                                                text: root.chinese ? "服务器预生成列表波形" : "Pre-generate list Waveforms on the server";
+                                                checked <=> root.sm-wave-pregenerate;
+                                                toggled => { root.sm-wave-pregenerate-requested(self.checked); }
+                                            }
+                                            Label { text-module: 7; wrap: word-wrap; font-size: Theme.font(10); color: Theme.text(7, 2, Theme.muted);
+                                                text: (root.chinese ? "服务器设置 pregenerate_list_waveforms：开启后服务器以最低优先级为全库补齐缩略波形（NAS 会保持唤醒），试听和扫描时让路；关闭时只计算客户端请求的行。" : "Server setting pregenerate_list_waveforms: when on, the server fills in thumbnails for the whole library at the lowest priority (the NAS stays awake), yielding to auditions and scans; when off it only computes rows clients ask for.") + (root.sm-wave-can-change ? "" : (root.chinese ? " 服务器不允许本机修改，只能查看。" : " The server does not allow this PC to change it; view only."));
+                                            }
+                                            if root.sm-wave-supported && root.sm-wave-status != "": Text { text: root.sm-wave-status; color: root.sm-wave-error ? Theme.text(7, 9, Theme.warning) : Theme.text(7, 1, Theme.dim); font-size: Theme.font(11); wrap: word-wrap; }
+                                            if root.sm-wave-supported && root.sm-wave-message != "": Label { text-module: 7; wrap: word-wrap; font-size: Theme.font(11); color: Theme.text(7, 8, Theme.warning); text: root.sm-wave-message; }
+                                            if root.sm-wave-supported && root.sm-wc-visible: VerticalLayout { spacing: 6px * Theme.ui-scale;
+                                                Text { height: 20px * Theme.ui-scale; text: root.chinese ? "波形缓存" : "Waveform cache"; color: Theme.text(7, 0, Theme.ink); font-size: Theme.font(13); font-weight: 600; }
+                                                Label { text-module: 7; text: (root.chinese ? "状态：" : "State: ") + root.sm-wc-run-state; }
+                                                Rectangle { height: 8px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale; background: Theme.raised; border-width: 1px; border-color: Theme.border;
+                                                    accessible-role: progress-indicator; accessible-value: Math.round(max(0, min(1, root.sm-wc-progress)) * 100) + "%";
+                                                    Rectangle { x: 0px; y: 0px; height: parent.height; width: parent.width * max(0, min(1, root.sm-wc-progress)); border-radius: 4px * Theme.ui-scale; background: Theme.accent; }
+                                                }
+                                                if root.sm-wc-progress-text != "": Label { text-module: 7; wrap: word-wrap; text: root.sm-wc-progress-text; }
+                                                if root.sm-wc-rate-text != "": Label { text-module: 7; wrap: word-wrap; text: root.sm-wc-rate-text; }
+                                                if root.sm-wc-job-text != "": Label { text-module: 7; wrap: word-wrap; text: root.sm-wc-job-text; }
+                                                if root.sm-wc-last-error != "": Label { text-module: 7; wrap: word-wrap; color: Theme.text(7, 9, Theme.warning); text: root.sm-wc-last-error; }
+                                                if root.sm-wc-jobs && root.sm-wc-confirm == 0: HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
+                                                    if root.sm-wc-offers-missing: Action { text-module: 7; width: 96px * Theme.ui-scale; enabled: root.sm-wc-ready && !root.sm-wc-job-active; label: root.chinese ? "补齐缺失" : "Fill missing"; clicked => { root.sm-wc-job-requested(0); } }
+                                                    if root.sm-wc-offers-failed: Action { text-module: 7; width: 96px * Theme.ui-scale; enabled: root.sm-wc-ready && !root.sm-wc-job-active && root.sm-wc-has-failed; label: root.chinese ? "重试失败" : "Retry failed"; clicked => { root.sm-wc-job-requested(1); } }
+                                                    if root.sm-wc-offers-rebuild: Action { text-module: 7; width: 104px * Theme.ui-scale; enabled: root.sm-wc-ready && !root.sm-wc-job-active; label: root.chinese ? "全部重建…" : "Rebuild all…"; clicked => { root.sm-wc-confirm = 1; } }
+                                                    Rectangle { horizontal-stretch: 1; }
+                                                }
+                                                if root.sm-wc-confirm == 1 || root.sm-wc-confirm == 2: Rectangle { border-radius: 5px * Theme.ui-scale; background: Theme.raised;
+                                                    VerticalLayout { padding: 8px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
+                                                        Label { text-module: 7; wrap: word-wrap; color: Theme.text(7, 8, Theme.warning); text: root.sm-wc-confirm == 1 ? (root.chinese ? "全部重建会先清空服务器上本库的全部列表缩略波形缓存，再重新读取所有文件生成。确定要继续吗？" : "Rebuild all first clears this library's whole list thumbnail Waveform cache on the server, then reads every file again. Continue?") : (root.chinese ? "再次确认：现有缓存将被清空，服务器会重新读取所有文件，NAS 会长时间保持唤醒。" : "Confirm again: the existing cache is cleared and the server re-reads every file; the NAS stays awake for a long time."); }
+                                                        HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
+                                                            Action { text-module: 7; width: 128px * Theme.ui-scale; primary: true; enabled: root.sm-wc-ready && !root.sm-wc-job-active; label: root.sm-wc-confirm == 1 ? (root.chinese ? "继续…" : "Continue…") : (root.chinese ? "确认全部重建" : "Rebuild all"); clicked => { if root.sm-wc-confirm == 1 { root.sm-wc-confirm = 2; } else { root.sm-wc-confirm = 0; root.sm-wc-rebuild-confirmed(); } } }
+                                                            Action { text-module: 7; width: 72px * Theme.ui-scale; label: root.chinese ? "取消" : "Cancel"; clicked => { root.sm-wc-confirm = 0; } }
+                                                            Rectangle { horizontal-stretch: 1; }
+                                                        }
+                                                    }
+                                                }
+                                                HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
+                                                    Action { text-module: 7; width: 72px * Theme.ui-scale; enabled: root.sm-wc-ready && !root.sm-wc-paused && (!root.sm-wc-jobs || root.sm-wc-job-active); label: root.chinese ? "暂停" : "Pause"; clicked => { root.sm-wc-control-requested(0); } }
+                                                    Action { text-module: 7; width: 72px * Theme.ui-scale; enabled: root.sm-wc-ready && root.sm-wc-paused; label: root.chinese ? "继续" : "Resume"; clicked => { root.sm-wc-control-requested(1); } }
+                                                    if root.sm-wc-jobs: Action { text-module: 7; width: 72px * Theme.ui-scale; enabled: root.sm-wc-ready && root.sm-wc-job-active; label: root.chinese ? "停止" : "Stop"; clicked => { root.sm-wc-control-requested(2); } }
+                                                    if root.sm-wave-busy: Label { text-module: 7; text: root.chinese ? "处理中…" : "Working…"; }
+                                                    Rectangle { horizontal-stretch: 1; }
+                                                }
+                                                if root.sm-wc-jobs && root.sm-wc-rate-setting: HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
+                                                    Label { text-module: 7; text: root.chinese ? "生成限速（文件/秒）" : "Rate limit (files/s)"; }
+                                                    LineEdit { text-module: 7; min-width: 100px * Theme.ui-scale; max-width: 100px * Theme.ui-scale; horizontal-stretch: 0; enabled: root.sm-wc-ready; input-label: root.chinese ? "生成限速" : "Rate limit"; placeholder-text: root.chinese ? "默认" : "default"; text <=> root.sm-wc-rate-draft; accepted => { root.sm-wc-rate-requested(root.sm-wc-rate-draft); } }
+                                                    Action { text-module: 7; width: 72px * Theme.ui-scale; enabled: root.sm-wc-ready; label: root.chinese ? "应用" : "Apply"; clicked => { root.sm-wc-rate-requested(root.sm-wc-rate-draft); } }
+                                                    Label { text-module: 7; text: root.chinese ? "1–1000，留空 = 恢复默认" : "1–1000, empty = default"; color: Theme.text(7, 2, Theme.muted); font-size: Theme.font(10); }
+                                                    Rectangle { horizontal-stretch: 1; }
+                                                }
+                                                if !root.sm-wc-can-manage: Label { text-module: 7; wrap: word-wrap; font-size: Theme.font(10); color: Theme.text(7, 2, Theme.muted); text: root.chinese ? "服务器不允许本机管理波形缓存（manage_mode），只能查看。" : "The server does not allow this PC to manage the Waveform cache (manage_mode); view only."; }
+                                            }
+                                        }
+                                        if !root.sm-wave-supported: Label { text-module: 7; wrap: word-wrap; font-size: Theme.font(11); color: root.sm-library-error ? Theme.text(7, 9, Theme.warning) : Theme.text(7, 2, Theme.muted); text: root.sm-library-loading ? (root.chinese ? "正在读取服务器的列表波形与波形缓存…" : "Loading the server list Waveforms and Waveform cache…") : root.sm-library-error ? root.sm-library-status : (root.chinese ? "此服务器未提供列表波形接口，无法管理波形缓存。" : "This server does not offer list Waveforms, so its Waveform cache cannot be managed."); }
+                                    }
                                 }
                             }
                             if root.library-visible && root.sm-server && root.sm-page == 1: VerticalLayout { width: parent.width; height: parent.height; spacing: 8px * Theme.ui-scale;

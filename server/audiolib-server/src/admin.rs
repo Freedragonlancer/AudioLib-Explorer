@@ -216,6 +216,10 @@ struct AdminStatus {
     pregenerate_list_waveforms: bool,
     pregenerate_list_waveforms_source: Source,
     list_waveform_rate: u32,
+    legacy_snapshot_enabled: bool,
+    legacy_snapshot_enabled_source: Source,
+    list_waveform_pause_stats_on_playback: bool,
+    list_waveform_pause_stats_on_playback_source: Source,
     list_waveform_rate_source: Source,
     public_url: Option<String>,
     public_url_source: Source,
@@ -237,6 +241,10 @@ fn admin_status(service: &Service) -> AdminStatus {
     let (manage_mode, manage_mode_source) = security.manage_mode_with_source();
     let (pregenerate_list_waveforms, pregenerate_list_waveforms_source) =
         security.pregenerate_list_waveforms_with_source();
+    let (legacy_snapshot_enabled, legacy_snapshot_enabled_source) =
+        security.legacy_snapshot_enabled();
+    let (list_waveform_pause_stats_on_playback, list_waveform_pause_stats_on_playback_source) =
+        security.list_waveform_pause_stats_on_playback();
     let (list_waveform_rate, list_waveform_rate_source) = security.list_waveform_rate_with_source();
     let (public_url, public_url_source) = security.public_url_with_source();
     let (configured, source) = security.tls_with_source();
@@ -271,6 +279,10 @@ fn admin_status(service: &Service) -> AdminStatus {
         pregenerate_list_waveforms,
         pregenerate_list_waveforms_source,
         list_waveform_rate,
+        legacy_snapshot_enabled,
+        legacy_snapshot_enabled_source,
+        list_waveform_pause_stats_on_playback,
+        list_waveform_pause_stats_on_playback_source,
         list_waveform_rate_source,
         public_url,
         public_url_source,
@@ -473,6 +485,10 @@ async fn runtime(State(service): State<Service>) -> Result<Json<RuntimeStatus>, 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SettingsBody {
+    #[serde(default, deserialize_with = "bool_or_empty")]
+    legacy_snapshot_enabled: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "bool_or_empty")]
+    list_waveform_pause_stats_on_playback: Option<Option<bool>>,
     #[serde(default, deserialize_with = "present")]
     public_url: Option<Option<String>>,
     #[serde(default, deserialize_with = "present")]
@@ -515,7 +531,7 @@ fn bool_or_empty<'de, D: Deserializer<'de>>(
         Some(serde_json::Value::Bool(value)) => Ok(Some(Some(value))),
         Some(serde_json::Value::String(text)) if text.is_empty() => Ok(Some(None)),
         Some(other) => Err(serde::de::Error::custom(format!(
-            "pregenerate_list_waveforms must be true, false, null or \"\", got {other}"
+            "Boolean setting must be true, false, null or \"\", got {other}"
         ))),
     }
 }
@@ -620,6 +636,12 @@ async fn update_settings(
             }
             if let Some(value) = manage_mode {
                 settings.manage_mode = value;
+            }
+            if let Some(value) = body.legacy_snapshot_enabled {
+                settings.legacy_snapshot_enabled = value;
+            }
+            if let Some(value) = body.list_waveform_pause_stats_on_playback {
+                settings.list_waveform_pause_stats_on_playback = value;
             }
             if let Some(value) = pregenerate {
                 settings.pregenerate_list_waveforms = value;

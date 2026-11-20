@@ -611,6 +611,8 @@ struct TreeState {
 struct FolderTreeModel {
     visible: Arc<Vec<(Folder, usize, bool)>>,
     expanded: HashSet<i64>,
+    /// Facets from which these rows were built. A restored task awaits revalidation.
+    matches: Weak<Vec<Folder>>,
 }
 
 impl Model for FolderTreeModel {
@@ -635,6 +637,57 @@ impl Model for FolderTreeModel {
 
     fn model_tracker(&self) -> &dyn slint::ModelTracker {
         &()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// The breadcrumb remains valid when a selected descendant is hidden by a collapsed parent.
+fn folder_selection(
+    selected: Option<i64>,
+    known: &HashMap<i64, Folder>,
+    visible: &[(Folder, usize, bool)],
+) -> (i32, Vec<Folder>) {
+    let mut crumbs = Vec::new();
+    let mut next = selected;
+    let mut seen = HashSet::new();
+    while let Some(folder) = next.and_then(|id| known.get(&id)) {
+        if !seen.insert(folder.id) {
+            break;
+        }
+        crumbs.push(folder.clone());
+        next = folder.parent_id;
+    }
+    crumbs.reverse();
+    let row = selected.and_then(|id| visible.iter().position(|(folder, _, _)| folder.id == id));
+    (row.map_or(-1, |index| index as i32), crumbs)
+}
+
+fn publish_folder_selection(ui: &AppWindow, row: i32, crumbs: &[Folder]) {
+    ui.set_selected_folder(row);
+    ui.set_selected_folder_path(
+        crumbs
+            .last()
+            .map_or("", |folder| folder.path.as_str())
+            .into(),
+    );
+    let displayed = ui.get_crumbs();
+    if displayed.row_count() != crumbs.len()
+        || displayed.iter().zip(crumbs).any(|(row, folder)| {
+            row.name != folder.name.as_str() || row.path != folder.path.as_str()
+        })
+    {
+        ui.set_crumbs(ModelRc::new(VecModel::from(
+            crumbs
+                .iter()
+                .map(|folder| CrumbRow {
+                    name: folder.name.clone().into(),
+                    path: folder.path.clone().into(),
+                })
+                .collect::<Vec<_>>(),
+        )));
     }
 }
 
@@ -4591,8 +4644,32 @@ impl Controller {
                     };
                     state.expected_folders = Some(folders.clone());
                 }
-                self.tree.lock().unwrap().matches = folders;
-                self.reload_tree();
+                let model = ui.get_folders();
+                let reuse = {
+                    let mut tree = self.tree.lock().unwrap();
+                    tree.matches = folders.clone();
+                    model
+                        .as_any()
+                        .downcast_ref::<FolderTreeModel>()
+                        .is_some_and(|model| {
+                            model.matches.ptr_eq(&Arc::downgrade(&folders))
+                                && Arc::ptr_eq(&model.visible, &tree.visible)
+                                && model.expanded == tree.expanded
+                        })
+                };
+                if reuse && !self.has_hidden_folders() {
+                    // Complete after the page's viewport and task revision have settled,
+                    // just as a newly built model would. A pending expand owns the next tree.
+                    let tree_generation = self.tree_generation.load(Ordering::Acquire);
+                    let c = self.clone();
+                    post(self.ui.clone(), move |ui| {
+                        if c.tree_generation.load(Ordering::Acquire) == tree_generation {
+                            c.finish_folder_publication(&ui, generation);
+                        }
+                    });
+                } else {
+                    self.reload_tree();
+                }
             }
             Err(error) => {
                 ui.set_folder_counts_pending(false);
@@ -5085,14 +5162,14 @@ impl Controller {
             request.filters.album_id = album_id;
             request.offset = 0;
         }
-        {
+        let (row, crumbs) = {
             let mut tree = self.tree.lock().unwrap();
             tree.selected = folder_id;
-            tree.crumbs.clear();
-        }
-        ui.set_selected_folder(-1);
-        ui.set_selected_folder_path("".into());
-        ui.set_crumbs(ModelRc::new(VecModel::<CrumbRow>::default()));
+            let (row, crumbs) = folder_selection(folder_id, &tree.known, &tree.visible);
+            tree.crumbs.clone_from(&crumbs);
+            (row, crumbs)
+        };
+        publish_folder_selection(&ui, row, &crumbs);
         let identity = album_id.map(|id| id.to_string()).unwrap_or_default();
         let label = album_id
             .and_then(|_| ui.get_albums().iter().find(|row| row.id == identity))
@@ -5103,7 +5180,7 @@ impl Controller {
         ui.set_album_filter_unavailable(false);
         self.request_navigation_search(&ui, true, true);
         if folder_id.is_some() && !ui.get_searching() {
-            // A rejected draft has no result publication to restore the folder highlight.
+            // A rejected draft can also supersede an in-flight expansion.
             self.reload_tree();
         }
     }
@@ -5121,7 +5198,7 @@ impl Controller {
             .collect()
     }
 
-    fn publish_local_scan_roots(self: &Arc<Self>, ui: &AppWindow, folders: &[Folder]) {
+    fn publish_local_scan_roots(&self, ui: &AppWindow, rows: Vec<LocalScanRootRow>) {
         let previous_path = {
             let selected = ui.get_local_scan_root_selected();
             let model = ui.get_local_scan_roots();
@@ -5132,11 +5209,6 @@ impl Controller {
             } else {
                 None
             }
-        };
-        let rows = if self.remote_read_only() {
-            Vec::new()
-        } else {
-            Self::local_scan_root_rows(folders)
         };
         let next_selected = previous_path
             .as_deref()
@@ -5184,17 +5256,22 @@ impl Controller {
             }
             // Clone owned folder strings on the worker, never under the UI's tree lock.
             let mut known = known.as_ref().clone();
-            let mut matches = matches.as_ref().clone();
-            c.hide_removed_folders(&mut matches);
+            let mut displayed_folders = matches.as_ref().clone();
+            c.hide_removed_folders(&mut displayed_folders);
+            let model_matches = if displayed_folders.len() == matches.len() {
+                Arc::downgrade(&matches)
+            } else {
+                Weak::new()
+            };
             // Top-level folders are the local scan-roots list (independent of the
             // search-filtered tree matches).
             let scan_roots = if c.remote_read_only() {
                 Vec::new()
             } else {
-                c.provider().folders(None).unwrap_or_default()
+                Self::local_scan_root_rows(&c.provider().folders(None).unwrap_or_default())
             };
             let mut children = HashMap::<Option<i64>, Vec<Folder>>::new();
-            for folder in matches {
+            for folder in displayed_folders {
                 known.insert(folder.id, folder.clone());
                 children.entry(folder.parent_id).or_default().push(folder);
             }
@@ -5239,52 +5316,20 @@ impl Controller {
             if c.tree_generation.load(Ordering::Acquire) != generation {
                 return;
             }
-            let mut crumbs = Vec::new();
-            let mut next = selected;
-            let mut seen = HashSet::new();
-            while let Some(id) = next {
-                if !seen.insert(id) {
-                    break;
-                }
-                let Some(folder) = known.get(&id) else {
-                    break;
-                };
-                crumbs.push(folder.clone());
-                next = folder.parent_id;
-            }
-            crumbs.reverse();
-            let selected_row = visible
-                .iter()
-                .position(|(folder, _, _)| Some(folder.id) == selected)
-                .map_or(-1, |index| index as i32);
+            let (selected_row, crumbs) = folder_selection(selected, &known, &visible);
             let visible = Arc::new(visible);
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
                 if c2.tree_generation.load(Ordering::Acquire) != generation {
                     return;
                 }
-                ui.set_selected_folder(selected_row);
-                // The selected descendant can remain active when its parent is
-                // collapsed. Publish its owned path separately from row indices.
-                ui.set_selected_folder_path(
-                    selected
-                        .and_then(|id| known.get(&id))
-                        .map_or_else(String::new, |folder| folder.path.clone())
-                        .into(),
-                );
+                publish_folder_selection(&ui, selected_row, &crumbs);
                 ui.set_folders(ModelRc::new(FolderTreeModel {
                     visible: visible.clone(),
                     expanded,
+                    matches: model_matches,
                 }));
-                c2.publish_local_scan_roots(&ui, &scan_roots);
-                ui.set_crumbs(ModelRc::new(VecModel::from(
-                    crumbs
-                        .iter()
-                        .map(|folder| CrumbRow {
-                            name: folder.name.clone().into(),
-                        })
-                        .collect::<Vec<_>>(),
-                )));
+                c2.publish_local_scan_roots(&ui, scan_roots);
                 let mut tree = c2.tree.lock().unwrap();
                 tree.visible = visible;
                 tree.known = Arc::new(known);
@@ -5306,36 +5351,32 @@ impl Controller {
                         .into(),
                     );
                 }
-                if let Some(generation) = ready_generation
-                    && c2.search_generation.load(Ordering::Acquire) == generation
-                {
-                    let newly_published = {
-                        let mut publication = c2.search_publication.lock().unwrap();
-                        if let Some(state) = publication.as_mut().filter(|state| {
-                            state.generation == generation
-                                && state.page == SearchPagePhase::Published
-                                && !state.model_published
-                        }) {
-                            state.model_published = true;
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    if newly_published {
-                        ui.set_folder_counts_pending(false);
-                        ui.set_searching(false);
-                        c2.search_task_directory_ready(&ui);
-                        if crate::gui_search_benchmark::enabled() {
-                            let folders = c2.tree.lock().unwrap().matches.clone();
-                            crate::gui_search_benchmark::folders_published(
-                                &ui, generation, folders,
-                            );
-                        }
-                    }
+                if let Some(generation) = ready_generation {
+                    c2.finish_folder_publication(&ui, generation);
                 }
             });
         });
+    }
+
+    fn finish_folder_publication(&self, ui: &AppWindow, generation: u64) {
+        let mut publication = self.search_publication.lock().unwrap();
+        let Some(state) = publication.as_mut().filter(|state| {
+            state.generation == generation
+                && self.search_generation.load(Ordering::Acquire) == generation
+                && state.page == SearchPagePhase::Published
+                && !state.model_published
+        }) else {
+            return;
+        };
+        state.model_published = true;
+        drop(publication);
+        ui.set_folder_counts_pending(false);
+        ui.set_searching(false);
+        self.search_task_directory_ready(ui);
+        if crate::gui_search_benchmark::enabled() {
+            let folders = self.tree.lock().unwrap().matches.clone();
+            crate::gui_search_benchmark::folders_published(ui, generation, folders);
+        }
     }
 
     fn select(self: &Arc<Self>, index: i32, play: bool) {
