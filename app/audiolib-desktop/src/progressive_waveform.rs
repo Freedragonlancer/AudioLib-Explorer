@@ -8,14 +8,14 @@ use std::{
 
 const UPDATE_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Fetch consecutive source ranges, reporting progress without exposing incomplete peaks.
+/// Fetch consecutive source ranges, publishing received peaks in their full-source positions.
 pub(crate) fn load(
     request: WaveformRequest,
     sample_rate: u32,
     batch_columns: usize,
     cancel: &AtomicBool,
     mut fetch: impl FnMut(WaveformRequest, u32) -> Result<WaveformData, String>,
-    mut progress: impl FnMut(f64),
+    mut progress: impl FnMut(&WaveformData, f64),
 ) -> Result<WaveformData, String> {
     let frames = request
         .end_frame
@@ -32,7 +32,16 @@ pub(crate) fn load(
     let mut last_update = None;
     while offset < bins {
         check_cancel(cancel)?;
-        let count = batch.min(bins - offset);
+        // Prefer a short first response. Subsequent requests use the normal
+        // network budget even on long recordings.
+        let count = if offset == 0 {
+            batch
+                .min(u64::from(sample_rate).div_ceil(2 * spp) as usize)
+                .min(1024)
+        } else {
+            batch
+        }
+        .min(bins - offset);
         let start = offset as u64 * spp;
         let end = ((offset + count) as u64 * spp).min(frames);
         let part = fetch(
@@ -60,11 +69,11 @@ pub(crate) fn load(
         }
         merge(output, &part, offset, count, end - start);
         offset += count;
-        // Progress feedback is throttled independently of image publication.
+        // Paint the first range immediately and coalesce subsequent partials.
         if offset < bins
             && last_update.is_none_or(|time: Instant| time.elapsed() >= UPDATE_INTERVAL)
         {
-            progress(end as f64 / frames as f64);
+            progress(output, end as f64 / frames as f64);
             last_update = Some(Instant::now());
         }
     }
@@ -229,7 +238,7 @@ mod tests {
                 next = part.end_frame.unwrap();
                 Ok(response(&part, buckets))
             },
-            |progress| {
+            |_, progress| {
                 partials += 1;
                 assert!(progress > 0.0 && progress < 1.0);
             },
@@ -258,7 +267,7 @@ mod tests {
                 calls += 1;
                 Ok(response(&part, buckets))
             },
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
         assert!(calls <= 24, "{calls}");
@@ -272,7 +281,7 @@ mod tests {
                 cancel.store(true, Ordering::Release);
                 Ok(response(&part, buckets))
             },
-            |_| panic!("cancelled result published"),
+            |_, _| panic!("cancelled result published"),
         );
         assert!(result.is_err());
     }
@@ -357,7 +366,7 @@ mod tests {
                     buckets,
                 ))
             },
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
         assert!(empty_tail);
@@ -413,7 +422,7 @@ mod tests {
                 data.sample_rate = preview_rate;
                 Ok(data)
             },
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
         assert_eq!(data.sample_rate, original_rate);
@@ -500,7 +509,7 @@ mod tests {
                 };
                 Ok(serde_json::from_slice(&json).unwrap())
             },
-            |progress| {
+            |_, progress| {
                 assert_eq!(progress, 0.5);
                 published.send(()).unwrap();
             },
@@ -524,7 +533,7 @@ mod tests {
                 calls += 1;
                 Ok(response(&part, buckets))
             },
-            |_| cancel.store(true, Ordering::Release),
+            |_, _| cancel.store(true, Ordering::Release),
         );
         assert!(result.is_err());
         assert_eq!(calls, 1);

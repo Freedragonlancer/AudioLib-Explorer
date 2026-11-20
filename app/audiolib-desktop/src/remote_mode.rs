@@ -3242,7 +3242,7 @@ impl Controller {
         request: WaveformRequest,
         cancel: &AtomicBool,
         version: &audiolib_remote::OriginalVersion,
-        progress: impl FnMut(f64),
+        progress: impl FnMut(&WaveformData, f64),
     ) -> Result<WaveformData, String> {
         let mut deferred_audio = false;
         crate::progressive_waveform::load(

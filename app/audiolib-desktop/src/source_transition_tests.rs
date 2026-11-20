@@ -2802,8 +2802,10 @@ fn child_ready_preview_viewport() {
     let address = listener.local_addr().unwrap();
     let request_count = Arc::new(AtomicU64::new(0));
     let observed = request_count.clone();
+    let (resume, first_visible) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
         let mut next_frame = 0;
+        let mut wait_for_preview = true;
         loop {
             let (mut socket, _) = listener.accept().unwrap();
             let head = request(&mut socket);
@@ -2832,6 +2834,10 @@ fn child_ready_preview_viewport() {
             };
             let start = param("start_frame=");
             let end = param("end_frame=");
+            if start > 0 && wait_for_preview {
+                first_visible.recv_timeout(Duration::from_secs(12)).unwrap();
+                wait_for_preview = false;
+            }
             assert_eq!(start, next_frame);
             next_frame = end;
             // A constant six-channel segment is enough to verify complete coverage
@@ -2951,7 +2957,33 @@ fn child_ready_preview_viewport() {
     controller.queue_waveform(&file);
     let win = ui.as_weak();
     run_until(&ui, move || {
-        win.unwrap().get_waveform_ready() && win.unwrap().get_waveform_info().contains("96.0 kHz")
+        let ui = win.unwrap();
+        ui.get_waveform_ready()
+            && (0.0..1.0).contains(&ui.get_waveform_progress())
+            && ui.get_waveform_progress() > 0.0
+    });
+    let image = ui.get_waveform_image().to_rgba8().unwrap();
+    let width = image.width() as usize;
+    assert!(
+        image
+            .as_slice()
+            .chunks_exact(width)
+            .any(|row| row[0] != row[width - 1]),
+        "first segment should be visible on the left of the full timeline"
+    );
+    ui.invoke_waveform_wheel_zoom_requested(4.0, 0.35);
+    ui.invoke_waveform_zoom_requested(2.0);
+    ui.invoke_waveform_pan_requested(0.75);
+    let view = controller.wave_view.lock().unwrap().1;
+    assert_eq!((view.zoom, view.scroll), (1.0, 0.0));
+    assert_eq!((ui.get_view_start(), ui.get_view_end()), (0.0, 2.0));
+    resume.send(()).unwrap();
+    let win = ui.as_weak();
+    run_until(&ui, move || {
+        let ui = win.unwrap();
+        ui.get_waveform_ready()
+            && ui.get_waveform_progress() == 1.0
+            && ui.get_waveform_info().contains("96.0 kHz")
     });
     let first_load_requests = request_count.load(Ordering::SeqCst);
     assert!(first_load_requests > 1);

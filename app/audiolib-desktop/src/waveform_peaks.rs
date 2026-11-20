@@ -59,62 +59,82 @@ impl ResidentPeaks {
     }
 
     pub(crate) fn viewport(&self, start: f64, end: f64, width: u32) -> WaveformData {
-        let rate = f64::from(self.base.sample_rate);
-        let start = ((start * rate).round() as u64).min(self.base.frames);
-        let end = ((end * rate).round() as u64).clamp(start, self.base.frames);
-        let span = end - start;
-        let width = u64::from(width.max(1));
-        let edge = |x| start + span / width * x + (span % width) * x / width;
-        let spp = u64::from(self.base.samples_per_pixel.max(1));
-        let peaks = self
-            .base
-            .peaks
-            .iter()
-            .enumerate()
-            .map(|(channel, lane)| {
-                (0..width)
-                    .map(|x| {
-                        let a = edge(x).min(self.base.frames.saturating_sub(1));
-                        let b = edge(x + 1).max(a + 1).min(self.base.frames);
-                        let mut i = (a / spp) as usize;
-                        let limit = (b.div_ceil(spp) as usize).min(lane.len());
-                        if i + 1 == limit {
-                            return lane[i].clone();
+        project(&self.base, &self.levels, start, end, width)
+    }
+}
+
+/// Draw a verified prefix on the full timeline before the resident levels exist.
+pub(crate) fn loading_overview(base: &WaveformData, width: u32) -> WaveformData {
+    project(
+        base,
+        &[],
+        0.0,
+        base.frames as f64 / f64::from(base.sample_rate),
+        width,
+    )
+}
+
+fn project(
+    base: &WaveformData,
+    levels: &[Vec<Vec<WaveformPeak>>],
+    start: f64,
+    end: f64,
+    width: u32,
+) -> WaveformData {
+    let rate = f64::from(base.sample_rate);
+    let start = ((start * rate).round() as u64).min(base.frames);
+    let end = ((end * rate).round() as u64).clamp(start, base.frames);
+    let span = end - start;
+    let width = u64::from(width.max(1));
+    let edge = |x| start + span / width * x + (span % width) * x / width;
+    let spp = u64::from(base.samples_per_pixel.max(1));
+    let peaks = base
+        .peaks
+        .iter()
+        .enumerate()
+        .map(|(channel, lane)| {
+            (0..width)
+                .map(|x| {
+                    let a = edge(x).min(base.frames.saturating_sub(1));
+                    let b = edge(x + 1).max(a + 1).min(base.frames);
+                    let mut i = (a / spp) as usize;
+                    let limit = (b.div_ceil(spp) as usize).min(lane.len());
+                    if i + 1 == limit {
+                        return lane[i].clone();
+                    }
+                    let mut sum = PeakSum::default();
+                    while i < limit {
+                        let mut level = 0;
+                        let mut step = 1;
+                        while level < levels.len()
+                            && step * FANOUT <= limit - i
+                            && i.is_multiple_of(step * FANOUT)
+                            && i as u64 * spp >= a
+                            && (i + step * FANOUT) as u64 * spp <= b
+                        {
+                            step *= FANOUT;
+                            level += 1;
                         }
-                        let mut sum = PeakSum::default();
-                        while i < limit {
-                            let mut level = 0;
-                            let mut step = 1;
-                            while level < self.levels.len()
-                                && step * FANOUT <= limit - i
-                                && i.is_multiple_of(step * FANOUT)
-                                && i as u64 * spp >= a
-                                && (i + step * FANOUT) as u64 * spp <= b
-                            {
-                                step *= FANOUT;
-                                level += 1;
-                            }
-                            let peak = if level == 0 {
-                                &lane[i]
-                            } else {
-                                &self.levels[level - 1][channel][i / step]
-                            };
-                            let overlap = b.min((i + step) as u64 * spp) - a.max(i as u64 * spp);
-                            sum.add(peak, overlap);
-                            i += step;
-                        }
-                        sum.finish()
-                    })
-                    .collect()
-            })
-            .collect();
-        WaveformData {
-            frames: span,
-            sample_rate: self.base.sample_rate,
-            channels: self.base.channels,
-            samples_per_pixel: span.div_ceil(width).clamp(1, u64::from(u32::MAX)) as u32,
-            peaks,
-        }
+                        let peak = if level == 0 {
+                            &lane[i]
+                        } else {
+                            &levels[level - 1][channel][i / step]
+                        };
+                        let overlap = b.min((i + step) as u64 * spp) - a.max(i as u64 * spp);
+                        sum.add(peak, overlap);
+                        i += step;
+                    }
+                    sum.finish()
+                })
+                .collect()
+        })
+        .collect();
+    WaveformData {
+        frames: span,
+        sample_rate: base.sample_rate,
+        channels: base.channels,
+        samples_per_pixel: span.div_ceil(width).clamp(1, u64::from(u32::MAX)) as u32,
+        peaks,
     }
 }
 

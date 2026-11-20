@@ -590,6 +590,7 @@ struct WaveJob {
 }
 #[derive(Default)]
 struct WaveQueue {
+    loading_remote: bool,
     source_key: String,
     pending: Option<WaveJob>,
 }
@@ -1940,6 +1941,9 @@ impl Controller {
         });
         let c = self.clone();
         ui.on_waveform_zoom_requested(move |factor| {
+            if c.waveform_job.lock().unwrap().loading_remote {
+                return;
+            }
             let Some(ui) = c.ui.upgrade() else {
                 return;
             };
@@ -1962,6 +1966,9 @@ impl Controller {
         });
         let c = self.clone();
         ui.on_waveform_wheel_zoom_requested(move |factor, fraction| {
+            if c.waveform_job.lock().unwrap().loading_remote {
+                return;
+            }
             let Some(ui) = c.ui.upgrade() else {
                 return;
             };
@@ -1982,6 +1989,9 @@ impl Controller {
         });
         let c = self.clone();
         ui.on_waveform_pan_requested(move |scroll| {
+            if c.waveform_job.lock().unwrap().loading_remote {
+                return;
+            }
             let Some(ui) = c.ui.upgrade() else {
                 return;
             };
@@ -5833,7 +5843,7 @@ impl Controller {
     }
 
     fn load_waveform_source(
-        &self,
+        self: &Arc<Self>,
         job: &mut WaveJob,
     ) -> Result<crate::waveform_peaks::ResidentPeaks, String> {
         job.source.bind_source_version(self, &job.cancel)?;
@@ -5844,13 +5854,17 @@ impl Controller {
                 request,
                 &job.cancel,
                 version,
-                |progress| {
-                    let cancel = job.cancel.clone();
-                    post(self.ui.clone(), move |ui| {
-                        if !cancel.load(Ordering::Acquire) {
-                            ui.set_waveform_progress(progress as f32);
-                        }
-                    });
+                |partial, progress| {
+                    if job.cancel.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let mut preview = job.clone();
+                    (preview.width, preview.height) = *self.waveform_size.lock().unwrap();
+                    self.publish_waveform(
+                        &preview,
+                        &crate::waveform_peaks::loading_overview(partial, preview.width),
+                        progress,
+                    );
                 },
             )?,
             None => {
@@ -5913,7 +5927,17 @@ impl Controller {
             ui.set_view_start(start as f32);
             ui.set_view_end(end as f32);
             publish_wave_target(&ui, job.view, job.duration);
-            ui.set_waveform_progress(progress as f32);
+            if progress >= 1.0 {
+                let mut queue = c2.waveform_job.lock().unwrap();
+                if job.cancel.load(Ordering::Acquire) {
+                    return;
+                }
+                queue.loading_remote = false;
+                drop(queue);
+                ui.set_waveform_progress(1.0);
+            } else {
+                ui.set_waveform_progress((progress as f32).min(1.0 - f32::EPSILON));
+            }
             ui.set_waveform_ready(true);
             ui.set_waveform_info(info.into());
         });
@@ -5928,6 +5952,7 @@ impl Controller {
             .store(true, Ordering::Release);
         queue.pending = None;
         queue.source_key.clear();
+        queue.loading_remote = false;
         self.waveform_wake.notify_one();
     }
 
@@ -6022,7 +6047,9 @@ impl Controller {
         let mut token = self.waveform_cancel.lock().unwrap();
         let new_source =
             reload || token.load(Ordering::Acquire) || queue.source_key != source.request_key();
+        let initial_remote = new_source && self.remote_read_only() && file.id > 0;
         if new_source {
+            queue.loading_remote = initial_remote;
             token.store(true, Ordering::Release);
             *token = Arc::new(AtomicBool::new(false));
             self.waveform_generation.fetch_add(1, Ordering::AcqRel);
@@ -6035,7 +6062,7 @@ impl Controller {
         let (view, changed) = {
             let mut state = self.wave_view.lock().unwrap();
             let changed = state.0 != file.file_path;
-            if changed {
+            if changed || initial_remote {
                 state.0 = file.file_path.clone();
                 state.1.zoom = 1.0;
                 state.1.scroll = 0.0;
@@ -6058,9 +6085,9 @@ impl Controller {
                 if cancel.load(Ordering::Acquire) {
                     return;
                 }
-                if changed || !ui.get_waveform_ready() {
+                if initial_remote || changed || !ui.get_waveform_ready() {
                     ui.set_waveform_ready(false);
-                    ui.set_waveform_progress(0.0);
+                    ui.set_waveform_progress(if initial_remote { 0.0 } else { 1.0 });
                     ui.set_waveform_image(Image::default());
                     ui.set_waveform_mask(Image::default());
                     publish_wave_target(&ui, view, duration);
