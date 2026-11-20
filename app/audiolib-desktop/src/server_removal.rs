@@ -267,6 +267,11 @@ impl Controller {
         }
     }
 
+    /// A server removal can hide folder rows while the snapshot's facets still match.
+    pub(in crate::controller) fn has_hidden_folders(&self) -> bool {
+        self.remote_read_only() && !self.remote.lock().unwrap().hidden.folders.is_empty()
+    }
+
     /// Records removed on the server but still counted by the open snapshot.
     pub(crate) fn hidden_record_count(&self) -> u64 {
         if !self.remote_read_only() {
