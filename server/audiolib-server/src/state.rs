@@ -590,7 +590,6 @@ struct Inner {
     snapshot_cache: Mutex<Option<Arc<PreparedSnapshot>>>,
     legacy_snapshot_cache: Mutex<Option<(Arc<PreparedSnapshot>, LibraryInfo)>>,
     legacy_info_cache: Mutex<Option<(String, u64, LibraryInfo)>>,
-    legacy_snapshots_enabled: AtomicBool,
     snapshot_registry: SnapshotRegistry,
     /// The snapshot preparation in flight (or last finished), per [`SnapshotEncoding`].
     snapshot_jobs: Mutex<[Option<SnapshotJob>; 4]>,
@@ -828,17 +827,20 @@ impl AppState {
                 "ffmpeg is not available: /audio/{{id}}/preview?codec=flac answers 503 TRANSCODER_UNAVAILABLE (codec=pcm is unaffected)"
             );
         }
-        let list = Arc::new(ListWaveforms::new(
-            ListOptions {
-                cache_root: config.waveform_cache_path(),
-                cache_mb: config.list_waveform_cache_mb,
-                workers: config.effective_list_waveform_workers(),
-                rate: config.list_waveform_rate,
-                pause_stats_on_playback: config.list_waveform_pause_stats_on_playback,
-            },
-            &library_id,
-            provider.database_path(),
-        ));
+        let list = Arc::new(
+            ListWaveforms::new(
+                ListOptions {
+                    cache_root: config.waveform_cache_path(),
+                    cache_mb: config.list_waveform_cache_mb,
+                    workers: config.effective_list_waveform_workers(),
+                    rate: config.list_waveform_rate,
+                    pause_stats_on_playback: config.list_waveform_pause_stats_on_playback,
+                },
+                &library_id,
+                provider.database_path(),
+            )
+            .with_server_settings(security.clone()),
+        );
         // Root directories are deliberately not touched here (a sleeping NAS disk would
         // delay startup); the root monitor checks them in the background.
         let state = Self {
@@ -861,7 +863,6 @@ impl AppState {
                 snapshot_cache: Mutex::new(None),
                 legacy_snapshot_cache: Mutex::new(None),
                 legacy_info_cache: Mutex::new(None),
-                legacy_snapshots_enabled: AtomicBool::new(config.legacy_snapshot_enabled),
                 snapshot_registry: SnapshotRegistry::default(),
                 snapshot_jobs: Mutex::new([None, None, None, None]),
                 snapshot_wait: Duration::from_secs(config.snapshot_wait_secs),
@@ -1431,12 +1432,10 @@ impl AppState {
         inspected_snapshot_format(self.inner.provider.database_path(), &self.inner.stopping)
     }
 
-    /// Enable the transitional schema-8 read representation. Actual-library writes
-    /// always retain their schema-9 gate, regardless of this setting.
+    /// Set the process-local fallback for the transitional schema-8 read representation.
+    /// A persisted admin setting takes precedence; writes keep their actual-format gate.
     pub fn set_legacy_snapshots_enabled(&self, enabled: bool) {
-        self.inner
-            .legacy_snapshots_enabled
-            .store(enabled, Ordering::Release);
+        self.security().set_legacy_snapshot_default(enabled);
         if !enabled && let Ok(mut cache) = self.inner.legacy_snapshot_cache.lock() {
             *cache = None;
         }
@@ -1444,7 +1443,7 @@ impl AppState {
 
     /// Whether schema-9 sources may serve a transitional schema-8 read copy.
     pub fn legacy_snapshots_enabled(&self) -> bool {
-        self.inner.legacy_snapshots_enabled.load(Ordering::Acquire)
+        self.security().legacy_snapshot_enabled().0
     }
 
     /// Select a peer's read representation, including the transition-period switch.
@@ -1455,7 +1454,7 @@ impl AppState {
     ) -> std::result::Result<audiolib_core::compatibility::SnapshotFormat, crate::ApiError> {
         let actual = self.snapshot_format()?;
         let selected = crate::compatibility::read_format(headers, &actual, info_only)?;
-        if selected != actual && !self.inner.legacy_snapshots_enabled.load(Ordering::Acquire) {
+        if selected != actual && !self.legacy_snapshots_enabled() {
             return Err(crate::ApiError::new(
                 axum::http::StatusCode::CONFLICT,
                 "SNAPSHOT_FORMAT_UNSUPPORTED",
@@ -2062,7 +2061,7 @@ impl AppState {
         .await
         .map_err(|_| crate::ApiError::internal("Snapshot negotiation worker failed"))??;
         let output = self.snapshot_within_budget_selected(zstd, legacy).await;
-        if legacy && !self.inner.legacy_snapshots_enabled.load(Ordering::Acquire) {
+        if legacy && !self.legacy_snapshots_enabled() {
             // An already running preparation may finish after the transition closes.
             self.read_format_for_peer(headers, false)?;
         }

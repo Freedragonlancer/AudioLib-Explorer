@@ -752,11 +752,19 @@ fn settings_response(
 ) -> SettingsResponse {
     let (pregenerate_list_waveforms, pregenerate_list_waveforms_source) =
         security.pregenerate_list_waveforms_with_source();
+    let (legacy_snapshot_enabled, legacy_snapshot_enabled_source) =
+        security.legacy_snapshot_enabled();
+    let (list_waveform_pause_stats_on_playback, list_waveform_pause_stats_on_playback_source) =
+        security.list_waveform_pause_stats_on_playback();
     let (list_waveform_rate, list_waveform_rate_source) = security.list_waveform_rate_with_source();
     SettingsResponse {
         pregenerate_list_waveforms,
         pregenerate_list_waveforms_source,
         list_waveform_rate,
+        legacy_snapshot_enabled,
+        legacy_snapshot_enabled_source,
+        list_waveform_pause_stats_on_playback,
+        list_waveform_pause_stats_on_playback_source,
         list_waveform_rate_source,
         can_change: security
             .manage_mode()
@@ -782,6 +790,10 @@ async fn get_settings(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SettingsPatch {
+    #[serde(default, deserialize_with = "present_value")]
+    legacy_snapshot_enabled: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "present_value")]
+    list_waveform_pause_stats_on_playback: Option<Option<bool>>,
     #[serde(default, deserialize_with = "present_value")]
     pregenerate_list_waveforms: Option<Option<bool>>,
     #[serde(default, deserialize_with = "present_value")]
@@ -828,11 +840,21 @@ async fn patch_settings(
                 "list_waveform_rate must be an integer in 1..=1000 or null",
             ));
         }
-        // One write of admin-settings.json for both fields: a failure changes neither.
-        if patch.list_waveform_rate.is_some() || patch.pregenerate_list_waveforms.is_some() {
+        // Persist the supplied overrides in a single settings transaction.
+        if patch.list_waveform_rate.is_some()
+            || patch.pregenerate_list_waveforms.is_some()
+            || patch.legacy_snapshot_enabled.is_some()
+            || patch.list_waveform_pause_stats_on_playback.is_some()
+        {
             security.update_settings_locked(&lease, |settings| {
                 if let Some(value) = patch.list_waveform_rate {
                     settings.list_waveform_rate = value;
+                }
+                if let Some(value) = patch.legacy_snapshot_enabled {
+                    settings.legacy_snapshot_enabled = value;
+                }
+                if let Some(value) = patch.list_waveform_pause_stats_on_playback {
+                    settings.list_waveform_pause_stats_on_playback = value;
                 }
                 if let Some(value) = patch.pregenerate_list_waveforms {
                     settings.pregenerate_list_waveforms = value;

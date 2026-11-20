@@ -5,6 +5,7 @@
 
 const $ = (id) => document.getElementById(id);
 let current = null;
+let statusRevision = 0;
 let currentUpdate = null;
 let updateRestarting = false;
 
@@ -28,7 +29,7 @@ async function api(method, path, body) {
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch (_) { data = null; }
   if (!response.ok) {
-    const message = data && data.message ? data.message : (response.status + " " + text);
+    const message = data?.message || data?.error_code || ("HTTP " + response.status);
     throw new Error(message);
   }
   return data;
@@ -41,10 +42,69 @@ function when(seconds) {
 
 const SOURCES = { admin: "管理页", config: "config.toml", default: "默认值" };
 
+const switches = [
+  ["legacy", "legacy_snapshot_enabled"],
+  ["stat-pause", "list_waveform_pause_stats_on_playback"],
+];
+const savingSwitches = new Set();
+
+function renderSwitch(id, key, status) {
+  const available = typeof status[key] === "boolean";
+  if (!savingSwitches.has(id)) $(id).checked = available && status[key];
+  $(id).disabled = !available || savingSwitches.has(id);
+  $("reset-" + id).disabled = $(id).disabled || status[key + "_source"] !== "admin";
+  $(id + "-source").textContent = savingSwitches.has(id) ? "正在保存…" : available
+    ? "当前" + (status[key] ? "开启" : "关闭") + " · " + SOURCES[status[key + "_source"]]
+    : "当前服务端版本未提供此设置";
+}
+
+for (const [id, key] of switches) {
+  const save = async (value) => {
+    if (!current || savingSwitches.has(id)) return;
+    savingSwitches.add(id);
+    renderSwitch(id, key, current);
+    try {
+      await saveSettings("PUT", "settings", { [key]: value });
+      toast(value === null ? "已恢复配置值" : "已保存");
+    } catch (error) { toast(error.message, true); }
+    finally {
+      savingSwitches.delete(id);
+      renderSwitch(id, key, current);
+    }
+  };
+  $(id).addEventListener("change", () => save($(id).checked));
+  $("reset-" + id).addEventListener("click", () => save(null));
+}
+
+// Keep unsaved edits across tab changes and unrelated status updates.
+const draftGroups = {
+  public_url: ["public-url"], lan_url: ["lan-url"], auth_mode: ["input[name=mode]"],
+  manage_mode: ["input[name=manage]"], tls: ["tls-cert", "tls-key", "tls-port"],
+  pregenerate_list_waveforms: ["pregen"], list_waveform_rate: ["lw-rate"],
+};
+const drafts = new Map();
+for (const [key, selectors] of Object.entries(draftGroups)) {
+  const inputs = selectors.flatMap((selector) => selector.startsWith("input[")
+    ? [...document.querySelectorAll(selector)] : [$(selector)]);
+  for (const input of inputs) input.addEventListener("input", () => {
+    drafts.set(key, inputs.map((element) => {
+      const prop = ["radio", "checkbox"].includes(element.type) ? "checked" : "value";
+      return [element, prop, element[prop]];
+    }));
+  });
+}
+function savedDrafts(keys) {
+  const submitted = keys.map((key) => [key, drafts.get(key)]);
+  return () => {
+    for (const [key, draft] of submitted) if (drafts.get(key) === draft) drafts.delete(key);
+  };
+}
+
 function render(status) {
+  statusRevision++;
   current = status;
   $("version").textContent = status.version;
-  $("library").textContent = status.library;
+  $("library").textContent = ({ ok: "就绪", starting: "启动中", error: "异常" })[status.library] || status.library;
   $("warnings").textContent = (status.warnings || []).join("\n");
 
   const lanFromPage = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname) ? null : location.origin;
@@ -100,6 +160,8 @@ function render(status) {
     SOURCES[status.pregenerate_list_waveforms_source] + "）；速率：" + status.list_waveform_rate + " 文件/秒（来源：" +
     SOURCES[status.list_waveform_rate_source] + "）";
 
+  for (const [id, key] of switches) renderSwitch(id, key, status);
+  for (const draft of drafts.values()) for (const [input, prop, value] of draft) input[prop] = value;
   $("files").textContent = [status.settings_file, status.tokens_file].filter(Boolean).join("，");
 }
 
@@ -136,8 +198,10 @@ function renderTokens(list) {
 
 async function refresh() {
   try {
-    render(await api("GET", "status"));
-    renderTokens(await api("GET", "tokens"));
+    const revision = ++statusRevision;
+    const status = await api("GET", "status");
+    if (revision === statusRevision) render(status);
+    if (activePanel === "network") renderTokens(await api("GET", "tokens"));
   } catch (error) { toast("读取状态失败：" + error.message, true); }
 }
 
@@ -191,12 +255,20 @@ $("update-install").addEventListener("click", async () => {
   catch (error) { toast(error.message, true); await refreshUpdate(); }
 });
 
+async function saveSettings(method, path, body) {
+  const revision = statusRevision;
+  const acknowledge = savedDrafts(path === "tls" ? ["tls"] : Object.keys(body || {}));
+  const status = await api(method, path, body);
+  acknowledge();
+  // Overlapping writes can return full server snapshots in the opposite order.
+  if (status?.auth_mode && revision === statusRevision) render(status);
+  else await refresh();
+}
+
 async function change(method, path, body, done) {
   try {
-    const status = await api(method, path, body);
-    if (status && status.auth_mode) render(status);
+    await saveSettings(method, path, body);
     toast(done || "已保存");
-    await refresh();
   } catch (error) { toast(error.message, true); }
 }
 
@@ -264,6 +336,7 @@ $("disable-tls").addEventListener("click", () => {
 // ---- Library roots ----
 let rootsList = [];
 let scanTimer = null;
+let rootsRequest = 0;
 const numberText = (n) => (n === null || n === undefined ? "—" : Number(n).toLocaleString());
 
 function cell(row, text, cls) {
@@ -329,13 +402,22 @@ function renderScan(scan) {
 }
 
 async function refreshRoots() {
+  const request = ++rootsRequest;
+  clearTimeout(scanTimer);
+  if (!panelVisible("scan-roots")) return;
+  let interval = 5000;
   try {
     const [list, current] = await Promise.all([api("GET", "roots"), api("GET", "scans/current")]);
+    if (request !== rootsRequest) return;
     renderRoots(list, current.scan);
     renderScan(current.scan);
-    clearTimeout(scanTimer);
-    if (current.scan) scanTimer = setTimeout(refreshRoots, 1000);
-  } catch (error) { $("roots-error").textContent = "读取根目录失败：" + error.message; }
+    $("roots-refresh-error").textContent = "";
+    interval = current.scan ? 1000 : 15000;
+  } catch (error) {
+    if (request !== rootsRequest) return;
+    $("roots-refresh-error").textContent = "读取根目录失败：" + error.message;
+  }
+  scanTimer = setTimeout(refreshRoots, interval);
 }
 
 async function startScan(root, mode) {
@@ -504,7 +586,7 @@ $("modal").addEventListener("click", (event) => { if (event.target === $("modal"
 // ---- List waveform settings ----
 async function saveListWaveforms(body) {
   try {
-    render(await api("PUT", "settings", body));
+    await saveSettings("PUT", "settings", body);
     toast("已保存");
     refreshRuntime();
   } catch (error) { toast(error.message, true); }
@@ -523,6 +605,7 @@ $("reset-lw").addEventListener("click", () => saveListWaveforms({ pregenerate_li
 // ---- Runtime status (GET /admin/api/runtime) ----
 const RUNTIME_INTERVAL_MS = 5000;
 let runtimeTimer = null;
+let runtimeRequest = 0;
 
 function bytesText(bytes) {
   if (bytes === null || bytes === undefined) return "未知";
@@ -604,23 +687,121 @@ function renderRuntime(rt) {
 }
 
 async function refreshRuntime() {
+  const request = ++runtimeRequest;
   clearTimeout(runtimeTimer);
-  runtimeTimer = null;
-  if (document.visibilityState !== "visible") return;
+  if (!panelVisible("overview") && !panelVisible("waveforms")) return;
+  const errorBox = panelVisible("overview") ? $("rt-error") : $("limits-error");
   try {
-    renderRuntime(await api("GET", "runtime"));
-    $("rt-error").textContent = "";
-  } catch (error) { $("rt-error").textContent = "读取运行状态失败：" + error.message; }
-  if (document.visibilityState === "visible") runtimeTimer = setTimeout(refreshRuntime, RUNTIME_INTERVAL_MS);
+    const runtime = await api("GET", "runtime");
+    if (request !== runtimeRequest) return;
+    renderRuntime(runtime);
+    errorBox.textContent = "";
+  } catch (error) {
+    if (request !== runtimeRequest) return;
+    errorBox.textContent = "读取运行状态失败：" + error.message;
+  }
+  runtimeTimer = setTimeout(refreshRuntime, RUNTIME_INTERVAL_MS);
 }
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") refreshRuntime();
-  else { clearTimeout(runtimeTimer); runtimeTimer = null; }
-});
+const tabs = [...document.querySelectorAll("[role=tab]")];
+let activePanel;
+function panelVisible(id) {
+  return activePanel === id && document.visibilityState === "visible";
+}
 
-refresh();
-refreshUpdate();
-refreshRoots();
-refreshRuntime();
-setInterval(() => { if (document.visibilityState === "visible") refreshUpdate(); }, 2000);
-setInterval(() => { if (document.visibilityState === "visible") { refresh(); if (!scanTimer || !$("scan-box").dataset.session || $("scan-box").classList.contains("hidden")) refreshRoots(); } }, 15000);
+const migrationStates = {
+  idle: "尚未迁移", deferred: "已推迟", preflight: "正在预检", backing_up: "正在备份",
+  running: "正在建立索引", paused: "已暂停", switching: "正在发布索引",
+  done: "迁移完成", failed: "迁移失败", cancelled: "已取消", rolled_back: "已回滚",
+};
+const migrationActions = [
+  ["start", "开始升级", ["idle", "deferred", "rolled_back"], "开始迁移到 schema 9？服务器将预检并备份当前数据库。"],
+  ["pause", "暂停", ["running"]],
+  ["resume", "继续升级", ["paused", "cancelled", "failed"]],
+  ["cancel", "取消迁移", ["running", "paused"], "取消当前迁移？"],
+  ["rollback", "回滚", ["done", "paused", "failed", "cancelled"], "确认回滚此次数据库迁移？"],
+];
+let migrationTimer;
+let migrationBusy = false;
+async function migration(action) {
+  clearTimeout(migrationTimer);
+  if (migrationBusy || !panelVisible("database")) return;
+  migrationBusy = true;
+  $("migration-refresh").disabled = true;
+  $("migration-actions").replaceChildren();
+  $("migration-error").textContent = "";
+  let polling = false;
+  try {
+    const report = await api(action ? "POST" : "GET", "migration/" + (action || "status"), action ? {} : undefined);
+    $("migration-state").textContent = migrationStates[report.state] || report.state;
+    const details = [];
+    if (report.switch) details.push("schema " + report.switch.user_version);
+    if (report.progress && report.progress.total) details.push("已处理目录 " + numberText(report.progress.done) + " / " + numberText(report.progress.total));
+    $("migration-progress").textContent = details.join(" · ");
+    if (report.error_code) $("migration-error").textContent = report.error_code;
+    for (const [key, label, states, question] of migrationActions) {
+      if (!states.includes(report.state)) continue;
+      const button = document.createElement("button");
+      button.textContent = label;
+      button.className = ["cancel", "rollback"].includes(key) ? "danger" : "";
+      button.addEventListener("click", () => { if (!question || confirm(question)) migration(key); });
+      $("migration-actions").appendChild(button);
+    }
+    polling = !!action || ["preflight", "backing_up", "running", "switching"].includes(report.state);
+  } catch (error) {
+    $("migration-state").textContent = action ? "迁移操作未完成" : "无法获取迁移状态";
+    $("migration-progress").textContent = "";
+    $("migration-error").textContent = error.message;
+  } finally {
+    migrationBusy = false;
+    $("migration-refresh").disabled = false;
+    if (polling && panelVisible("database")) migrationTimer = setTimeout(migration, 3000);
+  }
+}
+$("migration-refresh").addEventListener("click", () => migration());
+
+function refreshPanel() {
+  refreshRoots();
+  refreshRuntime();
+  clearTimeout(migrationTimer);
+  if (panelVisible("overview")) refreshUpdate();
+  if (panelVisible("database")) migration();
+  if (panelVisible("network")) refresh();
+}
+
+function activate(tab, focus) {
+  activePanel = tab.getAttribute("aria-controls");
+  for (const item of tabs) {
+    const selected = item === tab;
+    item.tabIndex = selected ? 0 : -1;
+    item.setAttribute("aria-selected", String(selected));
+    $(item.getAttribute("aria-controls")).hidden = !selected;
+  }
+  if (focus) tab.focus();
+  refreshPanel();
+}
+function selectTab(tab) {
+  if (tab.getAttribute("aria-controls") === activePanel) return;
+  history.replaceState(null, "", "#" + tab.getAttribute("aria-controls"));
+  activate(tab, true);
+}
+for (const [index, tab] of tabs.entries()) {
+  tab.addEventListener("click", () => selectTab(tab));
+  tab.addEventListener("keydown", (event) => {
+    const target = { ArrowRight: (index + 1) % tabs.length, ArrowLeft: (index + tabs.length - 1) % tabs.length, Home: 0, End: tabs.length - 1 }[event.key];
+    if (target === undefined) return;
+    event.preventDefault();
+    selectTab(tabs[target]);
+  });
+}
+function fromHash() {
+  activate(tabs.find((tab) => "#" + tab.getAttribute("aria-controls") === location.hash) || tabs[0], false);
+}
+window.addEventListener("hashchange", fromHash);
+document.addEventListener("visibilitychange", refreshPanel);
+fromHash();
+if (activePanel !== "network") refresh();
+setInterval(() => { if (panelVisible("overview") || (updateRestarting && document.visibilityState === "visible")) refreshUpdate(); }, 2000);
+setInterval(() => {
+  if (document.visibilityState !== "visible") return;
+  refresh();
+}, 15000);
