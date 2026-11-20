@@ -501,6 +501,7 @@ fn cross_index_navigation(server_snapshot: bool) {
         ui.invoke_folder_requested(index as i32);
         assert_eq!(ui.get_selected_folder(), index as i32);
         assert_eq!(ui.get_selected_folder_path(), path);
+        assert_eq!(ui.get_crumbs().iter().last().unwrap().path, path);
         assert_eq!(
             ui.get_crumbs()
                 .iter()

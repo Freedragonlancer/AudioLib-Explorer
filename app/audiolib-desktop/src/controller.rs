@@ -673,17 +673,18 @@ fn publish_folder_selection(ui: &AppWindow, row: i32, crumbs: &[Folder]) {
             .map_or("", |folder| folder.path.as_str())
             .into(),
     );
-    if !ui
-        .get_crumbs()
-        .iter()
-        .map(|row| row.name)
-        .eq(crumbs.iter().map(|folder| folder.name.as_str()))
+    let displayed = ui.get_crumbs();
+    if displayed.row_count() != crumbs.len()
+        || displayed.iter().zip(crumbs).any(|(row, folder)| {
+            row.name != folder.name.as_str() || row.path != folder.path.as_str()
+        })
     {
         ui.set_crumbs(ModelRc::new(VecModel::from(
             crumbs
                 .iter()
                 .map(|folder| CrumbRow {
                     name: folder.name.clone().into(),
+                    path: folder.path.clone().into(),
                 })
                 .collect::<Vec<_>>(),
         )));
