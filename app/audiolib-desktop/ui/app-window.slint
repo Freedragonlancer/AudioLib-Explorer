@@ -43,7 +43,7 @@ export struct FolderRow { name: string, count: string, path: string, depth: int,
 export struct AlbumRow { id: string, name: string, count: string, cover: image }
 export struct CrumbRow { name: string }
 export struct DisplayTagRow { tags: [string] }
-export struct SearchTaskRow { id: string, name: string, favorite: bool, modified: bool, active: bool, keywords: string, folder: string, summary: string, searched: bool }
+export struct SearchTaskRow { id: string, name: string, favorite: bool, modified: bool, active: bool, keywords: string, index-name: string, library-index: bool, summary: string, searched: bool }
 export struct SavedSearchTaskRow { id: string, name: string, summary: string }
 // One row of the unified window's source list: kind 0 = the local library (always row 0),
 // 1 = a saved server profile. status-kind: 0 unknown, 1 ok, 3 failed.
@@ -3215,7 +3215,7 @@ main-scroll := ScrollView {
                         for task in root.search-tasks: SearchTaskTab {
                             width: root.task-tab-width; name: task.name; active: task.active;
                             tooltip-width: min(560px * Theme.ui-scale, root.width - 40px * Theme.ui-scale);
-                            keywords: task.keywords; folder: task.folder; summary: task.summary; searched: task.searched;
+                            keywords: task.keywords; index-name: task.index-name; library-index: task.library-index; summary: task.summary; searched: task.searched;
                             favorite: task.favorite; modified: task.modified; chinese: root.chinese; compact: root.short-layout;
                             enabled: !root.background-blocked || root.ai-batch-restoring;
                             editable: !root.search-workspace-read-only && !(root.ai-batch-searching && root.task-restoring);
@@ -4295,7 +4295,7 @@ main-scroll := ScrollView {
                                 for task in root.search-tasks: SearchTaskTab {
                                     width: root.task-tab-width; height: 32px * Theme.ui-scale; name: task.name; active: task.active;
                                     tooltip-width: min(560px * Theme.ui-scale, root.width - 40px * Theme.ui-scale);
-                                    keywords: task.keywords; folder: task.folder; summary: task.summary; searched: task.searched;
+                                    keywords: task.keywords; index-name: task.index-name; library-index: task.library-index; summary: task.summary; searched: task.searched;
                                     favorite: task.favorite; modified: task.modified; chinese: root.chinese; compact: root.short-layout;
                                     enabled: !root.background-blocked || root.ai-batch-restoring;
                                     editable: !root.search-workspace-read-only && !(root.ai-batch-searching && root.task-restoring);

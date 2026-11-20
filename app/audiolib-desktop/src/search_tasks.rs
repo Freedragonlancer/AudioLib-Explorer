@@ -407,10 +407,10 @@ impl Controller {
         }
     }
 
-    pub(super) fn clear_task_folder_error(&self) {
+    pub(super) fn clear_task_index_errors(&self) {
         let mut state = self.task_workspace.lock().unwrap();
         state.unavailable_folder = None;
-        state.restore_failed = false;
+        state.unavailable_album = None;
     }
 
     pub(super) fn cancel_deferred_task_search(&self) {
@@ -1090,7 +1090,8 @@ impl Controller {
                     id: task.id.as_str().into(),
                     name: display.name.into(),
                     keywords: display.keywords.join(" · ").into(),
-                    folder: display.folder.into(),
+                    index_name: display.index_name.into(),
+                    library_index: display.library_index,
                     summary: display.summary.into(),
                     searched: display.searched,
                     favorite: saved.is_some(),
@@ -2365,22 +2366,7 @@ fn apply_task_controls(ui: &AppWindow, task: &SearchTask) {
     let definition = &task.definition;
     ui.set_search_scope_index(search_scope_index(definition.scope));
     ui.set_album_filter_unavailable(album_filter_unavailable(definition));
-    let label = definition
-        .album_binding
-        .as_ref()
-        .map(|binding| album_bindings::binding_label(binding, ui.get_chinese()))
-        .or_else(|| definition.filters.album.clone())
-        .unwrap_or_else(|| {
-            if definition.filters.album_id.is_some() {
-                if ui.get_chinese() {
-                    "专辑身份不可用".into()
-                } else {
-                    "Unavailable album".into()
-                }
-            } else {
-                String::new()
-            }
-        });
+    let label = album_bindings::album_label(definition, ui.get_chinese()).unwrap_or_default();
     ui.set_album_filter(label.into());
     ui.set_album_filter_id(
         definition

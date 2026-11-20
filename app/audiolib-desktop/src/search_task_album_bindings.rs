@@ -56,6 +56,21 @@ pub(super) fn binding_label(binding: &AlbumFilterBinding, chinese: bool) -> Stri
     }
 }
 
+pub(super) fn album_label(definition: &SearchTaskDefinition, chinese: bool) -> Option<String> {
+    if let Some(binding) = &definition.album_binding {
+        return Some(binding_label(binding, chinese));
+    }
+    definition.filters.album.clone().or_else(|| {
+        definition.filters.album_id.map(|id| {
+            if chinese {
+                format!("音效库身份不可用 (#{id})")
+            } else {
+                format!("Unavailable library (#{id})")
+            }
+        })
+    })
+}
+
 pub(super) fn album_filter_unavailable(definition: &SearchTaskDefinition) -> bool {
     definition.filters.album_id.is_some()
         && definition
@@ -69,6 +84,11 @@ pub(super) fn resolve_album_filter(
     provider: &SqliteProvider,
     definition: &mut SearchTaskDefinition,
 ) -> Result<bool, String> {
+    // Older workspaces could stack both sidebar indexes. Keep the explicit
+    // library condition (including an unresolved identity) across tabs and favorites.
+    if definition.filters.album_id.is_some() || definition.filters.album.is_some() {
+        definition.folder = None;
+    }
     let Some(id) = definition.filters.album_id else {
         definition.album_binding = None;
         return Ok(false);

@@ -519,6 +519,23 @@ struct SelectionAudioJob {
     cancel: Arc<AtomicBool>,
 }
 
+enum SidebarIndex {
+    All,
+    Folder(i64),
+    Album(i64),
+}
+
+/// Both lists offer replacement scopes for the same keyword and ordinary filters.
+fn prepare_sidebar_choices(choices: &mut SearchRequest) {
+    choices.folder_id = None;
+    choices.filters.album = None;
+    choices.filters.album_id = None;
+    choices.offset = 0;
+    choices.limit = PAGE_SIZE;
+    choices.cursor = None;
+    choices.page = None;
+}
+
 /// One query/filter result only; navigation does not change directory match counts.
 struct FolderFacets {
     // Weak identity prevents pointer reuse without keeping an old library open.
@@ -526,6 +543,7 @@ struct FolderFacets {
     revision: u64,
     database_revision: Option<u64>,
     query: String,
+    scope: SearchScope,
     filters: SearchFilters,
     folders: Arc<Vec<Folder>>,
 }
@@ -543,6 +561,7 @@ impl FolderFacets {
             && self.database_revision == database_revision
             && self.revision == revision
             && self.query == request.query
+            && self.scope == request.scope
             && self.filters == request.filters
     }
 }
@@ -1523,27 +1542,7 @@ impl Controller {
             if !c.admit_task_album_filter(next) {
                 return;
             }
-            // The scope changes even when an invalid draft defers the search.
-            // Never capture the previous page under the new task definition.
-            c.begin_task_search(false);
-            ui.set_album_filter_unavailable(false);
-            {
-                let mut request = c.request.lock().unwrap();
-                request.filters.album = None;
-                request.filters.album_id = next;
-                request.offset = 0;
-                ui.set_album_filter_id(next.map(|id| id.to_string()).unwrap_or_default().into());
-                let label = next
-                    .and_then(|_| {
-                        ui.get_albums()
-                            .iter()
-                            .find(|row| row.id == identity)
-                            .map(|row| row.name)
-                    })
-                    .unwrap_or_default();
-                ui.set_album_filter(label);
-            }
-            c.request_navigation_search(&ui, true, false);
+            c.navigate_index(next.map_or(SidebarIndex::All, SidebarIndex::Album));
         });
         let c = self.clone();
         ui.on_filter_requested(move || {
@@ -1783,34 +1782,7 @@ impl Controller {
             c.reload_tree();
         });
         let c = self.clone();
-        ui.on_all_library_requested(move || {
-            if !c.available() {
-                return;
-            }
-            c.begin_task_search(true);
-            c.clear_task_folder_error();
-            c.tree.lock().unwrap().selected = None;
-            {
-                let mut request = c.request.lock().unwrap();
-                request.folder_id = None;
-                request.filters.album = None;
-                request.filters.album_id = None;
-            }
-            // Invalidate any pending publication carrying the previous folder.
-            c.reload_tree();
-            if let Some(ui) = c.ui.upgrade() {
-                // Folder and Album are both navigation scopes. Clear both before
-                // rebuilding the request so the UI cannot reapply the old Album;
-                // the normal task capture also drops its retained Album binding.
-                ui.set_album_filter("".into());
-                ui.set_album_filter_id("".into());
-                ui.set_album_filter_unavailable(false);
-                ui.set_selected_folder(-1);
-                ui.set_selected_folder_path("".into());
-                ui.set_crumbs(ModelRc::new(VecModel::<CrumbRow>::default()));
-                c.request_navigation_search(&ui, true, true);
-            }
-        });
+        ui.on_all_library_requested(move || c.navigate_index(SidebarIndex::All));
         let c = self.clone();
         ui.on_crumb_requested(move |index| {
             let id = c
@@ -1821,7 +1793,7 @@ impl Controller {
                 .get(index as usize)
                 .map(|folder| folder.id);
             if let Some(id) = id {
-                c.select_folder_id(id);
+                c.navigate_index(SidebarIndex::Folder(id));
             }
         });
         let c = self.clone();
@@ -4026,7 +3998,7 @@ impl Controller {
                         drop(next);
                         continue;
                     }
-                    let job = pending.take().unwrap();
+                    let mut job = pending.take().unwrap();
                     drop(pending);
                     if c.search_generation.load(Ordering::Acquire) != job.generation
                         || job.cancel.load(Ordering::Acquire)
@@ -4034,7 +4006,9 @@ impl Controller {
                         continue;
                     }
                     let provider = &job.provider;
-                    if c.task_album_choices_only(&job.request) {
+                    let choices_only = c.task_album_choices_only(&job.request);
+                    prepare_sidebar_choices(&mut job.request);
+                    if choices_only {
                         c.publish_albums(&job);
                         continue;
                     }
@@ -4050,18 +4024,11 @@ impl Controller {
                     });
                     let cache_hit = cached.is_some();
                     let chinese = c.chinese.load(Ordering::Acquire);
-                    // Directory facets belong to the definition, not a UI page
-                    // or its bounded-provider continuation.
-                    let mut facet_request = job.request.clone();
-                    facet_request.offset = 0;
-                    facet_request.limit = PAGE_SIZE;
-                    facet_request.cursor = None;
-                    facet_request.page = None;
                     let count_folders = || {
                         survive_panic(
                             || {
                                 provider
-                                    .search_folders_cancellable(&facet_request, job.cancel.clone())
+                                    .search_folders_cancellable(&job.request, job.cancel.clone())
                                     .map(Arc::new)
                             },
                             || {
@@ -4095,6 +4062,7 @@ impl Controller {
                             revision: job.facet_revision,
                             database_revision,
                             query: job.request.query.clone(),
+                            scope: job.request.scope,
                             filters: job.request.filters.clone(),
                             folders: folders.clone(),
                         });
@@ -4695,9 +4663,7 @@ impl Controller {
         ui.set_status(message.into());
     }
 
-    /// Publish album facets for the current query and filters. The album filter itself is
-    /// dropped so every other album stays reachable. Older remote snapshots skip
-    /// unindexed album aggregation and remain unchanged on disk.
+    /// Publish library choices for the current sidebar request.
     fn publish_albums(self: &Arc<Self>, job: &SearchJob) {
         let current = || {
             self.search_generation.load(Ordering::Acquire) == job.generation
@@ -4710,12 +4676,8 @@ impl Controller {
         }
         let confirmed = self.clone();
         let provider = job.provider.clone();
-        let mut request = job.request.clone();
-        request.filters.album = None;
-        request.filters.album_id = None;
-        request.limit = 1;
         let ui = self.ui.clone();
-        let Ok(albums) = provider.album_facets_cancellable(&request, job.cancel.clone()) else {
+        let Ok(albums) = provider.album_facets_cancellable(&job.request, job.cancel.clone()) else {
             return;
         };
         // Sidebar thumbnails read only cached pixels; source extraction stays on the
@@ -5137,24 +5099,48 @@ impl Controller {
             .get(index as usize)
             .map(|(folder, _, _)| folder.id);
         if let Some(id) = id {
-            self.select_folder_id(id);
+            self.navigate_index(SidebarIndex::Folder(id));
         }
     }
 
-    fn select_folder_id(self: &Arc<Self>, id: i64) {
+    fn navigate_index(self: &Arc<Self>, index: SidebarIndex) {
+        if !self.available() {
+            return;
+        }
+        let Some(ui) = self.ui.upgrade() else { return };
+        let (folder_id, album_id) = match index {
+            SidebarIndex::All => (None, None),
+            SidebarIndex::Folder(id) => (Some(id), None),
+            SidebarIndex::Album(id) => (None, Some(id)),
+        };
+        // Commit the scope before validation: an unfinished editor draft can defer
+        // the search, but must never cache the previous page under the new scope.
         self.begin_task_search(true);
-        self.clear_task_folder_error();
-        if let Some(ui) = self.ui.upgrade() {
-            // Disable current-folder menu actions until this selection's tree
-            // publication supplies its path; search may finish before the tree.
-            ui.set_selected_folder_path("".into());
+        self.clear_task_index_errors();
+        {
+            let mut request = self.request.lock().unwrap();
+            request.folder_id = folder_id;
+            request.filters.album = None;
+            request.filters.album_id = album_id;
+            request.offset = 0;
         }
-        self.tree.lock().unwrap().selected = Some(id);
-        self.request.lock().unwrap().folder_id = Some(id);
-        self.reload_tree();
-        if let Some(ui) = self.ui.upgrade() {
-            self.request_navigation_search(&ui, true, true);
+        {
+            let mut tree = self.tree.lock().unwrap();
+            tree.selected = folder_id;
+            tree.crumbs.clear();
         }
+        ui.set_selected_folder(-1);
+        ui.set_selected_folder_path("".into());
+        ui.set_crumbs(ModelRc::new(VecModel::<CrumbRow>::default()));
+        let identity = album_id.map(|id| id.to_string()).unwrap_or_default();
+        let label = album_id
+            .and_then(|_| ui.get_albums().iter().find(|row| row.id == identity))
+            .map(|row| row.name)
+            .unwrap_or_default();
+        ui.set_album_filter_id(identity.into());
+        ui.set_album_filter(label);
+        ui.set_album_filter_unavailable(false);
+        self.request_navigation_search(&ui, true, true);
     }
 
     fn local_scan_root_rows(folders: &[Folder]) -> Vec<LocalScanRootRow> {
@@ -11135,7 +11121,7 @@ mod tests {
         )
         .unwrap();
         ui.set_selected_folder_path("previous folder".into());
-        controller.select_folder_id(a.folders(None).unwrap()[0].id);
+        controller.navigate_index(SidebarIndex::Folder(a.folders(None).unwrap()[0].id));
         assert_eq!(ui.get_selected_folder_path(), "");
         ui.set_edit_notes("draft before batch".into());
         ui.set_metadata_dirty(true);

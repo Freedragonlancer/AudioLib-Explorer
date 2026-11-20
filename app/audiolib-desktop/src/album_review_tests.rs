@@ -449,8 +449,8 @@ fn cross_index_navigation(server_snapshot: bool) {
     // both albums and different directories.
     ui.invoke_album_selected(gore.clone());
     wait_navigation(&fixture, 3);
-    assert_eq!(directory_count(&fixture, "wind"), None);
-    assert!(!ui.get_folders().iter().any(|folder| folder.name == "wind"));
+    assert_eq!(directory_count(&fixture, "wind"), Some(1));
+    assert!(ui.get_folders().iter().any(|folder| folder.name == "wind"));
     let stale_generation = controller.search_generation.load(Ordering::Acquire);
     let stale_folders = controller.tree.lock().unwrap().matches.clone();
     controller.reload_tree();
@@ -485,14 +485,37 @@ fn cross_index_navigation(server_snapshot: bool) {
     ));
     assert!(!ui.get_status().contains("obsolete Album facets"));
 
-    // Folder -> Album is also an intersection; All sounds releases both scopes
-    // rather than leaving an invisible Album constraint behind.
+    // Switch to a library outside the selected folder, then back to that folder.
     choose_gore(&fixture);
     wait_navigation(&fixture, 3);
-    wait_albums(&fixture, 1);
-    ui.invoke_album_selected(gore.clone());
+    wait_albums(&fixture, 2);
+    let active_tab = || ui.get_search_tasks().iter().find(|tab| tab.active).unwrap();
+    assert_eq!(active_tab().index_name, "gore");
+    assert!(!active_tab().library_index);
+    let wind = ui
+        .get_albums()
+        .iter()
+        .find(|album| album.name == "Wind album")
+        .unwrap();
+    assert_eq!(wind.count, "1");
+    ui.invoke_album_selected(wind.id);
+    wait_navigation(&fixture, 1);
+    assert_eq!(controller.records.lock().unwrap()[0].filename, "wind.wav");
+    assert!(controller.request.lock().unwrap().folder_id.is_none());
+    assert!(ui.get_selected_folder_path().is_empty());
+    assert_eq!(ui.get_crumbs().row_count(), 0);
+    assert_eq!(active_tab().index_name, "Wind album");
+    assert_eq!(active_tab().keywords, "shared");
+    assert!(active_tab().library_index);
+    assert!(!active_tab().summary.contains("Folder:"));
+    choose_gore(&fixture);
     wait_navigation(&fixture, 3);
-    assert!(controller.request.lock().unwrap().folder_id.is_some());
+    let request = controller.request.lock().unwrap().clone();
+    assert!(request.folder_id.is_some());
+    assert!(request.filters.album.is_none() && request.filters.album_id.is_none());
+    assert!(ui.get_album_filter_id().is_empty() && ui.get_album_filter().is_empty());
+    assert_eq!(active_tab().index_name, "gore");
+    assert!(!active_tab().library_index);
     ui.invoke_all_library_requested();
     assert_all_scope(&fixture, false);
     wait_navigation(&fixture, 4);
