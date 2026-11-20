@@ -1246,6 +1246,11 @@ export component AppWindow inherits Window {
     property <bool> search-history-ready: !root.background-blocked && !root.search-workspace-loading && !root.task-restoring && !root.closing;
     in property <[SearchTaskRow]> search-tasks: [];
     in property <int> active-search-task-index: 0;
+    // An unavailable folder has no actionable path but still restricts its task.
+    out property <bool> all-sounds-active: root.selected-folder-path == "" && root.album-filter == ""
+        && root.album-filter-id == "" && !root.album-filter-unavailable && !root.favorites-only
+        && (root.active-search-task-index < 0 || root.active-search-task-index >= root.search-tasks.length
+            || root.search-tasks[root.active-search-task-index].index-name == "");
     in property <[SavedSearchTaskRow]> saved-search-tasks: [];
     in property <bool> search-workspace-loading: false;
     in property <bool> search-workspace-read-only: false;
@@ -3264,7 +3269,7 @@ main-scroll := ScrollView {
                             SegmentTab { horizontal-stretch: 1; preferred-width: 0px; icon: @image-url("icons/star.svg"); label: root.chinese ? "收藏" : "Favorites"; action-label: root.chinese ? "收藏页" : "Favorites page"; active: root.library-sidebar-page == 1; clicked => { if !root.background-blocked { root.library-sidebar-page = 1; if root.favorites-category == 0 { root.favorites-only = true; root.all-library-requested(); } } } }
                         }
                     }
-                    if root.library-sidebar-page == 0: Action { text-module: 1; height: 32px * Theme.ui-scale; active: root.selected-folder-path == "" && root.album-filter == "" && root.album-filter-id == "" && !root.album-filter-unavailable && !root.favorites-only; enabled: !root.background-blocked; label: root.chinese ? "全部声音" : "All sounds"; clicked => { root.favorites-only = false; root.all-library-requested(); } }
+                    if root.library-sidebar-page == 0: Action { text-module: 1; height: 32px * Theme.ui-scale; active: root.all-sounds-active; enabled: !root.background-blocked; label: root.chinese ? "全部声音" : "All sounds"; clicked => { root.favorites-only = false; root.all-library-requested(); } }
                     if root.library-sidebar-page == 1: VerticalLayout { spacing: 5px * Theme.ui-scale;
                         Action { text-module: 1; height: 30px * Theme.ui-scale; active: root.favorites-category == 0; enabled: !root.background-blocked; label: root.chinese ? "单个音频" : "Audio files"; action-label: root.chinese ? "音频收藏分类" : "Audio favorites category"; clicked => { root.favorites-category = 0; root.favorites-only = true; root.all-library-requested(); } }
                         Action { text-module: 1; height: 30px * Theme.ui-scale; active: root.favorites-category == 1; enabled: !root.background-blocked; label: root.chinese ? "搜索任务" : "Search tasks"; action-label: root.chinese ? "搜索任务收藏分类" : "Search task favorites category"; clicked => { root.favorites-category = 1; } }
@@ -4097,7 +4102,7 @@ main-scroll := ScrollView {
                         Image { width: 18px * Theme.ui-scale; source: @image-url("icons/folder.svg"); colorize: Theme.accent; image-fit: contain; accessible-role: none; }
                         Text { text: root.chinese ? "音效库" : "Library"; color: Theme.text(1, 0, Theme.ink); font-size: Theme.font(14); font-weight: 600; vertical-alignment: center; }
                     }
-                    StudioAction { text-module: 1; height: 34px * Theme.ui-scale; navigation: true; icon: @image-url("icons/folder.svg"); active: root.library-sidebar-page == 0 && root.selected-folder-path == "" && root.album-filter == "" && root.album-filter-id == "" && !root.album-filter-unavailable && !root.favorites-only; enabled: !root.background-blocked; label: root.chinese ? "全部声音" : "All sounds"; action-label: root.chinese ? "目录页" : "Folders page"; clicked => { root.library-sidebar-page = 0; root.favorites-only = false; root.all-library-requested(); } }
+                    StudioAction { text-module: 1; height: 34px * Theme.ui-scale; navigation: true; icon: @image-url("icons/folder.svg"); active: root.library-sidebar-page == 0 && root.all-sounds-active; enabled: !root.background-blocked; label: root.chinese ? "全部声音" : "All sounds"; action-label: root.chinese ? "目录页" : "Folders page"; clicked => { root.library-sidebar-page = 0; root.favorites-only = false; root.all-library-requested(); } }
                     StudioAction { text-module: 1; height: 34px * Theme.ui-scale; navigation: true; icon: @image-url("icons/star.svg"); active: root.library-sidebar-page == 1; enabled: !root.background-blocked; label: root.chinese ? "收藏" : "Favorites"; action-label: root.chinese ? "我的收藏" : "My favorites"; clicked => { root.library-sidebar-page = 1; root.favorites-category = 0; root.favorites-only = true; root.all-library-requested(); } }
                     StudioAction { text-module: 1; height: 34px * Theme.ui-scale; navigation: true; subtle: true; icon: @image-url("icons/history.svg"); enabled: !root.background-blocked; label: root.chinese ? "最近使用" : "Recent playback"; clicked => { root.open-history(1); } }
                     if root.library-sidebar-page == 1: VerticalLayout { spacing: 5px * Theme.ui-scale;

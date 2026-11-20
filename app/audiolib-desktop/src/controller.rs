@@ -525,6 +525,18 @@ enum SidebarIndex {
     Album(i64),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FacetMode {
+    SearchPage,
+    CachedPage,
+    UnavailableIndex,
+}
+
+struct FacetJob {
+    search: SearchJob,
+    mode: FacetMode,
+}
+
 /// Both lists offer replacement scopes for the same keyword and ordinary filters.
 fn prepare_sidebar_choices(choices: &mut SearchRequest) {
     choices.folder_id = None;
@@ -898,7 +910,7 @@ pub struct Controller {
     search_generation: AtomicU64,
     search_job: Mutex<Option<SearchJob>>,
     search_wake: Condvar,
-    facet_job: Mutex<Option<SearchJob>>,
+    facet_job: Mutex<Option<FacetJob>>,
     facet_wake: Condvar,
     search_publication: Mutex<Option<SearchPublication>>,
     search_cancel: Mutex<Arc<AtomicBool>>,
@@ -3991,6 +4003,7 @@ impl Controller {
                     if let Some(delay) = pending
                         .as_ref()
                         .unwrap()
+                        .search
                         .not_before
                         .checked_duration_since(Instant::now())
                     {
@@ -3998,7 +4011,10 @@ impl Controller {
                         drop(next);
                         continue;
                     }
-                    let mut job = pending.take().unwrap();
+                    let FacetJob {
+                        search: mut job,
+                        mode,
+                    } = pending.take().unwrap();
                     drop(pending);
                     if c.search_generation.load(Ordering::Acquire) != job.generation
                         || job.cancel.load(Ordering::Acquire)
@@ -4006,11 +4022,16 @@ impl Controller {
                         continue;
                     }
                     let provider = &job.provider;
-                    let choices_only = c.task_album_choices_only(&job.request);
                     prepare_sidebar_choices(&mut job.request);
-                    if choices_only {
+                    if mode == FacetMode::CachedPage {
                         c.publish_albums(&job);
                         continue;
+                    }
+                    if mode == FacetMode::UnavailableIndex
+                        && job.request.scope == SearchScope::All
+                        && matches!(provider.path_search_ready(), Ok(false))
+                    {
+                        job.request.scope = SearchScope::Main;
                     }
                     crate::gui_search_benchmark::worker_started(job.generation, true);
                     let database_revision = provider.search_revision().ok().flatten();
@@ -4068,21 +4089,34 @@ impl Controller {
                         });
                     }
                     crate::gui_search_benchmark::worker_completed(job.generation, true);
-                    let album_job = job.clone();
                     let c2 = c.clone();
+                    let generation = job.generation;
+                    let cancel = job.cancel.clone();
                     post(c.ui.clone(), move |ui| {
-                        if c2.search_generation.load(Ordering::Acquire) != job.generation {
+                        if c2.search_generation.load(Ordering::Acquire) != generation
+                            || cancel.load(Ordering::Acquire)
+                            || !c2.available()
+                        {
                             return;
                         }
-                        c2.search_task_folders_ready(database_revision.filter(|_| stable));
-                        c2.search_folders_computed(
-                            &ui,
-                            job.generation,
-                            folders.map_err(|error| error.to_string()),
-                        );
+                        if mode == FacetMode::UnavailableIndex {
+                            // Recovery choices never publish result rows, admit a result cache,
+                            // or replace the status explaining why this task is blocked.
+                            if let Ok(folders) = folders {
+                                c2.tree.lock().unwrap().matches = folders;
+                                c2.reload_tree();
+                            }
+                        } else {
+                            c2.search_task_folders_ready(database_revision.filter(|_| stable));
+                            c2.search_folders_computed(
+                                &ui,
+                                generation,
+                                folders.map_err(|error| error.to_string()),
+                            );
+                        }
                     });
                     // Reuse this coalesced worker: typing never spawns unbounded facet queries.
-                    c.publish_albums(&album_job);
+                    c.publish_albums(&job);
                 }
             })
             .expect("spawn directory search worker");
@@ -4944,8 +4978,7 @@ impl Controller {
             );
             return;
         }
-        if self.task_folder_unavailable(ui, immediate, reset) {
-            self.queue_unavailable_album_choices(ui, generation);
+        if self.task_blocks_search(ui, &request, immediate, reset) {
             return;
         }
         let page_size = self.result_page_size();
@@ -5017,8 +5050,15 @@ impl Controller {
             tagged_only: ui.get_tagged_only(),
             color: (!ui.get_color_filter().trim().is_empty())
                 .then(|| ui.get_color_filter().trim().to_owned()),
-            album: (ui.get_album_filter_id().is_empty() && !ui.get_album_filter().is_empty())
-                .then(|| ui.get_album_filter().to_string()),
+            album: (ui.get_album_filter_id().is_empty() && !ui.get_album_filter().is_empty()).then(
+                || {
+                    request
+                        .filters
+                        .album
+                        .take()
+                        .unwrap_or_else(|| ui.get_album_filter().to_string())
+                },
+            ),
             album_id: ui
                 .get_album_filter_id()
                 .parse::<i64>()
@@ -5076,7 +5116,10 @@ impl Controller {
             viewport_anchor: None,
         });
         *self.search_job.lock().unwrap() = Some(job.clone());
-        *self.facet_job.lock().unwrap() = Some(job);
+        *self.facet_job.lock().unwrap() = Some(FacetJob {
+            search: job,
+            mode: FacetMode::SearchPage,
+        });
         ui.set_searching(true);
         ui.set_status(
             if self.chinese.load(Ordering::Acquire) {
@@ -5141,6 +5184,10 @@ impl Controller {
         ui.set_album_filter(label);
         ui.set_album_filter_unavailable(false);
         self.request_navigation_search(&ui, true, true);
+        if folder_id.is_some() && !ui.get_searching() {
+            // A rejected draft has no result publication to restore the folder highlight.
+            self.reload_tree();
+        }
     }
 
     fn local_scan_root_rows(folders: &[Folder]) -> Vec<LocalScanRootRow> {

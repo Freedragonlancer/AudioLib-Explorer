@@ -79,6 +79,8 @@ rather than silently broadening the search.
 All open tasks, including tasks without a favorite, are restored on the next launch. Only the active task queries at startup; other tasks query when activated. Restoration never resumes audio automatically. Persisted file and directory identities include their indexed paths and are resolved against the opened library before reuse. A missing saved directory is reported as an unavailable scope, rather than silently broadening the search to the whole library.
 
 Older tasks and saved searches that contain both sidebar scopes reopen with the library scope.
+A saved empty library name selects files with no declared library Metadata. Its localized label appears in the tab and the exact empty-name condition survives further searches.
+If a saved folder or library is unavailable, its results stay empty while both sidebar lists offer replacements matching the keyword and other active filters. Selecting a replacement resumes the search. Restoring a cached task also refreshes its library choices from the current local database or read-only snapshot.
 Album filters store the album namespace and Metadata key or folder identity along
 with the numeric ID. When an old server adopts native shared albums, all open
 and saved filters resolve their semantic owner before querying. A matching
@@ -144,3 +146,5 @@ On the same Windows x64 host (Ryzen 7 9800X3D, Rust 1.97.1 MSVC), `cargo run --r
 Layout regression coverage includes 30 task tabs, horizontal overflow, both desktop languages, the minimum 1080×700 logical window and supported interface scaling. Keyboard navigation must remain available without interpreting task changes as audio transport. Real-device audio and performance acceptance are recorded separately from synthetic UI checks.
 
 On 2026-11-20, the folder/library switch passed Windows x64 formatting, strict desktop Clippy and 28 targeted desktop tests with the ASIO feature. The local library and read-only snapshot fixtures both switched directly between disjoint folder and library selections while retaining the keyword. Coverage also included saved identities, invalid filter drafts and task restoration. Software-rendered tab checks covered all seven built-in themes in English and Chinese. The change uses the existing provider requests and workspace format, so the database and server baselines in [Rust validation](Rust_Validation.md) still apply.
+
+The pre-merge review on the same Windows configuration passed 29 targeted regressions. It covered both replacement lists for an unavailable index, the empty-name legacy filter, cached task switching on read-only snapshots, invalid duration drafts, late publications and batched All-to-Main fallback caches. The fallback-cache test now checks the configured layered batch size and verifies the executed scope of every task.

@@ -508,6 +508,28 @@ fn cross_index_navigation(server_snapshot: bool) {
     assert_eq!(active_tab().keywords, "shared");
     assert!(active_tab().library_index);
     assert!(!active_tab().summary.contains("Folder:"));
+    // A warm task restores its folder tree from cache. Its library choices must
+    // be republished for this task in both local and read-only snapshot mode.
+    let first = active_id(ui);
+    ui.invoke_search_task_created();
+    wait_for(ui, |ui| {
+        ui.get_search_tasks().row_count() == 2 && !ui.get_task_restoring() && !ui.get_searching()
+    });
+    assert!(
+        controller
+            .task_workspace
+            .lock()
+            .unwrap()
+            .caches
+            .contains_key(&first)
+    );
+    ui.invoke_search_task_selected(first.into());
+    wait_for(ui, |ui| {
+        !ui.get_task_restoring()
+            && ui.get_rows().row_count() == 1
+            && ui.get_album_filter() == "Wind album"
+            && ui.get_albums().row_count() == 2
+    });
     choose_gore(&fixture);
     wait_navigation(&fixture, 3);
     let request = controller.request.lock().unwrap().clone();
@@ -694,6 +716,10 @@ fn scoped_navigation_invalid_filter_cache(album_scope: bool) {
     } else {
         ui.invoke_folder_requested(gore_index as i32);
         assert!(controller.request.lock().unwrap().folder_id.is_some());
+        wait_for(ui, |ui| {
+            ui.get_selected_folder() >= 0 && ui.get_selected_folder_path().ends_with("gore")
+        });
+        assert!(ui.get_status().contains("Duration"));
     }
     assert_eq!(ui.get_rows().row_count(), 4);
     assert!(!ui.get_searching());
@@ -728,5 +754,115 @@ fn scoped_navigation_invalid_filter_cache(album_scope: bool) {
         "the restored navigation scope must not reuse the previous global four-row cache"
     );
     wait_navigation(&fixture, expected);
+    finish(&fixture);
+}
+
+#[test]
+fn restored_index_choices_recover_without_widening_results() {
+    isolated("album_review::child_restored_index_choices");
+}
+
+#[test]
+#[ignore = "isolated task restore and index replacement regression"]
+fn child_restored_index_choices() {
+    use audiolib_core::search_workspace::{SavedSearchTask, SearchFolderRef, SearchTaskDefinition};
+    let fixture = cross_index_fixture(false);
+    let ui = &fixture.ui;
+    let controller = &fixture.controller;
+    let open = |name: &str, definition: SearchTaskDefinition| {
+        controller
+            .task_workspace
+            .lock()
+            .unwrap()
+            .workspace
+            .favorites
+            .push(SavedSearchTask {
+                id: name.into(),
+                title: name.into(),
+                definition,
+                ..Default::default()
+            });
+        controller.open_saved_search(name);
+    };
+    for folder_missing in [true, false] {
+        let mut definition = SearchTaskDefinition {
+            query: "shared".into(),
+            ..Default::default()
+        };
+        if folder_missing {
+            definition.folder = Some(SearchFolderRef {
+                id: 99999,
+                path: "/retired/folder".into(),
+            });
+        } else {
+            definition.filters.album_id = Some(99999);
+        }
+        open(
+            if folder_missing {
+                "Retired folder"
+            } else {
+                "Retired library"
+            },
+            definition,
+        );
+        wait_for(ui, |ui| {
+            !ui.get_task_restoring()
+                && ui.get_status().contains("unavailable")
+                && ui.get_folders().iter().any(|row| row.name == "sounds")
+                && ui.get_albums().row_count() == 2
+        });
+        assert_eq!(ui.get_rows().row_count(), 0);
+        assert!(controller.search_publication.lock().unwrap().is_none());
+        assert!(!ui.get_all_sounds_active());
+        if folder_missing {
+            let wind = ui
+                .get_albums()
+                .iter()
+                .find(|album| album.name == "Wind album")
+                .unwrap();
+            ui.invoke_album_selected(wind.id);
+            wait_navigation(&fixture, 1);
+            assert!(controller.request.lock().unwrap().folder_id.is_none());
+        } else {
+            choose_gore(&fixture);
+            wait_navigation(&fixture, 3);
+            assert!(
+                controller
+                    .request
+                    .lock()
+                    .unwrap()
+                    .filters
+                    .album_id
+                    .is_none()
+            );
+        }
+    }
+
+    // The empty string is an exact legacy filter for files lacking a declared
+    // library name. All four fixture files have names, so widening it is visible.
+    open(
+        "Unnamed libraries",
+        SearchTaskDefinition {
+            filters: SearchFilters {
+                album: Some(String::new()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    wait_navigation(&fixture, 0);
+    let assert_unnamed = || {
+        assert_eq!(
+            controller.request.lock().unwrap().filters.album.as_deref(),
+            Some("")
+        );
+        let tab = ui.get_search_tasks().iter().find(|tab| tab.active).unwrap();
+        assert!(tab.library_index && !tab.index_name.is_empty());
+    };
+    assert_unnamed();
+    search(&fixture, "shared", 0);
+    assert_unnamed();
+    ui.invoke_reset_filters();
+    wait_navigation(&fixture, 4);
     finish(&fixture);
 }
