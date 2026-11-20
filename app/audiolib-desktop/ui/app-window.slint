@@ -43,7 +43,7 @@ export struct FolderRow { name: string, count: string, path: string, depth: int,
 export struct AlbumRow { id: string, name: string, count: string, cover: image }
 export struct CrumbRow { name: string }
 export struct DisplayTagRow { tags: [string] }
-export struct SearchTaskRow { id: string, name: string, favorite: bool, modified: bool, active: bool, keywords: string, folder: string, summary: string, searched: bool }
+export struct SearchTaskRow { id: string, name: string, favorite: bool, modified: bool, active: bool, keywords: string, index-name: string, library-index: bool, summary: string, searched: bool }
 export struct SavedSearchTaskRow { id: string, name: string, summary: string }
 // One row of the unified window's source list: kind 0 = the local library (always row 0),
 // 1 = a saved server profile. status-kind: 0 unknown, 1 ok, 3 failed.
@@ -667,6 +667,7 @@ component SidebarSectionDivider inherits Rectangle {
     in property <string> label;
     in property <string> help;
     in property <bool> enabled: true;
+    out property <bool> dragging: drag-area.pressed;
     callback resized(length);
     callback finished();
     private property <length> pressed-pointer-y;
@@ -707,6 +708,46 @@ component SidebarSectionDivider inherits Rectangle {
             if self.pressed { root.resized(root.pressed-pane-height + self.absolute-position.y + self.mouse-y - root.pressed-pointer-y); }
         }
     }
+}
+
+// Give remaining space to the results while keeping the preferred player size
+// independent of the outer ScrollView's minimum content height.
+component AuditionWorkspace inherits Rectangle {
+    in property <length> base-height;
+    in property <length> list-minimum;
+    in property <length> grip-height;
+    in property <float> height-factor;
+    in property <bool> dragging;
+    private property <int> pending-wave-width;
+    private property <int> pending-wave-height;
+    callback render-size(int, int);
+    // Stretch the current image during the gesture and rasterize the final size once.
+    public function waveform-size(w: int, h: int) {
+        if root.dragging {
+            root.pending-wave-width = w;
+            root.pending-wave-height = h;
+        } else {
+            root.pending-wave-height = 0;
+            root.render-size(w, h);
+        }
+    }
+    changed dragging => {
+        if !root.dragging && root.pending-wave-height > 0 {
+            root.render-size(root.pending-wave-width, root.pending-wave-height);
+            root.pending-wave-height = 0;
+        }
+    }
+    out property <length> available-dock-height: max(root.base-height, min(Theme.max-audition-height-factor * root.base-height, root.height - max(root.list-minimum, 220px * Theme.ui-scale) - root.grip-height));
+    out property <length> dock-height: clamp(root.base-height * root.height-factor, root.base-height, root.available-dock-height);
+    min-height: root.list-minimum + root.grip-height + root.base-height;
+    preferred-height: self.min-height;
+    vertical-stretch: 1;
+}
+
+component AuditionHeightDivider inherits SidebarSectionDivider {
+    in property <bool> chinese;
+    label: root.chinese ? "调整试听播放器高度" : "Resize audition dock";
+    help: root.chinese ? "向上拖动放大波形，向下拖动缩小，也可使用上下方向键" : "Drag up or down, or use the arrow keys to resize the waveform";
 }
 
 // Sortable column actions keep the same keyboard behavior as ordinary actions.
@@ -1246,6 +1287,11 @@ export component AppWindow inherits Window {
     property <bool> search-history-ready: !root.background-blocked && !root.search-workspace-loading && !root.task-restoring && !root.closing;
     in property <[SearchTaskRow]> search-tasks: [];
     in property <int> active-search-task-index: 0;
+    // An unavailable folder has no actionable path but still restricts its task.
+    out property <bool> all-sounds-active: root.selected-folder-path == "" && root.album-filter == ""
+        && root.album-filter-id == "" && !root.album-filter-unavailable && !root.favorites-only
+        && (root.active-search-task-index < 0 || root.active-search-task-index >= root.search-tasks.length
+            || root.search-tasks[root.active-search-task-index].index-name == "");
     in property <[SavedSearchTaskRow]> saved-search-tasks: [];
     in property <bool> search-workspace-loading: false;
     in property <bool> search-workspace-read-only: false;
@@ -1884,7 +1930,23 @@ export component AppWindow inherits Window {
     in property <image> waveform-mask;
     in property <string> playback-path: "";
     in-out property <bool> audition-expanded: false;
-    in-out property <length> audition-preferred-height: 114px * Theme.ui-scale;
+    in-out property <float> classic-audition-height-factor: 1;
+    in-out property <float> studio-audition-height-factor: 1;
+    private property <length> audition-base-height: (Theme.modern-player ? 114px : root.short-layout ? 176px : 204px) * Theme.ui-scale;
+    private property <float> audition-height-factor: Theme.modern-player ? root.studio-audition-height-factor : root.classic-audition-height-factor;
+    function resize-audition(height: length) {
+        let factor = clamp(height / root.audition-base-height, 1, Theme.max-audition-height-factor);
+        if Theme.modern-player {
+            root.studio-audition-height-factor = factor;
+            root.audition-expanded = factor > 186 / 114;
+        } else {
+            root.classic-audition-height-factor = factor;
+        }
+    }
+    function expand-audition(expand: bool) {
+        root.audition-expanded = expand;
+        root.studio-audition-height-factor = expand ? Theme.max-audition-height-factor : 1;
+    }
     in property <string> playback-name;
     in property <bool> waveform-ready: false;
     in property <string> waveform-info: "";
@@ -3215,7 +3277,7 @@ main-scroll := ScrollView {
                         for task in root.search-tasks: SearchTaskTab {
                             width: root.task-tab-width; name: task.name; active: task.active;
                             tooltip-width: min(560px * Theme.ui-scale, root.width - 40px * Theme.ui-scale);
-                            keywords: task.keywords; folder: task.folder; summary: task.summary; searched: task.searched;
+                            keywords: task.keywords; index-name: task.index-name; library-index: task.library-index; summary: task.summary; searched: task.searched;
                             favorite: task.favorite; modified: task.modified; chinese: root.chinese; compact: root.short-layout;
                             enabled: !root.background-blocked || root.ai-batch-restoring;
                             editable: !root.search-workspace-read-only && !(root.ai-batch-searching && root.task-restoring);
@@ -3252,7 +3314,14 @@ main-scroll := ScrollView {
                 Text { text: root.search-workspace-error; color: Theme.text(1, 9, Theme.warning); font-size: Theme.font(11); wrap: word-wrap; }
             }
         }
-        workspace := HorizontalLayout { vertical-stretch: 1; min-height: results-column.min-height; spacing: 0px;
+        audition-workspace := AuditionWorkspace {
+        min-width: workspace.min-width;
+        dragging: audition-height-divider.dragging;
+        render-size(w,h) => { root.waveform-resize-requested(w,h); }
+        base-height: root.audition-base-height; height-factor: root.audition-height-factor;
+        list-minimum: results-column.min-height;
+        grip-height: (root.short-layout ? 6px : 10px) * Theme.ui-scale;
+        workspace := HorizontalLayout { x: 0px; y: 0px; width: parent.width; height: parent.height - parent.dock-height - parent.grip-height; min-height: results-column.min-height; spacing: 0px;
             // Invisible layout children still reserve their fixed width. Collapse
             // the allocation too, retaining the native list owners and offsets.
             library-sidebar := Rectangle { visible: root.sidebar-visible; width: root.sidebar-visible ? root.sidebar-width : 0px; background: Theme.panel; border-radius: 6px * Theme.ui-scale; clip: true;
@@ -3264,7 +3333,7 @@ main-scroll := ScrollView {
                             SegmentTab { horizontal-stretch: 1; preferred-width: 0px; icon: @image-url("icons/star.svg"); label: root.chinese ? "收藏" : "Favorites"; action-label: root.chinese ? "收藏页" : "Favorites page"; active: root.library-sidebar-page == 1; clicked => { if !root.background-blocked { root.library-sidebar-page = 1; if root.favorites-category == 0 { root.favorites-only = true; root.all-library-requested(); } } } }
                         }
                     }
-                    if root.library-sidebar-page == 0: Action { text-module: 1; height: 32px * Theme.ui-scale; active: root.selected-folder-path == "" && root.album-filter == "" && root.album-filter-id == "" && !root.album-filter-unavailable && !root.favorites-only; enabled: !root.background-blocked; label: root.chinese ? "全部声音" : "All sounds"; clicked => { root.favorites-only = false; root.all-library-requested(); } }
+                    if root.library-sidebar-page == 0: Action { text-module: 1; height: 32px * Theme.ui-scale; active: root.all-sounds-active; enabled: !root.background-blocked; label: root.chinese ? "全部声音" : "All sounds"; clicked => { root.favorites-only = false; root.all-library-requested(); } }
                     if root.library-sidebar-page == 1: VerticalLayout { spacing: 5px * Theme.ui-scale;
                         Action { text-module: 1; height: 30px * Theme.ui-scale; active: root.favorites-category == 0; enabled: !root.background-blocked; label: root.chinese ? "单个音频" : "Audio files"; action-label: root.chinese ? "音频收藏分类" : "Audio favorites category"; clicked => { root.favorites-category = 0; root.favorites-only = true; root.all-library-requested(); } }
                         Action { text-module: 1; height: 30px * Theme.ui-scale; active: root.favorites-category == 1; enabled: !root.background-blocked; label: root.chinese ? "搜索任务" : "Search tasks"; action-label: root.chinese ? "搜索任务收藏分类" : "Search task favorites category"; clicked => { root.favorites-category = 1; } }
@@ -3947,7 +4016,14 @@ main-scroll := ScrollView {
             }
         }
 
+        audition-height-divider := AuditionHeightDivider {
+            x: 0px; y: parent.height - parent.dock-height - self.height; width: parent.width;
+            height: audition-workspace.grip-height; pane-height: -audition-workspace.dock-height;
+            chinese: root.chinese; enabled: !root.background-blocked;
+            resized(value) => { root.resize-audition(min(-value, audition-workspace.available-dock-height)); }
+        }
         audition := AuditionPanel {
+            x: 0px; y: parent.height - self.height; width: parent.width;
             selection-active: root.wave-selection-active; selection-start: root.wave-selection-start; selection-end: root.wave-selection-end;
             selection-identity: root.wave-selection-identity; selection-preparing: root.wave-selection-preparing; selection-progress: root.wave-selection-progress;
             selection-export-state: root.wave-selection-export-state; selection-native-cursor: root.wave-native-cursor;
@@ -3962,14 +4038,11 @@ main-scroll := ScrollView {
             active: !Theme.modern-style;
             premute-db <=> root.audition-premute-db;
             show-remaining <=> root.audition-show-remaining;
-            height: Theme.modern-player ? max(114px * Theme.ui-scale, root.audition-preferred-height) : (root.short-layout ? 176px : 204px) * Theme.ui-scale;
+            height: audition-workspace.dock-height;
             expanded: root.audition-expanded;
             narrow: root.content-width < 1440px * Theme.ui-scale;
             waveform-mask: root.waveform-mask;
-            expanded-requested(value) => {
-                root.audition-expanded = value;
-                root.audition-preferred-height = (value ? 286px : 114px) * Theme.ui-scale;
-            }
+            expanded-requested(value) => { root.expand-audition(value); }
             compact: root.short-layout; spectral: root.peak-mode == 1;
             play-on-single-click: root.audition-play-on-single-click;
             chinese: root.chinese; ready: root.audio-ready && !root.selected-missing && !root.library-busy;
@@ -3991,14 +4064,13 @@ main-scroll := ScrollView {
             seek-play(value) => { root.seek-play-requested(value); }
             transform(pitch,rate,mono,repeat) => { root.transform-requested(pitch,rate,mono,repeat); }
             volume(value) => { root.volume-db-requested(value); }
-            resize(w,h) => { root.waveform-resize-requested(w,h); }
+            resize(w,h) => { audition-workspace.waveform-size(w,h); }
             zoom-change(factor) => { root.waveform-zoom-requested(factor); }
             zoom-at(factor,fraction) => { root.waveform-wheel-zoom-requested(factor,fraction); }
             pan(value) => { root.waveform-pan-requested(value); }
             peaks => {
                 if Theme.modern-player {
-                    root.audition-expanded = true;
-                    root.audition-preferred-height = max(root.audition-preferred-height, 286px * Theme.ui-scale);
+                    root.expand-audition(true);
                 }
                 root.peaks-visible = true;
             }
@@ -4006,6 +4078,7 @@ main-scroll := ScrollView {
             retry => { if root.selected-row >= 0 { root.audition-requested(root.selected-row); } else { root.start-requested(); } }
             relink => { root.file-action-requested(root.selected-id, 20); }
         }
+        } // audition workspace
     }
     }
     studio-main-scroll := ScrollView {
@@ -4089,7 +4162,14 @@ main-scroll := ScrollView {
                 Text { text: root.search-workspace-error; color: Theme.text(1, 9, Theme.warning); font-size: Theme.font(11); wrap: word-wrap; }
             }
         }
-        studio-workspace := HorizontalLayout { vertical-stretch: 1; min-height: studio-results-column.min-height; spacing: 0px;
+        studio-audition-workspace := AuditionWorkspace {
+        min-width: studio-workspace.min-width;
+        dragging: studio-audition-height-divider.dragging;
+        render-size(w,h) => { root.waveform-resize-requested(w,h); }
+        base-height: root.audition-base-height; height-factor: root.audition-height-factor;
+        list-minimum: studio-results-column.min-height;
+        grip-height: (Theme.modern-player ? 11px : 6px) * Theme.ui-scale;
+        studio-workspace := HorizontalLayout { x: 0px; y: 0px; width: parent.width; height: parent.height - parent.dock-height - parent.grip-height; min-height: studio-results-column.min-height; spacing: 0px;
             studio-library-sidebar := Rectangle { visible: root.sidebar-visible; width: root.sidebar-visible ? root.sidebar-width : 0px; background: Theme.library-surface; border-radius: 3px * Theme.ui-scale; clip: true;
                 Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: Theme.library-backdrop; opacity: Theme.workbench-backdrop-opacity; image-fit: fill; accessible-role: none; }
                 VerticalLayout { padding: 12px * Theme.ui-scale; padding-top: (root.short-layout ? 8px : 12px) * Theme.ui-scale; padding-bottom: (root.short-layout ? 8px : 12px) * Theme.ui-scale; spacing: (root.short-layout ? 4px : 8px) * Theme.ui-scale;
@@ -4097,7 +4177,7 @@ main-scroll := ScrollView {
                         Image { width: 18px * Theme.ui-scale; source: @image-url("icons/folder.svg"); colorize: Theme.accent; image-fit: contain; accessible-role: none; }
                         Text { text: root.chinese ? "音效库" : "Library"; color: Theme.text(1, 0, Theme.ink); font-size: Theme.font(14); font-weight: 600; vertical-alignment: center; }
                     }
-                    StudioAction { text-module: 1; height: 34px * Theme.ui-scale; navigation: true; icon: @image-url("icons/folder.svg"); active: root.library-sidebar-page == 0 && root.selected-folder-path == "" && root.album-filter == "" && root.album-filter-id == "" && !root.album-filter-unavailable && !root.favorites-only; enabled: !root.background-blocked; label: root.chinese ? "全部声音" : "All sounds"; action-label: root.chinese ? "目录页" : "Folders page"; clicked => { root.library-sidebar-page = 0; root.favorites-only = false; root.all-library-requested(); } }
+                    StudioAction { text-module: 1; height: 34px * Theme.ui-scale; navigation: true; icon: @image-url("icons/folder.svg"); active: root.library-sidebar-page == 0 && root.all-sounds-active; enabled: !root.background-blocked; label: root.chinese ? "全部声音" : "All sounds"; action-label: root.chinese ? "目录页" : "Folders page"; clicked => { root.library-sidebar-page = 0; root.favorites-only = false; root.all-library-requested(); } }
                     StudioAction { text-module: 1; height: 34px * Theme.ui-scale; navigation: true; icon: @image-url("icons/star.svg"); active: root.library-sidebar-page == 1; enabled: !root.background-blocked; label: root.chinese ? "收藏" : "Favorites"; action-label: root.chinese ? "我的收藏" : "My favorites"; clicked => { root.library-sidebar-page = 1; root.favorites-category = 0; root.favorites-only = true; root.all-library-requested(); } }
                     StudioAction { text-module: 1; height: 34px * Theme.ui-scale; navigation: true; subtle: true; icon: @image-url("icons/history.svg"); enabled: !root.background-blocked; label: root.chinese ? "最近使用" : "Recent playback"; clicked => { root.open-history(1); } }
                     if root.library-sidebar-page == 1: VerticalLayout { spacing: 5px * Theme.ui-scale;
@@ -4295,7 +4375,7 @@ main-scroll := ScrollView {
                                 for task in root.search-tasks: SearchTaskTab {
                                     width: root.task-tab-width; height: 32px * Theme.ui-scale; name: task.name; active: task.active;
                                     tooltip-width: min(560px * Theme.ui-scale, root.width - 40px * Theme.ui-scale);
-                                    keywords: task.keywords; folder: task.folder; summary: task.summary; searched: task.searched;
+                                    keywords: task.keywords; index-name: task.index-name; library-index: task.library-index; summary: task.summary; searched: task.searched;
                                     favorite: task.favorite; modified: task.modified; chinese: root.chinese; compact: root.short-layout;
                                     enabled: !root.background-blocked || root.ai-batch-restoring;
                                     editable: !root.search-workspace-read-only && !(root.ai-batch-searching && root.task-restoring);
@@ -4838,14 +4918,14 @@ main-scroll := ScrollView {
                 }
             }
         }
-        if Theme.modern-player: SidebarSectionDivider {
-            height: 5px * Theme.ui-scale; pane-height: -root.audition-preferred-height;
-            label: root.chinese ? "调整试听播放器高度" : "Resize audition dock";
-            help: root.chinese ? "向上拖动展开波形，向下拖动收起" : "Drag up to expand the waveform; drag down to compact";
-            enabled: !root.background-blocked;
-            resized(value) => { root.audition-preferred-height = clamp(-value, 114px * Theme.ui-scale, 386px * Theme.ui-scale); root.audition-expanded = root.audition-preferred-height > 186px * Theme.ui-scale; }
+        studio-audition-height-divider := AuditionHeightDivider {
+            x: 0px; y: parent.height - parent.dock-height - self.height; width: parent.width;
+            height: studio-audition-workspace.grip-height; pane-height: -studio-audition-workspace.dock-height;
+            chinese: root.chinese; enabled: !root.background-blocked;
+            resized(value) => { root.resize-audition(min(-value, studio-audition-workspace.available-dock-height)); }
         }
         studio-audition := AuditionPanel {
+            x: 0px; y: parent.height - self.height; width: parent.width;
             selection-active: root.wave-selection-active; selection-start: root.wave-selection-start; selection-end: root.wave-selection-end;
             selection-identity: root.wave-selection-identity; selection-preparing: root.wave-selection-preparing; selection-progress: root.wave-selection-progress;
             selection-export-state: root.wave-selection-export-state; selection-native-cursor: root.wave-native-cursor;
@@ -4860,14 +4940,11 @@ main-scroll := ScrollView {
             active: Theme.modern-style;
             premute-db <=> root.audition-premute-db;
             show-remaining <=> root.audition-show-remaining;
-            height: Theme.modern-player ? max(114px * Theme.ui-scale, root.audition-preferred-height) : (root.short-layout ? 176px : 204px) * Theme.ui-scale;
+            height: studio-audition-workspace.dock-height;
             expanded: root.audition-expanded;
             narrow: root.content-width < 1440px * Theme.ui-scale;
             waveform-mask: root.waveform-mask;
-            expanded-requested(value) => {
-                root.audition-expanded = value;
-                root.audition-preferred-height = (value ? 286px : 114px) * Theme.ui-scale;
-            }
+            expanded-requested(value) => { root.expand-audition(value); }
             compact: root.short-layout; spectral: root.peak-mode == 1;
             play-on-single-click: root.audition-play-on-single-click;
             chinese: root.chinese; ready: root.audio-ready && !root.selected-missing && !root.library-busy;
@@ -4889,14 +4966,13 @@ main-scroll := ScrollView {
             seek-play(value) => { root.seek-play-requested(value); }
             transform(pitch,rate,mono,repeat) => { root.transform-requested(pitch,rate,mono,repeat); }
             volume(value) => { root.volume-db-requested(value); }
-            resize(w,h) => { root.waveform-resize-requested(w,h); }
+            resize(w,h) => { studio-audition-workspace.waveform-size(w,h); }
             zoom-change(factor) => { root.waveform-zoom-requested(factor); }
             zoom-at(factor,fraction) => { root.waveform-wheel-zoom-requested(factor,fraction); }
             pan(value) => { root.waveform-pan-requested(value); }
             peaks => {
                 if Theme.modern-player {
-                    root.audition-expanded = true;
-                    root.audition-preferred-height = max(root.audition-preferred-height, 286px * Theme.ui-scale);
+                    root.expand-audition(true);
                 }
                 root.peaks-visible = true;
             }
@@ -4904,6 +4980,7 @@ main-scroll := ScrollView {
             retry => { if root.selected-row >= 0 { root.audition-requested(root.selected-row); } else { root.start-requested(); } }
             relink => { root.file-action-requested(root.selected-id, 20); }
         }
+        } // audition workspace
     }
     }
 

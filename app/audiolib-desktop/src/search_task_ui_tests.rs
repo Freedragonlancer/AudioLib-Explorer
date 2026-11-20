@@ -1903,6 +1903,75 @@ fn ai_compact_toolbar_preserves_actions_with_eight_mixed_tags() {
 }
 
 #[test]
+fn ai_toggle_hover_preserves_frame_in_search_and_generation_modes() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    let ui = window();
+    ui.set_chinese(false);
+    for theme in ["default", "studio"] {
+        crate::theme::apply_theme(&ui, theme);
+        for scale in [1.0, 1.5] {
+            ui.global::<crate::Theme>().set_ui_scale(scale);
+            for active in [false, true] {
+                ui.set_ai_visible(active);
+                ui.set_ai_collapsed(true);
+                ui.window().dispatch_event(WindowEvent::PointerMoved {
+                    position: slint::LogicalPosition::new(0.0, 0.0),
+                });
+                settle();
+                let toggle = ElementHandle::find_by_accessible_label(&ui, "AI search mode")
+                    .next()
+                    .unwrap();
+                let action = ElementHandle::find_by_element_type_name(&ui, "AiSearchAction")
+                    .next()
+                    .unwrap();
+                let origin = toggle.absolute_position();
+                let size = toggle.size();
+                let before = ui.window().take_snapshot().unwrap();
+                ui.window().dispatch_event(WindowEvent::PointerMoved {
+                    position: slint::LogicalPosition::new(
+                        origin.x + size.width / 2.0,
+                        origin.y + size.height / 2.0,
+                    ),
+                });
+                settle();
+                let after = ui.window().take_snapshot().unwrap();
+                let factor = ui.window().scale_factor();
+                let left = ((origin.x + 6.0 * scale) * factor).ceil() as usize;
+                let right = ((origin.x + size.width - 6.0 * scale) * factor).floor() as usize;
+                let bottom = ((action.absolute_position().y + action.size().height) * factor)
+                    .round() as usize
+                    - 1;
+                let span = |y: usize| {
+                    (y * before.width() as usize + left) * 4
+                        ..(y * before.width() as usize + right) * 4
+                };
+                let middle = span(((origin.y + size.height / 2.0) * factor) as usize);
+                assert_ne!(
+                    before.as_bytes()[middle.clone()],
+                    after.as_bytes()[middle],
+                    "hover fill is visible"
+                );
+                let border = span(bottom);
+                assert_eq!(
+                    before.as_bytes()[border.clone()],
+                    after.as_bytes()[border],
+                    "hover covered the {theme} frame at {scale}× (AI={active})"
+                );
+                if scale == 1.5 {
+                    snapshot_if_requested(&ui, &format!("ai-hover-{theme}-{active}"));
+                }
+            }
+        }
+    }
+    ui.hide().unwrap();
+}
+
+#[test]
 fn search_entry_and_actions_stay_in_place_across_ai_modes() {
     slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
         mock_time: true,
@@ -2574,7 +2643,7 @@ fn minimum_width_tabs_keep_keywords_ahead_of_auxiliary_labels_in_both_languages(
                         } else {
                             Default::default()
                         },
-                        folder: "Atmospheres".into(),
+                        index_name: "Atmospheres".into(),
                         summary: summary.into(),
                         ..Default::default()
                     })
@@ -2628,7 +2697,7 @@ fn minimum_width_tabs_keep_keywords_ahead_of_auxiliary_labels_in_both_languages(
                 active: true,
                 searched: true,
                 keywords: "wind".into(),
-                folder: "Atmospheres".into(),
+                index_name: "Atmospheres".into(),
                 summary: summary.into(),
                 ..Default::default()
             }])));
@@ -2657,6 +2726,29 @@ fn minimum_width_tabs_keep_keywords_ahead_of_auxiliary_labels_in_both_languages(
             assert!((keyword.absolute_position().y - directory.absolute_position().y).abs() < 1.0);
             snapshot_if_requested(&ui, &format!("task-keywords-compact-{theme}-{language}"));
             let keyword_start = keyword.absolute_position().x;
+
+            // Compare both index types side by side at a width that fits their labels.
+            ui.set_search_tasks(ModelRc::new(VecModel::from(
+                [("Vehicles", false), ("BOOM ONE", true)]
+                    .into_iter()
+                    .map(|(name, library)| SearchTaskRow {
+                        id: name.into(),
+                        name: name.into(),
+                        active: !library,
+                        searched: true,
+                        keywords: "gear".into(),
+                        index_name: name.into(),
+                        library_index: library,
+                        ..Default::default()
+                    })
+                    .collect::<Vec<_>>(),
+            )));
+            settle();
+            assert_eq!(
+                ElementHandle::find_by_element_id(&ui, "SearchTaskTab::directory-label").count(),
+                2
+            );
+            snapshot_if_requested(&ui, &format!("task-index-modes-{theme}-{language}"));
 
             // The directory follows the full query as more terms are added.
             // Wider tabs retain it; narrower tabs give the keywords that space.
@@ -2729,31 +2821,34 @@ fn minimum_width_tabs_keep_keywords_ahead_of_auxiliary_labels_in_both_languages(
                 );
             }
 
-            // A directory-only task keeps its marker and the same left alignment.
-            ui.set_search_tasks(ModelRc::new(VecModel::from(vec![SearchTaskRow {
-                id: "0".into(),
-                name: "Task 0".into(),
-                active: true,
-                searched: true,
-                folder: "Atmospheres".into(),
-                ..Default::default()
-            }])));
-            settle();
-            assert!(
-                ElementHandle::find_by_element_id(&ui, "SearchTaskTab::keyword-label")
-                    .next()
-                    .is_none()
-            );
-            let separator =
-                ElementHandle::find_by_element_id(&ui, "SearchTaskTab::directory-separator")
-                    .next()
-                    .unwrap();
-            let directory =
-                ElementHandle::find_by_element_id(&ui, "SearchTaskTab::directory-label")
-                    .next()
-                    .unwrap();
-            assert!((separator.absolute_position().x - keyword_start).abs() < 1.0);
-            assert!(directory.absolute_position().x > separator.absolute_position().x);
+            // Either index alone keeps its marker and the same left alignment.
+            for (index_name, library_index) in [("Atmospheres", false), ("BOOM ONE", true)] {
+                ui.set_search_tasks(ModelRc::new(VecModel::from(vec![SearchTaskRow {
+                    id: "0".into(),
+                    name: "Task 0".into(),
+                    active: true,
+                    searched: true,
+                    index_name: index_name.into(),
+                    library_index,
+                    ..Default::default()
+                }])));
+                settle();
+                assert!(
+                    ElementHandle::find_by_element_id(&ui, "SearchTaskTab::keyword-label")
+                        .next()
+                        .is_none()
+                );
+                let separator =
+                    ElementHandle::find_by_element_id(&ui, "SearchTaskTab::directory-separator")
+                        .next()
+                        .unwrap();
+                let directory =
+                    ElementHandle::find_by_element_id(&ui, "SearchTaskTab::directory-label")
+                        .next()
+                        .unwrap();
+                assert!((separator.absolute_position().x - keyword_start).abs() < 1.0);
+                assert!(directory.absolute_position().x > separator.absolute_position().x);
+            }
 
             // Filter-only conditions have no directory marker or reserved gap.
             ui.set_search_tasks(ModelRc::new(VecModel::from(vec![SearchTaskRow {
@@ -2794,7 +2889,7 @@ fn search_tab_hover_exposes_the_complete_query_and_directory_without_selecting_t
             id: "hover-task".into(),
             name: "Mustang impacts".into(),
             keywords: "hard · metal hit · glass".into(),
-            folder: "P-51 Mustang".into(),
+            index_name: "P-51 Mustang".into(),
             summary: summary.into(),
             searched: true,
             active: true,

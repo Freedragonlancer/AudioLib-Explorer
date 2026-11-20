@@ -256,6 +256,123 @@ impl AuditionState {
 }
 
 #[test]
+fn resizing_the_player_gives_the_waveform_all_extra_height() {
+    init_backend();
+    for (name, theme) in [
+        ("classic", DEFAULT_THEME),
+        ("default-v2", DEFAULT_V2_THEME),
+        ("studio", STUDIO_THEME),
+    ] {
+        let ui = fixture(false);
+        ui.set_rows(crate::ui_scale_tests::synthetic_rows());
+        let (waveform, mask) = crate::waveform_selection_ui_tests::synthetic_waveform_images();
+        ui.set_waveform_image(waveform);
+        ui.set_waveform_mask(mask);
+        apply_theme(&ui, theme);
+        ui.window()
+            .set_size(slint::LogicalSize::new(1600.0, 1200.0));
+        ui.set_wave_selection_active(true);
+        ui.set_wave_selection_start(12.0);
+        ui.set_wave_selection_end(17.0);
+        ui.set_wave_zoom(2.0);
+        ui.set_view_end(50.0);
+        ui.set_wave_target_end(50.0);
+        ui.show().unwrap();
+        frame(&ui, &format!("height-{name}-default"));
+        let handle = ElementHandle::find_by_accessible_label(&ui, "Resize audition dock")
+            .next()
+            .unwrap();
+        let dock = ElementHandle::find_by_element_type_name(&ui, "AuditionPanel")
+            .find(|panel| panel.size().height > 0.0)
+            .unwrap();
+        let wave = timeline(&ui);
+        let ruler = player_action(&ui, "Waveform time ruler");
+        let play = player_action(&ui, "Play");
+        let baseline = dock.size().height;
+        let maximum = 2.5 * baseline;
+        let wave_height = wave.size().height;
+        let ruler_height = ruler.size().height;
+        let button_height = play.size().height;
+        let state = AuditionState::capture(&ui);
+        let start = control_center(&handle);
+        let sizes = Rc::new(RefCell::new(Vec::new()));
+        let reported = sizes.clone();
+        ui.on_waveform_resize_requested(move |w, h| reported.borrow_mut().push((w, h)));
+
+        pointer_down(&ui, start);
+        for distance in [32.0, baseline, 2.5 * baseline] {
+            let position = slint::LogicalPosition::new(start.x, start.y - distance);
+            ui.window()
+                .dispatch_event(WindowEvent::PointerMoved { position });
+            ui.window().take_snapshot().unwrap();
+            i_slint_backend_testing::mock_elapsed_time(Duration::ZERO);
+        }
+        assert!(
+            sizes.borrow().is_empty(),
+            "{name} schedules a render mid-drag"
+        );
+        pointer_up(
+            &ui,
+            slint::LogicalPosition::new(start.x, start.y - 2.5 * baseline),
+        );
+        frame(&ui, &format!("height-{name}-maximum"));
+        assert!(
+            (dock.size().height - maximum).abs() < 1.1,
+            "{name} expected 2.5 × {baseline}, got {}",
+            dock.size().height
+        );
+        assert!(
+            (wave.size().height - wave_height - (maximum - baseline)).abs() < 1.1,
+            "{name} waveform grew from {wave_height} to {}",
+            wave.size().height
+        );
+        assert_eq!(ruler.size().height, ruler_height);
+        assert_eq!(play.size().height, button_height);
+        assert_eq!(
+            sizes.borrow().as_slice(),
+            &[(
+                wave.size().width.round() as i32,
+                wave.size().height.round() as i32
+            )]
+        );
+        assert_eq!(AuditionState::capture(&ui), state);
+        assert!(ui.get_wave_selection_active());
+        assert_eq!(
+            (ui.get_wave_selection_start(), ui.get_wave_selection_end()),
+            (12.0, 17.0)
+        );
+
+        ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+        frame(&ui, &format!("height-{name}-compact"));
+        assert!(
+            ui.get_task_result_visible_height() >= ui.get_task_result_row_height() * 2.0,
+            "{name} list viewport {}",
+            ui.get_task_result_visible_height()
+        );
+        assert!(dock.absolute_position().y + dock.size().height <= 700.0);
+        ui.window()
+            .set_size(slint::LogicalSize::new(1600.0, 1200.0));
+        ui.window().take_snapshot().unwrap();
+        assert!((dock.size().height - maximum).abs() < 1.1);
+        key(&ui, Key::DownArrow.into());
+        assert!(dock.size().height < maximum - 1.0);
+        let start = control_center(&handle);
+        let finish = slint::LogicalPosition::new(start.x, start.y + 2.5 * baseline);
+        pointer_down(&ui, start);
+        ui.window()
+            .dispatch_event(WindowEvent::PointerMoved { position: finish });
+        pointer_up(&ui, finish);
+        assert!((dock.size().height - baseline).abs() < 1.1);
+        if theme == STUDIO_THEME {
+            activate(&ui, "Expand audition waveform");
+            assert_eq!(ui.get_studio_audition_height_factor(), 2.5);
+            assert!((dock.size().height - maximum).abs() < 0.5);
+        }
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
 fn studio_dock_expands_without_transport_commands_and_restores_classic_frame() {
     init_backend();
     for chinese in [false, true] {
@@ -392,8 +509,8 @@ fn default_v2_keeps_classic_transport_in_the_studio_workbench() {
                         }
                     )
                     .next()
-                    .is_none(),
-                    "Default v2 retains the classic player's fixed-height layout"
+                    .is_some(),
+                    "Default v2 exposes the classic waveform height divider"
                 );
             } else {
                 assert!(ui.global::<crate::Theme>().get_modern_player());
@@ -732,6 +849,73 @@ fn click_transform_value(ui: &AppWindow, anchor: &ElementHandle, editor: &Elemen
     let point = transform_popup_point(ui, anchor, editor);
     pointer_down(ui, point);
     pointer_up(ui, point);
+}
+
+#[test]
+fn transform_sliders_double_click_reset_only_the_open_parameter() {
+    init_backend();
+    for theme in [DEFAULT_THEME, STUDIO_THEME] {
+        let ui = fixture(false);
+        apply_theme(&ui, theme);
+        ui.show().unwrap();
+        let submissions = Rc::new(RefCell::new(Vec::new()));
+        let seen = submissions.clone();
+        ui.on_transform_requested(move |pitch, rate, _, _| seen.borrow_mut().push((pitch, rate)));
+
+        for (label, minimum, exact, reset) in [
+            ("Adjust pitch", -2400.0, "Exact cents", "0"),
+            ("Adjust speed", 0.25, "Exact speed", "1.00"),
+        ] {
+            ui.set_pitch_text("-4.50".into());
+            ui.set_speed_text("0.80".into());
+            let anchor = player_action(&ui, label);
+            anchor.mock_single_click(PointerEventButton::Left);
+            let slider = ElementHandle::find_by_accessible_label(&ui, label)
+                .find(|item| item.accessible_value_minimum() == Some(minimum))
+                .unwrap();
+            let center = transform_popup_point(&ui, &anchor, &slider);
+            let point =
+                slint::LogicalPosition::new(center.x + 0.22 * slider.size().width, center.y);
+
+            // For pitch, drag the thumb here first. For speed, double-click the bare track.
+            if minimum < 0.0 {
+                submissions.borrow_mut().clear();
+                pointer_down(&ui, center);
+                ui.window()
+                    .dispatch_event(WindowEvent::PointerMoved { position: point });
+                assert!(submissions.borrow().is_empty());
+                pointer_up(&ui, point);
+                assert_eq!(submissions.borrow().len(), 1);
+                assert!(ui.get_pitch_text().parse::<f32>().unwrap() > 0.0);
+            }
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(800));
+            for _ in 0..2 {
+                pointer_down(&ui, point);
+                pointer_up(&ui, point);
+                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(40));
+            }
+
+            let editor = ElementHandle::find_by_accessible_label(&ui, exact)
+                .next()
+                .unwrap();
+            assert_eq!(editor.accessible_value().as_deref(), Some(reset));
+            let (pitch, rate) = if minimum < 0.0 {
+                ("0.00", "0.80")
+            } else {
+                ("-4.50", "1.00")
+            };
+            assert_eq!(
+                (ui.get_pitch_text().as_str(), ui.get_speed_text().as_str()),
+                (pitch, rate)
+            );
+            assert_eq!(
+                submissions.borrow().last(),
+                Some(&(pitch.into(), rate.into()))
+            );
+            key(&ui, Key::Escape.into());
+        }
+        ui.hide().unwrap();
+    }
 }
 
 #[test]

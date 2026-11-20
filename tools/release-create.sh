@@ -10,7 +10,7 @@
 #   tools/release-create.sh <tag> [--notes-file <file>] [--draft] [--dry-run] [--] [asset ...]
 #   tools/release-create.sh <tag> --resume-draft [--publish] [--dry-run] [--notes-file <file>] <all-assets...>
 #   tools/release-create.sh <tag> --resume-draft --stage-pairs [--dry-run] [--notes-file <file>] <cumulative-pairs...>
-#   tools/release-create.sh <tag> --resume-draft --stage-independent --draft-id <id> [--timings [--intake-read-hash-ms <ms>]] [--dry-run] [--notes-file <file>] <archive> <sha256>
+#   tools/release-create.sh <tag> --resume-draft --stage-independent --draft-id <id> [--accepted-sha256 <hex>] [--timings [--intake-read-hash-ms <ms>]] [--pair-status|--dry-run] [--notes-file <file>] <archive> <sha256>
 #   tools/release-create.sh <tag> --resume-draft --publish-staged --draft-id <id> [--dry-run] [--notes-file <file>] <all-assets...>
 set -euo pipefail
 die() { echo "release-create: $*" >&2; exit 1; }
@@ -22,7 +22,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cargo_ver=$(awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f&&/^version *=/{gsub(/[" ]/,"");sub("version=","");print;exit}' "$root/Cargo.toml")
 [ "$core" = "$cargo_ver" ] || die "tag $tag does not match Cargo.toml workspace version $cargo_ver"
 notes=(--notes-file "$root/doc/Rust_Release_Notes.md"); dry=0; draft=0; resume=0; publish=0; stage_pairs=0; independent=0; publish_staged=0; draft_id=''; assets=()
-upload_timings=0; intake_read_hash_ms=''
+pair_status=0; accepted_sha256=''; upload_timings=0; intake_read_hash_ms=''
 while [ $# -gt 0 ]; do
   case $1 in
     --notes-file)
@@ -36,6 +36,11 @@ while [ $# -gt 0 ]; do
     --stage-pairs) stage_pairs=1; shift ;;
     --stage-independent) independent=1; shift ;;
     --publish-staged) publish_staged=1; shift ;;
+    --pair-status) pair_status=1; shift ;;
+    --accepted-sha256)
+      [ $# -ge 2 ] && [[ $2 =~ ^[A-Fa-f0-9]{64}$ ]] || die 'Option --accepted-sha256 requires a 64-digit hexadecimal digest'
+      [ -z "$accepted_sha256" ] || die 'Option --accepted-sha256 may only be supplied once'
+      accepted_sha256=$(printf '%s' "$2" | tr 'A-F' 'a-f'); shift 2 ;;
     --timings) upload_timings=1; shift ;;
     --intake-read-hash-ms)
       [ $# -ge 2 ] && [[ $2 =~ ^(0|[1-9][0-9]{0,11})$ ]] || die 'Option --intake-read-hash-ms requires an integer number of milliseconds'
@@ -64,10 +69,14 @@ if [ "$independent" = 1 ] || [ "$publish_staged" = 1 ]; then
 else
   [ -z "$draft_id" ] || die '--draft-id requires --stage-independent or --publish-staged'
 fi
+[ "$pair_status" = 0 ] || [ "$independent" = 1 ] || die '--pair-status requires --stage-independent'
+[ -z "$accepted_sha256" ] || [ "$independent" = 1 ] || die '--accepted-sha256 requires --stage-independent'
 [ "$upload_timings" = 0 ] || [ "$independent" = 1 ] || die '--timings requires --stage-independent'
 [ -z "$intake_read_hash_ms" ] || [ "$upload_timings" = 1 ] || die '--intake-read-hash-ms requires --timings'
-[ "$dry" = 0 ] || upload_timings=0
-upload_archive=''; post_attempts=0; post_failures=0
+if [ "$dry" = 1 ] || [ "$pair_status" = 1 ]; then upload_timings=0; fi
+pinned_pair_status=0
+if [ "$pair_status" = 1 ] && [ -n "$accepted_sha256" ]; then pinned_pair_status=1; fi
+upload_archive=''; post_attempts=0; post_failures=0; failed_post_asset=''
 run_github() {
   # Bind repository discovery to the checkout whose tag we verify.
   if [ -n "$draft_id" ]; then (cd "$root" && "$@"); else "$@"; fi
@@ -111,9 +120,9 @@ report_upload_timing() {
   printf 'RELEASE_UPLOAD_TIMING {"schema_version":1,"tag":"%s","draft_id":"%s","archive":"%s",'\
 '"read_hash_ms":%s,"intake_read_hash_ms":%s,"local_read_hash_ms":%s,'\
 '"post_ms":%s,"post_archive_ms":%s,"post_checksum_ms":%s,"remote_verify_ms":%s,'\
-'"post_attempts":%s,"post_failures":%s,"exit_code":%s}\n' \
+'"post_attempts":%s,"post_failures":%s,"failed_post_asset":"%s","exit_code":%s}\n' \
     "$tag" "$draft_id" "$upload_archive" "$((intake_ms+local_ms))" "$intake_ms" "$local_ms" \
-    "$((archive_ms+checksum_ms))" "$archive_ms" "$checksum_ms" "$remote_ms" "$post_attempts" "$post_failures" "$status"
+    "$((archive_ms+checksum_ms))" "$archive_ms" "$checksum_ms" "$remote_ms" "$post_attempts" "$post_failures" "$failed_post_asset" "$status"
 }
 cleanup() {
   local status=$?
@@ -206,7 +215,11 @@ for asset in "${assets[@]}"; do
   find_local "$asset_name"; [ "$found_index" = -1 ] || die "Duplicate local asset: $asset_name"
   asset_size=$(file_size "$asset_path") || die 'Cannot read local artifact size'
   [[ $asset_size =~ ^[0-9]+$ ]] && [ "$asset_size" -gt 0 ] || die "Empty or invalid local asset: $asset_name"
-  asset_hash=$(sha256_file "$asset_path") || die 'Cannot hash local artifact'
+  if [ "$pinned_pair_status" = 1 ] && [[ $asset_name != *.sha256 ]]; then
+    asset_hash=$accepted_sha256
+  else
+    asset_hash=$(sha256_file "$asset_path") || die 'Cannot hash local artifact'
+  fi
   local_names+=("$asset_name"); local_paths+=("$asset_path"); local_sizes+=("$asset_size"); local_hashes+=("$asset_hash"); local_count=$((local_count+1))
 done
 upload_order=()
@@ -226,7 +239,10 @@ else
   [ "$local_count" = "$expected_count" ] || die 'Resume requires the complete expected local asset set'
   for ((index=0; index<local_count; index++)); do upload_order+=("$index"); done
 fi
-if [ "$upload_timings" = 1 ]; then
+if [ -n "$accepted_sha256" ]; then
+  [ "${local_hashes[${upload_order[0]}]}" = "$accepted_sha256" ] || die 'Local archive SHA256 differs from --accepted-sha256'
+fi
+if [ "$upload_timings" = 1 ] || [ "$pair_status" = 1 ]; then
   archive_for_report=${local_names[${upload_order[0]}]}
   [[ $archive_for_report =~ ^[A-Za-z0-9._-]+$ ]] || die 'Invalid archive name for timing report'
   upload_archive=$archive_for_report
@@ -270,6 +286,9 @@ fetch_snapshot() {
     if [ "$kind" = "$body_boundary" ]; then boundary_seen=1; break; fi
     [ "$kind" = asset ] && [[ $rid =~ ^[1-9][0-9]*$ && $size =~ ^[0-9]+$ && -z $extra ]] || die 'Invalid remote asset metadata'
     is_expected_asset "$name" || die "Unexpected remote asset: $name"
+    if [ "$pair_status" = 1 ] && [ "$state" = starter ]; then
+      die "Draft asset is in starter state; inspect before recovery: $name"
+    fi
     for ((index=0; index<remote_count; index++)); do
       [ "${remote_names[index]}" != "$name" ] && [ "${remote_ids[index]}" != "$rid" ] || die 'Duplicate remote asset name/ID'
     done
@@ -302,6 +321,18 @@ verify_local() {
 expected_draft=true; expected_prerelease=false; [ -z "$suffix" ] || expected_prerelease=true
 verify_notes
 fetch_snapshot
+if [ "$pair_status" = 1 ]; then
+  if [ "$pinned_pair_status" = 1 ] && [ "$remote_local_count" -lt "$local_count" ]; then
+    # The upload worker will hash the archive before it posts anything.
+    verify_local "${upload_order[1]}"
+  else
+    for ((index=0; index<local_count; index++)); do verify_local "$index"; done
+  fi
+  verify_notes; verify_tag
+  printf 'RELEASE_PAIR_STATUS {"tag":"%s","draft_id":"%s","archive":"%s","missing":%s}\n' \
+    "$tag" "$release_id" "$upload_archive" "$((local_count-remote_local_count))"
+  exit 0
+fi
 [ "$publish_staged" = 0 ] || [ "$remote_local_count" = "$local_count" ] || die 'Staged publication requires the complete verified draft; stage missing assets first'
 publish_command=()
 if [ "$publish" = 1 ] || [ "$publish_staged" = 1 ]; then
@@ -328,6 +359,7 @@ for index in "${upload_order[@]}"; do
     time_upload_phase "$post_phase" run_github "${upload_command[@]}" || {
       upload_status=$?
       post_failures=$((post_failures+1))
+      failed_post_asset=${local_names[index]}
     }
     # A transport error can arrive after GitHub stored the entire asset.
     fetch_snapshot
@@ -336,6 +368,7 @@ for index in "${upload_order[@]}"; do
       [ "$upload_status" = 0 ] || exit "$upload_status"
       die "Uploaded asset not yet verified; inspect before retrying: ${local_names[index]}"
     fi
+    failed_post_asset=''
   elif [ "$dry" = 1 ]; then
     printf '%q ' gh release upload "$tag" -- "${local_paths[index]}"; echo
   else

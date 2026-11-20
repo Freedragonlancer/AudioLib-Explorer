@@ -64,10 +64,18 @@ fn open_and_saved_album_filters_rebind_after_native_id_collisions_and_restart() 
         })
         .collect();
     let target = SearchWorkspaceTarget::new(root.path().join("personal"), "server-same-library");
+    // A pre-switch workspace can contain both scopes in an open task or favorite.
+    let old_folder = Some(SearchFolderRef {
+        id: 1,
+        path: "/old/folder".into(),
+    });
+    workspace.session.tasks[0].definition.folder = old_folder.clone();
+    workspace.favorites[0].definition.folder = old_folder;
     legacy.save_search_workspace(&target, &workspace).unwrap();
     let mut restored = native.load_search_workspace(&target).unwrap();
     reconcile_workspace_albums(&native, &mut restored).unwrap();
     for (index, task) in restored.session.tasks.iter().enumerate() {
+        assert!(task.definition.folder.is_none());
         assert_eq!(task.definition.filters.album_id, Some(index as i64 + 2));
         assert_eq!(
             task.definition.album_binding.as_ref().unwrap().namespace,

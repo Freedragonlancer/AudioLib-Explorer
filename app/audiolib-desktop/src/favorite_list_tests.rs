@@ -333,7 +333,7 @@ fn favorites_only_stays_on_after_select_folder_id_and_scopes_to_that_folder() {
     assert!(controller.wait_metadata(sequence, true).is_ok());
 
     ui.set_favorites_only(true);
-    controller.select_folder_id(doors);
+    controller.navigate_index(SidebarIndex::Folder(doors));
     assert!(
         ui.get_favorites_only(),
         "select_folder_id must not clear the current-folder favorites filter"
@@ -365,7 +365,7 @@ fn favorites_only_stays_on_after_select_folder_id_and_scopes_to_that_folder() {
             && !favorites_in(doors).contains(&"gust.wav".to_string())
     );
 
-    controller.select_folder_id(wind);
+    controller.navigate_index(SidebarIndex::Folder(wind));
     assert!(
         ui.get_favorites_only(),
         "changing folder must keep favorites_only until the user resets filters"

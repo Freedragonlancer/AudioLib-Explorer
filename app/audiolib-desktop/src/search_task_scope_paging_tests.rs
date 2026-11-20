@@ -105,10 +105,11 @@ fn child_all_main_fallback_batch_cache() {
     ui.set_ai_prompt("科幻爆炸".into());
     ui.invoke_ai_action(2, 0);
     wait_for(ui, |ui| !ui.get_ai_busy());
-    assert_eq!(ui.get_ai_quick_rows().row_count(), 5);
+    let batch_size = audiolib_core::ai_search::MAX_AI_LAYERED_RECOMMENDATIONS;
+    assert_eq!(ui.get_ai_quick_rows().row_count(), batch_size);
     ui.invoke_ai_action(20, 0);
-    wait_for(ui, |ui| {
-        ui.get_search_tasks().row_count() == 6
+    wait_for(ui, move |ui| {
+        ui.get_search_tasks().row_count() == batch_size + 1
             && !ui.get_ai_batch_searching()
             && !ui.get_task_restoring()
             && !ui.get_searching()

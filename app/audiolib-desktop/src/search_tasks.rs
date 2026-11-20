@@ -407,23 +407,23 @@ impl Controller {
         }
     }
 
-    pub(super) fn clear_task_folder_error(&self) {
+    pub(super) fn clear_task_index_errors(&self) {
         let mut state = self.task_workspace.lock().unwrap();
         state.unavailable_folder = None;
-        state.restore_failed = false;
+        state.unavailable_album = None;
     }
 
     pub(super) fn cancel_deferred_task_search(&self) {
         self.task_workspace.lock().unwrap().deferred_search = None;
     }
 
-    pub(super) fn task_folder_unavailable(
+    pub(super) fn task_blocks_search(
         &self,
         ui: &AppWindow,
+        request: &SearchRequest,
         immediate: bool,
         reset: bool,
     ) -> bool {
-        let request = self.request.lock().unwrap().clone();
         let folder_id = request.folder_id;
         let mut state = self.task_workspace.lock().unwrap();
         if state.loading || state.restoring {
@@ -439,30 +439,64 @@ impl Controller {
             ));
             return true;
         }
-        if state.unavailable_album.is_some_and(|id| {
+        let album_missing = state.unavailable_album.is_some_and(|id| {
             request.filters.album_id == Some(id)
                 && ui.get_album_filter_id().parse::<i64>().ok() == Some(id)
-        }) {
-            ui.set_status(self.localized("任务专辑已失效，请重新选择专辑或重置过滤条件；检索范围未扩大", "Task album is unavailable; choose an album or reset filters. The search scope was retained"));
-            return true;
-        }
-        state.unavailable_album = None;
-        if state
+        });
+        let folder_missing = state
             .unavailable_folder
             .as_ref()
-            .is_some_and(|folder| Some(folder.id) == folder_id)
-        {
-            ui.set_selected_folder_path("".into());
-            ui.set_status(self.localized(
-                "任务目录已失效，请重新选择目录",
-                "Task folder is unavailable; choose a folder to resume this search",
-            ));
-            true
-        } else {
-            state.unavailable_folder = None;
-            false
+            .is_some_and(|folder| Some(folder.id) == folder_id);
+        if !album_missing {
+            state.unavailable_album = None;
         }
+        if !folder_missing {
+            state.unavailable_folder = None;
+        }
+        drop(state);
+        if album_missing || folder_missing {
+            self.show_unavailable_index(ui, request, album_missing);
+        }
+        album_missing || folder_missing
     }
+
+    fn show_unavailable_index(&self, ui: &AppWindow, request: &SearchRequest, album_missing: bool) {
+        ui.set_selected_folder_path("".into());
+        ui.set_status(if album_missing {
+            self.localized(
+                "任务音效库已失效，请选择文件夹或音效库，或重置筛选条件",
+                "Task album is unavailable; choose a folder or library, or reset filters",
+            )
+        } else {
+            self.localized(
+                "任务目录已失效，请选择文件夹或音效库",
+                "Task folder is unavailable; choose a folder or library",
+            )
+        });
+        self.queue_task_facets(request.clone(), FacetMode::UnavailableIndex);
+    }
+
+    fn queue_task_facets(&self, request: SearchRequest, mode: FacetMode) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        std::mem::replace(&mut *self.search_cancel.lock().unwrap(), cancel.clone())
+            .store(true, Ordering::Release);
+        *self.facet_job.lock().unwrap() = Some(FacetJob {
+            search: SearchJob {
+                window: None,
+                backward_before: None,
+                path_probe: None,
+                request,
+                generation: self.search_generation.load(Ordering::Acquire),
+                not_before: Instant::now(),
+                cancel,
+                facet_revision: self.facet_revision.load(Ordering::Acquire),
+                provider: self.provider(),
+            },
+            mode,
+        });
+        self.facet_wake.notify_one();
+    }
+
     pub(super) fn freeze_search_workspace(&self) {
         let mut state = self.task_workspace.lock().unwrap();
         state.loading = true;
@@ -1090,7 +1124,8 @@ impl Controller {
                     id: task.id.as_str().into(),
                     name: display.name.into(),
                     keywords: display.keywords.join(" · ").into(),
-                    folder: display.folder.into(),
+                    index_name: display.index_name.into(),
+                    library_index: display.library_index,
                     summary: display.summary.into(),
                     searched: display.searched,
                     favorite: saved.is_some(),
@@ -2045,43 +2080,20 @@ impl Controller {
                 *stored = task.clone();
             }
         }
-        if album_missing {
-            self.reload_tree();
-            ui.set_status(self.localized("任务专辑已失效，请重新选择专辑或重置过滤条件；检索范围未扩大", "Task album is unavailable; choose an album or reset filters. The search scope was retained"));
-            self.queue_unavailable_album_choices(
-                ui,
-                self.search_generation.load(Ordering::Acquire),
-            );
-        } else if folder_missing {
-            ui.set_selected_folder_path("".into());
-            self.reload_tree();
-            ui.set_status(self.localized(
-                "任务目录已失效，请重新选择目录；检索范围未扩大",
-                "Task folder is unavailable; choose a folder to resume this search",
-            ));
+        if album_missing || folder_missing {
+            let request = self.request.lock().unwrap().clone();
+            self.show_unavailable_index(ui, &request, album_missing);
         } else if cache.is_none() {
             self.task_workspace.lock().unwrap().pending_view = Some(task.view.clone());
             self.request_navigation_search(ui, true, false);
         } else {
             self.admit_displayed_window_reads();
             self.reload_tree();
-            // A restored result cache still needs facets for this task's conditions.
-            // Reuse the bounded directory worker instead of retaining another tab's albums.
-            if !self.remote_read_only() {
-                let cancel = Arc::new(AtomicBool::new(false));
-                *self.search_cancel.lock().unwrap() = cancel.clone();
-                *self.facet_job.lock().unwrap() = Some(SearchJob {
-                    path_probe: None,
-                    window: None,
-                    backward_before: None,
-                    request: self.request.lock().unwrap().clone(),
-                    generation: self.search_generation.load(Ordering::Acquire),
-                    not_before: Instant::now(),
-                    cancel,
-                    facet_revision: self.facet_revision.load(Ordering::Acquire),
-                    provider: self.provider(),
-                });
-                self.facet_wake.notify_one();
+            // The cache owns its folder tree. Album rows and bindings were cleared
+            // during restore and must be read from this task's own snapshot.
+            if self.album_facets_available() {
+                let request = self.request.lock().unwrap().clone();
+                self.queue_task_facets(request, FacetMode::CachedPage);
             }
         }
         self.restore_task_scroll(ui, &task.view);
@@ -2365,22 +2377,7 @@ fn apply_task_controls(ui: &AppWindow, task: &SearchTask) {
     let definition = &task.definition;
     ui.set_search_scope_index(search_scope_index(definition.scope));
     ui.set_album_filter_unavailable(album_filter_unavailable(definition));
-    let label = definition
-        .album_binding
-        .as_ref()
-        .map(|binding| album_bindings::binding_label(binding, ui.get_chinese()))
-        .or_else(|| definition.filters.album.clone())
-        .unwrap_or_else(|| {
-            if definition.filters.album_id.is_some() {
-                if ui.get_chinese() {
-                    "专辑身份不可用".into()
-                } else {
-                    "Unavailable album".into()
-                }
-            } else {
-                String::new()
-            }
-        });
+    let label = album_bindings::album_label(definition, ui.get_chinese()).unwrap_or_default();
     ui.set_album_filter(label.into());
     ui.set_album_filter_id(
         definition
