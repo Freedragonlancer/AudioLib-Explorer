@@ -77,7 +77,10 @@ if [ "$1" = api ]; then
         record_mutation "${argv[@]}"
         asset=$9; name=${5#name=}
         grep -Fqx -- "$name" "$state/expected" || exit 97
-        [ "${AUDIOLIB_INDEPENDENT_FAIL_BEFORE:-}" != "$name" ] || exit 41
+        if [ "${AUDIOLIB_INDEPENDENT_FAIL_BEFORE:-}" = "$name" ]; then
+          echo 'gh: Forbidden (HTTP 403)' >&2
+          exit 41
+        fi
         if awk -F '\t' -v name="$name" '$3 == name { found=1 } END { exit !found }' "$state/assets"; then exit 42; fi
         bytes=$(wc -c < "$asset" | tr -d '[:space:]')
         if command -v sha256sum >/dev/null 2>&1; then hash=$(sha256sum "$asset"); else hash=$(shasum -a 256 "$asset"); fi
@@ -523,16 +526,51 @@ assert_independent_upload() {
     fail "unexpected independent upload at mutation $number"
 }
 
+assert_pair_status() {
+  local missing=$1 before out
+  shift
+  before=$(mutation_count)
+  out=$(independent_command --pair-status "$@")
+  [ "$out" = "RELEASE_PAIR_STATUS {\"tag\":\"$tag\",\"draft_id\":\"12345\",\"archive\":\"$amd_name\",\"missing\":$missing}" ] ||
+    fail "wrong read-only pair status: $out"
+  [ "$(mutation_count)" = "$before" ] || fail 'pair status mutated the draft'
+}
+
+probe_hash_log="$test_root/probe-hash-paths"
+probe_hash_tool=$(command -v sha256sum || command -v shasum)
+mkdir "$test_root/hash-probe-bin"
+cat > "$test_root/hash-probe-bin/sha256sum" <<'HASH_PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$1" >> "$AUDIOLIB_TEST_HASH_LOG"
+case "$AUDIOLIB_TEST_HASH_TOOL" in
+  */shasum) exec "$AUDIOLIB_TEST_HASH_TOOL" -a 256 "$@" ;;
+  *) exec "$AUDIOLIB_TEST_HASH_TOOL" "$@" ;;
+esac
+HASH_PROBE
+chmod +x "$test_root/hash-probe-bin/sha256sum"
+trace_pair_hashes() {
+  : > "$probe_hash_log"
+  PATH="$test_root/hash-probe-bin:$PATH" AUDIOLIB_TEST_HASH_TOOL="$probe_hash_tool" \
+    AUDIOLIB_TEST_HASH_LOG="$probe_hash_log" "$@"
+}
+assert_sidecar_hash_only() {
+  if grep -Fqx -- "$amd64" "$probe_hash_log"; then fail 'pending pinned status hashed the archive'; fi
+  grep -Fqx -- "$amd64.sha256" "$probe_hash_log" || fail 'pinned status did not hash the checksum file'
+}
+
 timing_field() {
   local pattern="\"$2\":([0-9]+)"
   [[ $1 =~ $pattern ]] || fail "missing integer timing field: $2"
   printf '%s' "${BASH_REMATCH[1]}"
 }
 assert_upload_timing() {
-  local log=$1 archive=$2 attempts=$3 failures=$4 code=$5 intake=$6 line local_ms archive_ms checksum_ms
+  local log=$1 archive=$2 attempts=$3 failures=$4 code=$5 intake=$6 failed_asset=${7:-}
+  local line local_ms archive_ms checksum_ms
   [ "$(grep -c '^RELEASE_UPLOAD_TIMING ' "$log")" = 1 ] || fail "missing or duplicated timing receipt: $log"
   line=$(grep '^RELEASE_UPLOAD_TIMING ' "$log")
   [[ $line == *"\"archive\":\"$archive\""* && $line == *'"draft_id":"12345"'* ]] || fail 'timing receipt has the wrong identity'
+  [[ $line == *"\"failed_post_asset\":\"$failed_asset\""* ]] || fail 'timing receipt identified the wrong terminal failed POST'
   [ "$(timing_field "$line" post_attempts)" = "$attempts" ] &&
     [ "$(timing_field "$line" post_failures)" = "$failures" ] &&
     [ "$(timing_field "$line" exit_code)" = "$code" ] &&
@@ -554,19 +592,31 @@ assert_upload_timing() {
 reject '--timings requires --stage-independent' "v$v" --resume-draft --timings
 reject 'requires an integer number of milliseconds' "v$v" --resume-draft --stage-independent --draft-id 12345 --timings --intake-read-hash-ms -1
 reject '--intake-read-hash-ms requires --timings' "v$v" --resume-draft --stage-independent --draft-id 12345 --intake-read-hash-ms 14
+reject '--pair-status requires --stage-independent' "v$v" --resume-draft --pair-status
+reject '--accepted-sha256 requires --stage-independent' "v$v" --resume-draft --accepted-sha256 "$(printf '%064d' 0)"
+reject 'requires a 64-digit hexadecimal digest' "v$v" --resume-draft --stage-independent --draft-id 12345 --accepted-sha256 invalid
+reject 'may only be supplied once' "v$v" --resume-draft --stage-independent --draft-id 12345 \
+  --accepted-sha256 "$(printf '%064d' 0)" --accepted-sha256 "$(printf '%064d' 1)"
 
 # Both Docker uploads start before either archive finishes. Leave ARM64 in
 # starter state until the AMD64 process has completed its final verification.
 reset_draft
 amd64=${all_assets[8]}; arm64=${all_assets[10]}
 amd_name=$(basename "$amd64"); arm_name=$(basename "$arm64")
+amd_accepted=$(hash_file "$amd64"); wrong_accepted=$(printf '%064d' 0)
+trace_pair_hashes assert_pair_status 2 --timings --accepted-sha256 "$(printf '%s' "$amd_accepted" | tr 'a-f' 'A-F')" -- "$amd64.sha256" "$amd64"
+assert_sidecar_hash_only
+trace_pair_hashes assert_pair_status 2 -- "$amd64" "$amd64.sha256"
+grep -Fqx -- "$amd64" "$probe_hash_log" || fail 'unpinned status did not hash the archive'
+reject_draft 'Local archive SHA256 differs' independent_command --accepted-sha256 "$wrong_accepted" -- "$amd64" "$amd64.sha256"
+reject_draft 'Local archive checksum differs' independent_command --pair-status --accepted-sha256 "$wrong_accepted" -- "$amd64" "$amd64.sha256"
 out=$(independent_command --timings --dry-run -- "$amd64.sha256" "$amd64")
 [[ $out != *'RELEASE_UPLOAD_TIMING '* ]] || fail 'dry-run emitted actual upload timings'
 [[ $out == *'gh api --hostname github.com --method POST'* && $out == *'no mutations performed'* ]] ||
   fail 'independent preview did not show a pinned upload'
 [ "$(mutation_count)" = 0 ] || fail 'independent preview mutated the draft'
 AUDIOLIB_INDEPENDENT_PEER=$arm_name AUDIOLIB_INDEPENDENT_FAIL_AFTER=$amd_name \
-  independent_command --timings -- "$amd64.sha256" "$amd64" > "$test_root/amd64.log" 2>&1 &
+  independent_command --timings --accepted-sha256 "$amd_accepted" -- "$amd64.sha256" "$amd64" > "$test_root/amd64.log" 2>&1 &
 amd_pid=$!
 AUDIOLIB_INDEPENDENT_PEER=$amd_name AUDIOLIB_INDEPENDENT_HOLD=1 \
   independent_command --timings -- "$arm64" "$arm64.sha256" > "$test_root/arm64.log" 2>&1 &
@@ -597,18 +647,20 @@ assert_independent_upload 3 "$arm64.sha256"
 assert_upload_timing "$test_root/amd64.log" "$amd_name" 2 1 0 0
 assert_upload_timing "$test_root/arm64.log" "$arm_name" 2 0 0 0
 
-# Recover a checksum request GitHub did not store. The existing ARM64 pair and
-# the successfully stored AMD64 archive, including their remote IDs, survive.
+# The archive POST reports an error after GitHub stores it. The later checksum
+# POST fails before storage. The existing ARM64 pair and AMD64 archive survive.
 reset_draft
 independent_command -- "$arm64" "$arm64.sha256" >/dev/null
 status=0
-AUDIOLIB_INDEPENDENT_FAIL_BEFORE="$amd_name.sha256" \
+AUDIOLIB_INDEPENDENT_FAIL_AFTER="$amd_name" AUDIOLIB_INDEPENDENT_FAIL_BEFORE="$amd_name.sha256" \
   independent_command --timings -- "$amd64" "$amd64.sha256" > "$test_root/interrupted.log" 2>&1 || status=$?
 [ "$status" = 41 ] && [ "$(mutation_count)" = 4 ] && [ "$(wc -l < "$state/assets" | tr -d '[:space:]')" = 3 ] ||
   fail 'independent checksum request did not fail with only the archive stored'
 assert_independent_upload 2 "$amd64"
 assert_independent_upload 3 "$amd64.sha256"
-assert_upload_timing "$test_root/interrupted.log" "$amd_name" 2 1 41 0
+assert_upload_timing "$test_root/interrupted.log" "$amd_name" 2 2 41 0 "$amd_name.sha256"
+trace_pair_hashes assert_pair_status 1 --accepted-sha256 "$amd_accepted" -- "$amd64" "$amd64.sha256"
+assert_sidecar_hash_only
 cp "$state/assets" "$state/before-retry"
 reject_draft 'complete verified draft' publish_staged_command -- "${all_assets[@]}"
 independent_command --timings --intake-read-hash-ms 123 -- "$amd64" "$amd64.sha256" > "$test_root/retry.log"
@@ -623,6 +675,12 @@ independent_command --timings -- "$amd64" "$amd64.sha256" > "$test_root/complete
 assert_upload_timing "$test_root/complete.log" "$amd_name" 0 0 0 0
 grep -q '"post_ms":0,' "$test_root/complete.log" || fail 'timing charged a POST for verified existing assets'
 [ "$(mutation_count)" = 5 ] || fail 'complete independent pair was retransmitted'
+trace_pair_hashes assert_pair_status 0 --accepted-sha256 "$amd_accepted" -- "$amd64" "$amd64.sha256"
+[ "$(grep -Fxc -- "$amd64" "$probe_hash_log")" = 1 ] || fail 'complete pinned status must verify the archive once'
+archive_text=$(cat "$amd64")
+printf 'z%s\n' "${archive_text#?}" > "$amd64"
+reject_draft 'Local accepted asset changed' independent_command --pair-status --accepted-sha256 "$amd_accepted" -- "$amd64" "$amd64.sha256"
+printf '%s\n' "$archive_text" > "$amd64"
 
 # Reject ambiguous scope, conflicting assets and a still-uploading owned asset.
 reset_draft
@@ -634,10 +692,14 @@ reject_draft 'archive and checksum' independent_command -- "$amd64" "$arm64.sha2
 reject_draft 'draft ID differs' env AUDIOLIB_REQUIRE_API_HOST=1 "$here/release-create.sh" "$tag" --resume-draft --stage-independent --draft-id 54321 --notes-file "$notes" -- "$amd64" "$amd64.sha256"
 printf 'asset\t9000\t%s\tstarter\t0\t\n' "$amd_name" > "$state/assets"
 reject_draft 'Remote asset is incomplete' independent_command -- "$amd64" "$amd64.sha256"
+reject_draft 'Draft asset is in starter state' independent_command --pair-status -- "$amd64" "$amd64.sha256"
+printf 'asset\t9000\t%s\tstarter\t0\t\n' "$arm_name" > "$state/assets"
+reject_draft 'Draft asset is in starter state' independent_command --pair-status -- "$amd64" "$amd64.sha256"
 printf 'asset\t9000\tunknown.zip\tstarter\t0\t\n' > "$state/assets"
 reject_draft 'Unexpected remote' independent_command -- "$amd64" "$amd64.sha256"
 printf 'asset\t9000\t%s\tuploaded\t%s\tsha256:%064d\n' "$amd_name" "$(wc -c < "$amd64" | tr -d '[:space:]')" 0 > "$state/assets"
 reject_draft 'size/SHA256 conflicts' independent_command -- "$amd64" "$amd64.sha256"
+reject_draft 'size/SHA256 conflicts' independent_command --pair-status --accepted-sha256 "$amd_accepted" -- "$amd64" "$amd64.sha256"
 
 # Finalization alone may mutate a fully staged, verified draft, once.
 for suffix in '' '-rc.2'; do
@@ -664,4 +726,4 @@ for suffix in '' '-rc.2'; do
   reject_draft 'unpublished draft' publish_staged_command -- "${all_assets[@]}"
 done
 
-echo 'release-create tests passed (offline fake gh/pwsh/git; legacy resume, cumulative and independent pairs, interrupted retry, segmented upload timing, exact staged publication)'
+echo 'release-create tests passed (offline fake gh/pwsh/git; legacy resume, cumulative and independent pairs, read-only pair status, accepted digests, interrupted retry, segmented upload timing, exact staged publication)'
