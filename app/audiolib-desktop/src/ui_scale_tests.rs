@@ -15,7 +15,7 @@ fn init_software_backend() {
     .expect("platform already initialized");
 }
 
-fn synthetic_rows() -> ModelRc<AudioRow> {
+pub(super) fn synthetic_rows() -> ModelRc<AudioRow> {
     let rows = (0..12)
         .map(|index| AudioRow {
             id: format!("{index}").into(),
