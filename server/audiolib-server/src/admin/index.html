@@ -123,6 +123,7 @@
     <thead><tr><th>名称</th><th>路径</th><th>状态</th><th>文件</th><th>缺失</th><th>最近扫描</th><th></th></tr></thead>
     <tbody id="roots"></tbody>
   </table></div>
+  <div class="warn" id="roots-refresh-error" role="status"></div>
   <div id="scan-box" class="secret hidden">
     <div><b>扫描中：<span id="scan-root"></span></b> <span class="muted" id="scan-state"></span></div>
     <div class="bar"><div id="scan-bar"></div></div>
@@ -161,6 +162,7 @@
 </section>
 <section>
   <h2>资源限制</h2>
+  <div class="warn" id="limits-error" role="status"></div>
   <div class="muted">以下限制只能在 config.toml 中修改（只读显示）：</div>
   <div class="table-scroll"><table><tbody id="rt-limits"></tbody></table></div>
 </section>

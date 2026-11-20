@@ -64,7 +64,7 @@ for (const [id, key] of switches) {
     savingSwitches.add(id);
     renderSwitch(id, key, current);
     try {
-      render(await api("PUT", "settings", { [key]: value }));
+      await saveSettings("PUT", "settings", { [key]: value });
       toast(value === null ? "已恢复配置值" : "已保存");
     } catch (error) { toast(error.message, true); }
     finally {
@@ -198,7 +198,7 @@ function renderTokens(list) {
 
 async function refresh() {
   try {
-    const revision = statusRevision;
+    const revision = ++statusRevision;
     const status = await api("GET", "status");
     if (revision === statusRevision) render(status);
     if (activePanel === "network") renderTokens(await api("GET", "tokens"));
@@ -255,14 +255,20 @@ $("update-install").addEventListener("click", async () => {
   catch (error) { toast(error.message, true); await refreshUpdate(); }
 });
 
-async function change(method, path, body, done) {
+async function saveSettings(method, path, body) {
+  const revision = statusRevision;
   const acknowledge = savedDrafts(path === "tls" ? ["tls"] : Object.keys(body || {}));
+  const status = await api(method, path, body);
+  acknowledge();
+  // Overlapping writes can return full server snapshots in the opposite order.
+  if (status?.auth_mode && revision === statusRevision) render(status);
+  else await refresh();
+}
+
+async function change(method, path, body, done) {
   try {
-    const status = await api(method, path, body);
-    acknowledge();
-    if (status && status.auth_mode) render(status);
+    await saveSettings(method, path, body);
     toast(done || "已保存");
-    await refresh();
   } catch (error) { toast(error.message, true); }
 }
 
@@ -330,6 +336,7 @@ $("disable-tls").addEventListener("click", () => {
 // ---- Library roots ----
 let rootsList = [];
 let scanTimer = null;
+let rootsRequest = 0;
 const numberText = (n) => (n === null || n === undefined ? "—" : Number(n).toLocaleString());
 
 function cell(row, text, cls) {
@@ -395,14 +402,22 @@ function renderScan(scan) {
 }
 
 async function refreshRoots() {
+  const request = ++rootsRequest;
+  clearTimeout(scanTimer);
+  if (!panelVisible("scan-roots")) return;
+  let interval = 5000;
   try {
     const [list, current] = await Promise.all([api("GET", "roots"), api("GET", "scans/current")]);
+    if (request !== rootsRequest) return;
     renderRoots(list, current.scan);
     renderScan(current.scan);
-    clearTimeout(scanTimer);
-    scanTimer = null;
-    if (current.scan && panelVisible("scan-roots")) scanTimer = setTimeout(refreshRoots, 1000);
-  } catch (error) { $("roots-error").textContent = "读取根目录失败：" + error.message; }
+    $("roots-refresh-error").textContent = "";
+    interval = current.scan ? 1000 : 15000;
+  } catch (error) {
+    if (request !== rootsRequest) return;
+    $("roots-refresh-error").textContent = "读取根目录失败：" + error.message;
+  }
+  scanTimer = setTimeout(refreshRoots, interval);
 }
 
 async function startScan(root, mode) {
@@ -571,10 +586,7 @@ $("modal").addEventListener("click", (event) => { if (event.target === $("modal"
 // ---- List waveform settings ----
 async function saveListWaveforms(body) {
   try {
-    const acknowledge = savedDrafts(Object.keys(body));
-    const status = await api("PUT", "settings", body);
-    acknowledge();
-    render(status);
+    await saveSettings("PUT", "settings", body);
     toast("已保存");
     refreshRuntime();
   } catch (error) { toast(error.message, true); }
@@ -593,6 +605,7 @@ $("reset-lw").addEventListener("click", () => saveListWaveforms({ pregenerate_li
 // ---- Runtime status (GET /admin/api/runtime) ----
 const RUNTIME_INTERVAL_MS = 5000;
 let runtimeTimer = null;
+let runtimeRequest = 0;
 
 function bytesText(bytes) {
   if (bytes === null || bytes === undefined) return "未知";
@@ -674,14 +687,20 @@ function renderRuntime(rt) {
 }
 
 async function refreshRuntime() {
+  const request = ++runtimeRequest;
   clearTimeout(runtimeTimer);
-  runtimeTimer = null;
   if (!panelVisible("overview") && !panelVisible("waveforms")) return;
+  const errorBox = panelVisible("overview") ? $("rt-error") : $("limits-error");
   try {
-    renderRuntime(await api("GET", "runtime"));
-    $("rt-error").textContent = "";
-  } catch (error) { $("rt-error").textContent = "读取运行状态失败：" + error.message; }
-  if (panelVisible("overview") || panelVisible("waveforms")) runtimeTimer = setTimeout(refreshRuntime, RUNTIME_INTERVAL_MS);
+    const runtime = await api("GET", "runtime");
+    if (request !== runtimeRequest) return;
+    renderRuntime(runtime);
+    errorBox.textContent = "";
+  } catch (error) {
+    if (request !== runtimeRequest) return;
+    errorBox.textContent = "读取运行状态失败：" + error.message;
+  }
+  runtimeTimer = setTimeout(refreshRuntime, RUNTIME_INTERVAL_MS);
 }
 const tabs = [...document.querySelectorAll("[role=tab]")];
 let activePanel;
@@ -741,13 +760,10 @@ async function migration(action) {
 $("migration-refresh").addEventListener("click", () => migration());
 
 function refreshPanel() {
-  clearTimeout(runtimeTimer);
-  clearTimeout(scanTimer);
-  scanTimer = null;
+  refreshRoots();
+  refreshRuntime();
   clearTimeout(migrationTimer);
-  if (panelVisible("overview")) { refreshRuntime(); refreshUpdate(); }
-  if (panelVisible("waveforms")) refreshRuntime();
-  if (panelVisible("scan-roots")) refreshRoots();
+  if (panelVisible("overview")) refreshUpdate();
   if (panelVisible("database")) migration();
   if (panelVisible("network")) refresh();
 }
@@ -788,5 +804,4 @@ setInterval(() => { if (panelVisible("overview") || (updateRestarting && documen
 setInterval(() => {
   if (document.visibilityState !== "visible") return;
   refresh();
-  if (panelVisible("scan-roots") && !scanTimer) refreshRoots();
 }, 15000);
