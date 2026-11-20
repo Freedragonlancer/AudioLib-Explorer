@@ -14,7 +14,8 @@ export component AiSearchToggle inherits Rectangle {
     min-width: 68px * Theme.ui-scale;
     max-width: 68px * Theme.ui-scale;
     horizontal-stretch: 0;
-    height: 30px * Theme.ui-scale;
+    // Fill the joined control inside its border, including the hover paint.
+    vertical-stretch: 1;
     border-radius: 5px * Theme.ui-scale;
     border-width: switch-focus.has-focus ? 1px : 0px;
     border-color: Theme.accent;

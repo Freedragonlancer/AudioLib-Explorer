@@ -1903,6 +1903,75 @@ fn ai_compact_toolbar_preserves_actions_with_eight_mixed_tags() {
 }
 
 #[test]
+fn ai_toggle_hover_preserves_frame_in_search_and_generation_modes() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    let ui = window();
+    ui.set_chinese(false);
+    for theme in ["default", "studio"] {
+        crate::theme::apply_theme(&ui, theme);
+        for scale in [1.0, 1.5] {
+            ui.global::<crate::Theme>().set_ui_scale(scale);
+            for active in [false, true] {
+                ui.set_ai_visible(active);
+                ui.set_ai_collapsed(true);
+                ui.window().dispatch_event(WindowEvent::PointerMoved {
+                    position: slint::LogicalPosition::new(0.0, 0.0),
+                });
+                settle();
+                let toggle = ElementHandle::find_by_accessible_label(&ui, "AI search mode")
+                    .next()
+                    .unwrap();
+                let action = ElementHandle::find_by_element_type_name(&ui, "AiSearchAction")
+                    .next()
+                    .unwrap();
+                let origin = toggle.absolute_position();
+                let size = toggle.size();
+                let before = ui.window().take_snapshot().unwrap();
+                ui.window().dispatch_event(WindowEvent::PointerMoved {
+                    position: slint::LogicalPosition::new(
+                        origin.x + size.width / 2.0,
+                        origin.y + size.height / 2.0,
+                    ),
+                });
+                settle();
+                let after = ui.window().take_snapshot().unwrap();
+                let factor = ui.window().scale_factor();
+                let left = ((origin.x + 6.0 * scale) * factor).ceil() as usize;
+                let right = ((origin.x + size.width - 6.0 * scale) * factor).floor() as usize;
+                let bottom = ((action.absolute_position().y + action.size().height) * factor)
+                    .round() as usize
+                    - 1;
+                let span = |y: usize| {
+                    (y * before.width() as usize + left) * 4
+                        ..(y * before.width() as usize + right) * 4
+                };
+                let middle = span(((origin.y + size.height / 2.0) * factor) as usize);
+                assert_ne!(
+                    before.as_bytes()[middle.clone()],
+                    after.as_bytes()[middle],
+                    "hover fill is visible"
+                );
+                let border = span(bottom);
+                assert_eq!(
+                    before.as_bytes()[border.clone()],
+                    after.as_bytes()[border],
+                    "hover covered the {theme} frame at {scale}× (AI={active})"
+                );
+                if scale == 1.5 {
+                    snapshot_if_requested(&ui, &format!("ai-hover-{theme}-{active}"));
+                }
+            }
+        }
+    }
+    ui.hide().unwrap();
+}
+
+#[test]
 fn search_entry_and_actions_stay_in_place_across_ai_modes() {
     slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
         mock_time: true,
