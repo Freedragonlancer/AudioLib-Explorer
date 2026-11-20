@@ -599,7 +599,7 @@ fn source_view_selection_and_wheel_work_with_empty_or_shorter_transport() {
             for transport_duration in [0.0, 1.0] {
                 let ui = window(modern);
                 ui.set_audition_expanded(expanded);
-                ui.set_studio_audition_height_factor(if expanded { 286.0 / 114.0 } else { 1.0 });
+                ui.set_studio_audition_height_factor(if expanded { 2.5 } else { 1.0 });
                 if !expanded {
                     ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
                 }
@@ -1236,7 +1236,7 @@ fn export_waveform_pointer_visual_previews() {
             ui.set_waveform_mask(waveform_mask.clone());
             ui.set_peak_mode(0);
             ui.set_audition_expanded(modern);
-            ui.set_studio_audition_height_factor(if modern { 286.0 / 114.0 } else { 1.0 });
+            ui.set_studio_audition_height_factor(if modern { 2.5 } else { 1.0 });
             let ranges = accept_ranges(&ui);
             settle();
             let mut capture = |column: usize, position: LogicalPosition, kind: i32| {

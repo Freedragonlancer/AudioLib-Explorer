@@ -737,7 +737,7 @@ component AuditionWorkspace inherits Rectangle {
             root.pending-wave-height = 0;
         }
     }
-    out property <length> available-dock-height: max(root.base-height, min(3 * root.base-height, root.height - max(root.list-minimum, 220px * Theme.ui-scale) - root.grip-height));
+    out property <length> available-dock-height: max(root.base-height, min(Theme.max-audition-height-factor * root.base-height, root.height - max(root.list-minimum, 220px * Theme.ui-scale) - root.grip-height));
     out property <length> dock-height: clamp(root.base-height * root.height-factor, root.base-height, root.available-dock-height);
     min-height: root.list-minimum + root.grip-height + root.base-height;
     preferred-height: self.min-height;
@@ -1935,7 +1935,7 @@ export component AppWindow inherits Window {
     private property <length> audition-base-height: (Theme.modern-player ? 114px : root.short-layout ? 176px : 204px) * Theme.ui-scale;
     private property <float> audition-height-factor: Theme.modern-player ? root.studio-audition-height-factor : root.classic-audition-height-factor;
     function resize-audition(height: length) {
-        let factor = clamp(height / root.audition-base-height, 1, 3);
+        let factor = clamp(height / root.audition-base-height, 1, Theme.max-audition-height-factor);
         if Theme.modern-player {
             root.studio-audition-height-factor = factor;
             root.audition-expanded = factor > 186 / 114;
@@ -1945,7 +1945,7 @@ export component AppWindow inherits Window {
     }
     function expand-audition(expand: bool) {
         root.audition-expanded = expand;
-        root.studio-audition-height-factor = expand ? max(root.studio-audition-height-factor, 286 / 114) : 1;
+        root.studio-audition-height-factor = expand ? Theme.max-audition-height-factor : 1;
     }
     in property <string> playback-name;
     in property <bool> waveform-ready: false;

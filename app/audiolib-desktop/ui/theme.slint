@@ -38,6 +38,7 @@ export global Theme {
     // Literal lengths are written as `Npx * Theme.ui-scale`. 0px and 1px hairlines
     // (borders, separators, `/ 1px` unit conversions) stay unscaled.
     in-out property <float> ui-scale: 1.0;
+    out property <float> max-audition-height-factor: 2.5;
     // Font size settings in whole pixels (10-24, set from Rust). 13 is the reference size
     // at which every design size below is used unchanged, so the defaults keep the look.
     in-out property <int> ui-font-px: 13;

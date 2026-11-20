@@ -289,6 +289,7 @@ fn resizing_the_player_gives_the_waveform_all_extra_height() {
         let ruler = player_action(&ui, "Waveform time ruler");
         let play = player_action(&ui, "Play");
         let baseline = dock.size().height;
+        let maximum = 2.5 * baseline;
         let wave_height = wave.size().height;
         let ruler_height = ruler.size().height;
         let button_height = play.size().height;
@@ -316,12 +317,12 @@ fn resizing_the_player_gives_the_waveform_all_extra_height() {
         );
         frame(&ui, &format!("height-{name}-maximum"));
         assert!(
-            (dock.size().height - 3.0 * baseline).abs() < 1.1,
-            "{name} expected 3 × {baseline}, got {}",
+            (dock.size().height - maximum).abs() < 1.1,
+            "{name} expected 2.5 × {baseline}, got {}",
             dock.size().height
         );
         assert!(
-            (wave.size().height - wave_height - 2.0 * baseline).abs() < 1.1,
+            (wave.size().height - wave_height - (maximum - baseline)).abs() < 1.1,
             "{name} waveform grew from {wave_height} to {}",
             wave.size().height
         );
@@ -352,9 +353,9 @@ fn resizing_the_player_gives_the_waveform_all_extra_height() {
         ui.window()
             .set_size(slint::LogicalSize::new(1600.0, 1200.0));
         ui.window().take_snapshot().unwrap();
-        assert!((dock.size().height - 3.0 * baseline).abs() < 1.1);
+        assert!((dock.size().height - maximum).abs() < 1.1);
         key(&ui, Key::DownArrow.into());
-        assert!(dock.size().height < 3.0 * baseline - 1.0);
+        assert!(dock.size().height < maximum - 1.0);
         let start = control_center(&handle);
         let finish = slint::LogicalPosition::new(start.x, start.y + 2.5 * baseline);
         pointer_down(&ui, start);
@@ -362,6 +363,11 @@ fn resizing_the_player_gives_the_waveform_all_extra_height() {
             .dispatch_event(WindowEvent::PointerMoved { position: finish });
         pointer_up(&ui, finish);
         assert!((dock.size().height - baseline).abs() < 1.1);
+        if theme == STUDIO_THEME {
+            activate(&ui, "Expand audition waveform");
+            assert_eq!(ui.get_studio_audition_height_factor(), 2.5);
+            assert!((dock.size().height - maximum).abs() < 0.5);
+        }
         ui.hide().unwrap();
     }
 }

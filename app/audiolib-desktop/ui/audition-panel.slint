@@ -2281,7 +2281,7 @@ export component AuditionPanel inherits Rectangle {
     property <bool> modern-player: Theme.modern-player;
     changed modern-player => { root.presenter-volume-adjusting = false; root.presenter-selection-gesture = false; root.reset-pointer-feedback(); }
     changed active => { if !root.active { root.presenter-volume-adjusting = false; root.presenter-selection-gesture = false; root.reset-pointer-feedback(); } }
-    height: Theme.modern-player ? (root.expanded ? 286px : 114px) * Theme.ui-scale
+    height: Theme.modern-player ? 114px * (root.expanded ? Theme.max-audition-height-factor : 1) * Theme.ui-scale
         : (root.compact ? 176px : 204px) * Theme.ui-scale;
     if root.active && !Theme.modern-player: ClassicAuditionPanel {
         width: parent.width; height: parent.height;
