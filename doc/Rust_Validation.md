@@ -1,5 +1,9 @@
 # Rust 验证报告
 
+## 1.1.1 发布与安装验收 (2026-11-21)
+
+冻结的 Windows Beta 从实包生成详情面板与服务器管理截图，键鼠交互沿用开发阶段实测。Mac Beta 管理页与 Windows 远端冒烟通过，七份正式归档及十四项线上资产通过核验，固定安装的 908 项包文件、CLI 版本与隔离启动通过。Mac 预编译、AMD64 缓存复用和 Docker 等待在途任务后补传的实测见 [1.1.1 发布记录](Rust_Release_1.1.1.md)。
+
 ## 服务端管理页与桌面服务器设置（2026-11-21）
 
 Windows x64 MSVC 验证覆盖 `audiolib-server`（无默认 feature）、`audiolib-remote` 与 `audiolib-desktop`（ASIO）。格式与三个包的严格 Clippy 通过。桌面用中英文 Slint 交互测试检查四个页签、当前数据源、只读权限、缓存页与快照切换，并检查了 1080 × 700 的数据库页截图。
