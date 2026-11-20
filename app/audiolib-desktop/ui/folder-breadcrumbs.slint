@@ -1,0 +1,137 @@
+// app/audiolib-desktop/ui/folder-breadcrumbs.slint
+import { Theme } from "theme.slint";
+
+export struct CrumbRow { name: string, path: string }
+
+component PathButton inherits Rectangle {
+    in property <string> label;
+    in property <string> hint;
+    in property <string> action-label: root.label;
+    in property <bool> current;
+    out property <length> natural-width: caption.preferred-width + 10px * Theme.ui-scale;
+    callback activated();
+    border-radius: 4px * Theme.ui-scale;
+    background: Theme.interactive-fill(false, hit.has-hover, hit.pressed, transparent);
+    border-width: 1phx;
+    border-color: keys.has-focus ? Theme.accent-hover : transparent;
+    accessible-role: button;
+    accessible-label: root.action-label;
+    accessible-description: root.hint;
+    accessible-action-default => { root.activated(); }
+    forward-focus: keys;
+    caption := Text {
+        x: 5px * Theme.ui-scale; width: max(0px, parent.width - 2 * self.x);
+        height: parent.height; vertical-alignment: center; overflow: elide;
+        text: root.label; font-size: Theme.font(12); font-weight: root.current ? 600 : 400;
+        color: root.current || hit.has-hover || keys.has-focus ? Theme.text(2, 0, Theme.ink) : Theme.text(2, 1, Theme.dim);
+    }
+    keys := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " { root.activated(); return accept; }
+            reject
+        }
+    }
+    hit := TouchArea { mouse-cursor: pointer; clicked => { root.activated(); } }
+    // Measure outside the popup so an unwrapped path cannot widen its native frame.
+    hint-measure := Text {
+        visible: false; x: 0px; y: 0px; width: 0px; height: 0px;
+        text: root.hint; font-size: Theme.font(11);
+    }
+    private property <length> tip-text-width: min(424px * Theme.ui-scale, hint-measure.preferred-width);
+    Tooltip {
+        Rectangle {
+            background: Theme.tooltip; border-width: 1phx;
+            border-color: Theme.strong-border; border-radius: 4px * Theme.ui-scale;
+            VerticalLayout {
+                padding: 8px * Theme.ui-scale;
+                Text {
+                    width: root.tip-text-width;
+                    text: root.hint; color: Theme.ink; font-size: Theme.font(11); wrap: char-wrap;
+                }
+            }
+        }
+    }
+}
+
+component PathSeparator inherits Rectangle {
+    width: 10px * Theme.ui-scale;
+    Image {
+        width: parent.width; height: self.width; y: (parent.height - self.height) / 2;
+        source: @image-url("icons/chevron-right.svg"); colorize: Theme.muted;
+        accessible-role: none;
+    }
+}
+
+export component FolderBreadcrumbs inherits Rectangle {
+    in property <[CrumbRow]> items;
+    in property <bool> chinese;
+    callback library-requested();
+    callback folder-requested(int);
+    horizontal-stretch: 1; min-width: 80px * Theme.ui-scale; preferred-width: self.min-width; max-width: 32767px;
+    height: 30px * Theme.ui-scale; clip: true;
+    private property <int> ancestors: max(0, root.items.length - 1);
+    private property <string> library: root.chinese ? "素材库" : "Library";
+    private property <string> more-label: root.chinese ? "上级目录" : "Parent folders";
+    private property <bool> compact: root.width < 200px * Theme.ui-scale;
+    private property <length> separator-width: 10px * Theme.ui-scale;
+    private property <length> menu-space: 26px * Theme.ui-scale + root.separator-width;
+    private property <length> ancestor-min: 84px * Theme.ui-scale;
+    private property <length> trail-space: max(0px, root.width - (root.compact ? root.menu-space : home.natural-width + root.separator-width));
+    private property <length> leaf-limit: min(leaf.natural-width, 440px * Theme.ui-scale);
+    private property <length> ancestor-space: root.trail-space - min(root.leaf-limit, 0.52 * root.trail-space);
+    private property <int> hidden-count: root.ancestors == 0 || probe.preferred-width <= root.ancestor-space ? 0
+        : clamp(root.ancestors - floor((root.ancestor-space - (root.compact ? 0px : root.menu-space)) / (root.ancestor-min + root.separator-width)), 1, root.ancestors);
+
+    private property <length> visible-ancestor-min: root.hidden-count == 0 ? probe.preferred-width
+        : (root.ancestors - root.hidden-count) * (root.ancestor-min + root.separator-width) + (root.compact ? 0px : root.menu-space);
+    private property <length> leaf-width: min(root.leaf-limit, max(0px, root.trail-space - root.visible-ancestor-min));
+
+    // Measure the minimum readable trail using the same font as the buttons. Short
+    // names need only their actual width, even when there are many levels.
+    probe := HorizontalLayout {
+        visible: false;
+        for i in root.ancestors: Text {
+            text: root.items[i].name; font-size: Theme.font(12);
+            width: min(root.ancestor-min, self.preferred-width + 10px * Theme.ui-scale) + root.separator-width;
+        }
+    }
+
+    HorizontalLayout {
+        x: 0px; y: 0px; width: parent.width; height: parent.height; spacing: 0px;
+        home := PathButton {
+            visible: !root.compact; width: root.compact ? 0px : self.natural-width;
+            label: root.library; hint: root.library; activated => { root.library-requested(); }
+        }
+        if !root.compact: PathSeparator {}
+        if root.hidden-count > 0 || root.compact: PathButton {
+            width: 26px * Theme.ui-scale; label: "…"; action-label: root.more-label; hint: root.more-label;
+            activated => { ancestors-menu.show({ x: self.absolute-position.x - ancestors-menu.absolute-position.x,
+                y: self.absolute-position.y + self.height - ancestors-menu.absolute-position.y }); }
+        }
+        if root.hidden-count > 0 || root.compact: PathSeparator {}
+        for i in root.ancestors - root.hidden-count: HorizontalLayout {
+            ancestor := PathButton {
+                private property <int> index: root.hidden-count + i;
+                label: root.items[self.index].name; hint: root.items[self.index].path;
+                min-width: min(self.natural-width, root.ancestor-min);
+                preferred-width: min(self.natural-width, 288px * Theme.ui-scale); max-width: self.preferred-width;
+                activated => { root.folder-requested(self.index); }
+            }
+            PathSeparator {}
+        }
+        leaf := PathButton {
+            width: root.leaf-width; current: true;
+            label: root.items[root.ancestors].name; hint: root.items[root.ancestors].path;
+            activated => { root.folder-requested(root.ancestors); }
+        }
+        Rectangle { horizontal-stretch: 1; }
+    }
+    ancestors-menu := ContextMenuArea {
+        x: 0px; y: 0px; width: 0px; height: 0px;
+        Menu {
+            if root.compact: MenuItem { title: root.library; activated => { root.library-requested(); } }
+            for i in root.hidden-count: MenuItem { title: root.items[i].name; activated => { root.folder-requested(i); } }
+        }
+    }
+}

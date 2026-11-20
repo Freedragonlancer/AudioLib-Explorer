@@ -964,7 +964,7 @@ pub(crate) fn click_label(ui: &AppWindow, label: &str) {
     });
 }
 
-fn click_at(ui: &AppWindow, position: slint::LogicalPosition) {
+pub(super) fn click_at(ui: &AppWindow, position: slint::LogicalPosition) {
     ui.window()
         .dispatch_event(WindowEvent::PointerMoved { position });
     ui.window().dispatch_event(WindowEvent::PointerPressed {
