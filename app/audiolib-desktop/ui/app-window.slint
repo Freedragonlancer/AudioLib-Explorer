@@ -2567,6 +2567,8 @@ export component AppWindow inherits Window {
     property <bool> short-layout: root.height < 800px * Theme.ui-scale;
     // Preferred widths survive temporary window constraints and inspector hiding.
     in-out property <length> sidebar-preferred-width: round(198 * Theme.ui-scale) * 1px;
+    // Fluent overlays a 14 logical-pixel scrollbar on the viewport, including its hover target.
+    private property <length> inspector-scroll-inset: 14px + 4px * Theme.ui-scale;
     in-out property <length> inspector-preferred-width: round(320 * Theme.ui-scale) * 1px;
     // The saved ratio survives collapsing a section and temporary window constraints.
     in-out property <bool> folders-section-expanded: true;
@@ -3938,7 +3940,7 @@ main-scroll := ScrollView {
                         changed restore-revision => { if !Theme.modern-style { self.viewport-y = clamp(root.task-inspector-viewport-y, min(0px, self.visible-height - self.viewport-height), 0px); } }
                         property <string> displayed-id: root.selected-id;
                         changed displayed-id => { if !Theme.modern-style { if !root.task-restoring { self.viewport-y = 0px; } } }
-                        VerticalLayout { spacing: root.short-layout ? 4px * Theme.ui-scale : 7px * Theme.ui-scale; padding-right: 4px * Theme.ui-scale; alignment: start;
+                        VerticalLayout { spacing: root.short-layout ? 4px * Theme.ui-scale : 7px * Theme.ui-scale; padding-right: root.inspector-scroll-inset; alignment: start;
                             // The favorite belongs to this sound, so it sits beside its name.
                             HorizontalLayout { spacing: 6px * Theme.ui-scale;
                                 Text { horizontal-stretch: 1; min-width: 0px; min-height: 22px * Theme.ui-scale; max-height: (root.short-layout ? 22px : 40px) * Theme.ui-scale; vertical-stretch: 0; text: root.selected-name; color: Theme.text(3, 0, Theme.ink); font-size: Theme.font(13); font-weight: 600; wrap: word-wrap; overflow: elide; }
@@ -4830,7 +4832,7 @@ main-scroll := ScrollView {
                         changed restore-revision => { if Theme.modern-style { self.viewport-y = clamp(root.task-inspector-viewport-y, min(0px, self.visible-height - self.viewport-height), 0px); } }
                         property <string> displayed-id: root.selected-id;
                         changed displayed-id => { if Theme.modern-style { if !root.task-restoring { self.viewport-y = 0px; } } }
-                        VerticalLayout { spacing: 10px * Theme.ui-scale; padding-right: 4px * Theme.ui-scale; alignment: start;
+                        VerticalLayout { spacing: 10px * Theme.ui-scale; padding-right: root.inspector-scroll-inset; alignment: start;
                             if root.selected-album != "" || (root.artwork-enabled && root.album-cover-ready): HorizontalLayout { height: root.artwork-enabled && root.album-cover-ready ? 80px * Theme.ui-scale : 36px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
                                 Image { visible: root.artwork-enabled && root.album-cover-ready; width: root.artwork-enabled && root.album-cover-ready ? 76px * Theme.ui-scale : 0px; height: 76px * Theme.ui-scale; image-fit: cover; source: root.album-cover; }
                                 VerticalLayout { alignment: center; spacing: 5px * Theme.ui-scale;
