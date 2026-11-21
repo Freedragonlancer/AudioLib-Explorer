@@ -14,7 +14,7 @@
 
 自 v1.0.0 起，桌面端可以把一段自然语言声音描述转成英文关键词搜索，并保留当前资料库里实际命中的查询。限制见 [AI 智能搜索](#ai-智能搜索)。
 
-本页描述你正在阅读的分支里的源码。已发布的安装包保留各自标签的行为。最新的 GitHub Release 是 [v1.1.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.1.0)，发布于 2026-11-20 12:25:23 UTC。发布记录见 [AudioLib Explorer 1.1.0](doc/Rust_Release_1.1.0.md)。工作区 `Cargo.toml` 中的版本由桌面端、`AudioLibCli` 和 `audiolib-server` 共用。
+本页描述你正在阅读的分支里的源码。已发布的安装包保留各自标签的行为。最新的 GitHub Release 是 [v1.1.1](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.1.1)，发布于 2026-11-20 18:09:43 UTC。发布记录见 [AudioLib Explorer 1.1.1](doc/Rust_Release_1.1.1.md)。工作区 `Cargo.toml` 中的版本由桌面端、`AudioLibCli` 和 `audiolib-server` 共用。
 
 ![中文桌面：AI 关键词标签、声音列表和内嵌封面](resources/screenshot-zh-CN.png)
 
@@ -106,7 +106,7 @@ AudioLibCli stats
 > [!WARNING]
 > 面向公网时，把服务端放在带 TLS 的反向代理之后，要求提供令牌，并且不要公开 `/admin`。令牌至少为 32 个随机的可见 ASCII 字符。它从环境变量读取，不写入配置文件。`auth_mode = "external"` 时，局域网直连的客户端可以不填令牌。经过代理到达的请求需要令牌。
 
-完整的安装、升级和根目录管理步骤见[服务端部署](doc/Server_Deployment.md)、[服务端音效库管理](doc/Server_Library_Guide.md)、[server/README.zh-CN.md](server/README.zh-CN.md) 和 [server/deploy/README.md](server/deploy/README.md)。Windows 打包见 [Windows 服务端发布](doc/Rust_Windows_Server_Release.md)。Linux 包和离线 Docker 镜像见 [Linux 与 Docker 交付](doc/Rust_Linux_Docker_Release.md)。
+完整的安装、升级和根目录管理步骤见[服务端部署](doc/Server_Deployment.md)、[服务端音效库管理](doc/Server_Library_Guide.md)、[server/README.zh-CN.md](server/README.zh-CN.md#服务端设置) 和 [server/deploy/README.md](server/deploy/README.md)。AI 请求转发、兼容快照和列表波形设置见[服务端设置](doc/Server_Deployment.md#server-settings)。Windows 打包见 [Windows 服务端发布](doc/Rust_Windows_Server_Release.md)。Linux 包和离线 Docker 镜像见 [Linux 与 Docker 交付](doc/Rust_Linux_Docker_Release.md)。
 
 **Windows。** 核对 `AudioLibServer-<tag>-win-x64.zip`，再解压到可写的程序目录。这个 ZIP 不会注册 Windows 服务。配置目录需要自己创建；只有配置尚不存在时才复制示例：
 

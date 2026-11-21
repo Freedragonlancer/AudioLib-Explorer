@@ -14,7 +14,7 @@ Use it on one computer, or connect the desktop app to `audiolib-server` on a LAN
 
 From v1.0.0 the desktop app can turn a plain-language sound description into English keyword searches and keep the queries that hit the current library. Limits are in [AI search](#ai-search).
 
-This page describes the source in the branch you are reading. Published packages keep the behavior of their own tag. The latest GitHub Release is [v1.1.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.1.0), published 2026-11-20 12:25:23 UTC. Its record is [AudioLib Explorer 1.1.0](doc/Rust_Release_1.1.0.md). The workspace `Cargo.toml` version is shared by the desktop app, `AudioLibCli` and `audiolib-server`.
+This page describes the source in the branch you are reading. Published packages keep the behavior of their own tag. The latest GitHub Release is [v1.1.1](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.1.1), published 2026-11-20 18:09:43 UTC. Its record is [AudioLib Explorer 1.1.1](doc/Rust_Release_1.1.1.md). The workspace `Cargo.toml` version is shared by the desktop app, `AudioLibCli` and `audiolib-server`.
 
 ![English desktop with AI keyword tags, a sound list and an embedded cover](resources/screenshot-en.png)
 
@@ -111,7 +111,7 @@ User annotations, favorites and playback history for a local library stay in tha
 > [!WARNING]
 > On the public internet, place the server behind a TLS reverse proxy, require a token, and do not publish `/admin`. A token is at least 32 random visible ASCII characters. It is read from the environment, not written into the config file. `auth_mode = "external"` can omit the token for a LAN-direct client. Requests that arrive through a proxy need the token.
 
-The long install, upgrade and root-management steps are in [Server deployment](doc/Server_Deployment.md), [Managing sound libraries on the server](doc/Server_Library_Guide.md), [server/README.md](server/README.md) and [server/deploy/README.md](server/deploy/README.md). Windows-specific packaging is in [Windows server release](doc/Rust_Windows_Server_Release.md). Linux packages and the offline Docker images are in [Linux and Docker delivery](doc/Rust_Linux_Docker_Release.md).
+The long install, upgrade and root-management steps are in [Server deployment](doc/Server_Deployment.md), [Managing sound libraries on the server](doc/Server_Library_Guide.md), [server/README.md](server/README.md#server-settings) and [server/deploy/README.md](server/deploy/README.md). AI relay, the compatibility snapshot and list-waveform settings are in [Server settings](doc/Server_Deployment.md#server-settings). Windows-specific packaging is in [Windows server release](doc/Rust_Windows_Server_Release.md). Linux packages and the offline Docker images are in [Linux and Docker delivery](doc/Rust_Linux_Docker_Release.md).
 
 **Windows.** Verify `AudioLibServer-<tag>-win-x64.zip`, then extract it to a writable program directory. The ZIP does not register a Windows service. Create the config directory yourself and copy the example only when that config does not already exist:
 

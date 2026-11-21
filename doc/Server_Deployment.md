@@ -2,7 +2,7 @@
 
 How to install `audiolib-server` from a published release, configure it, run it on Windows, Linux, macOS or Docker, upgrade it, and connect a desktop client. Library roots, scanning and sidecar Metadata are in [Managing sound libraries on the server](Server_Library_Guide.md).
 
-This describes the v0.9.3 release and the server on branch `beta`. The program version is the workspace `Cargo.toml` version, shared by the desktop client, `AudioLibCli` and the server. Paths, hosts and ports below are placeholders.
+This describes the server in this branch. The workspace `Cargo.toml` version is 1.1.1, shared by the desktop client, `AudioLibCli` and `audiolib-server`. The latest published release is [v1.1.1](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.1.1) (2026-11-20 18:09:43 UTC); its record is [AudioLib Explorer 1.1.1](Rust_Release_1.1.1.md). A published package keeps the behavior of its own tag. Paths, hosts and ports below are placeholders.
 
 ## Release assets
 
@@ -16,7 +16,7 @@ This describes the v0.9.3 release and the server on branch `beta`. The program v
 | Docker linux/amd64 | `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` |
 | Docker linux/arm64 | `AudioLibServer-<tag>-docker-linux-arm64.tar.gz` |
 
-`<tag>` is the release tag, for example `v0.9.3`. Standalone Linux arm64 server archives are not published; that build is an input to the arm64 Docker image. Verify the `.sha256` before extracting a native archive or running `docker load`.
+`<tag>` is the release tag, for example `v1.1.1`. From 0.8.5 a release contains these seven archives and a `.sha256` file for each. Standalone Linux arm64 server archives are not published; that build is an input to the arm64 Docker image. Verify the `.sha256` before extracting a native archive or running `docker load`.
 
 A native archive keeps `audiolib-server` and `audiolib-migrate` at its root (`.exe` on Windows), plus `update-channel.txt`, `update-version.txt`, `licenses/` and the public examples under `server/audiolib-server/`. Docker images keep both binaries under `/opt/audiolibserver`.
 
@@ -42,6 +42,8 @@ Copy [`server/audiolib-server/config.example.toml`](../server/audiolib-server/co
 | `token_env` | Environment variable for the bearer token. Default `AUDIOLIB_SERVER_TOKEN`. |
 | `public_url` | Base URL reported by `/api/v1/health` for clients outside the LAN. Optional. |
 | `ffmpeg_path` | Absolute path used only by `GET /audio/{id}/preview?codec=flac`. |
+
+Optional AI relay, the admin-page overrides, and which values need a restart are in [Server settings](#server-settings). Unknown TOML keys are rejected at startup. A `token` field in the TOML file is rejected; the bearer token stays in the environment.
 
 Create the database before the first start, for example `AudioLibCli db create /path/to/library.db`. On Windows, put paths in TOML single quotes so backslashes stay literal.
 
@@ -107,7 +109,7 @@ Drain scans and requested Metadata writes, then stop the service (systemd stop, 
 
 Native Windows x64, macOS arm64 and Linux x64 packages can install a newer release from the admin page after the 0.9 layout is already in place. That layout places `audiolib-migrate` next to `audiolib-server`. A pre-0.9 updater rejects that extra binary, so the first move onto a 0.9 package is a manual extract while the old process is stopped. Docker upgrades replace the image.
 
-v0.9.3 does not add a schema migration. Local writers stay on schema 8 (`ale-s8-cld1-t3-m2-p1-a1`). Schema 9 (`ale-s9-cld1-t3-m2-p1-a1-sd1`) is published only by an explicit server migration. Update clients that can read schemas 8 and 9, install the server, then migrate the real database:
+Version 1.1.1 keeps the write targets from 1.1.0. Local writers stay on schema 8 (`ale-s8-cld1-t3-m2-p1-a1`). Schema 9 (`ale-s9-cld1-t3-m2-p1-a1-sd1`) is published only by an explicit server migration. Update clients that can read schemas 8 and 9, install the server, then migrate the real database:
 
 ```sh
 audiolib-migrate status --db /path/to/library.db
@@ -119,6 +121,56 @@ On Windows the tool is `audiolib-migrate.exe`. `pause`, `resume`, `cancel` and `
 Before writing, the migration checks that free space is at least 1.3 times the library size. It stores an online backup named `audiolib-rollback-mig9-*.db` beside the library, validates it, and leaves it in place. `rollback` restores derived schema-9 objects from that backup and keeps annotations written after the backup. Swapping in an older binary does not downgrade a schema 9 file; use the matching backup. The migration contract is [Schema 9 server migration](Rust_Schema9_Migration.md).
 
 `server/deploy/redeploy-server.sh` is the generic binary swap with a backup, a health check and a rollback of the binaries when the library schema still allows it.
+
+## Server settings
+
+`config.toml` supplies the startup values. `admin-settings.json`, beside `library_db`, stores overrides from the LAN admin page and from `PATCH /api/v1/settings`. A missing field there means “use the TOML value”. Clearing a saved override returns to the TOML value. The server does not rewrite the TOML file. `trust_lan_peers` is read only at startup; the admin page cannot turn it back on.
+
+The Chinese counterpart of this section is [server/README.zh-CN.md](../server/README.zh-CN.md#服务端设置).
+
+### Settings that apply without a restart
+
+| Key | Default | Required | Where it is set | Effect |
+| --- | --- | --- | --- | --- |
+| `legacy_snapshot_enabled` | `true` | No | TOML. The admin **数据库** tab and `PATCH /api/v1/settings` can override it | While enabled, a schema 9 library can also serve a derived read-only schema 8 snapshot containing WAV rows. Those older clients cannot write the schema 9 source. Turning it off leaves them on their last valid cache. Clients that accept schema 9 still receive the native snapshot. See [Managing sound libraries on the server](Server_Library_Guide.md#what-a-client-sees-after-sync). |
+| `list_waveform_pause_stats_on_playback` | `false` | No | TOML. The admin **波形与资源** tab and `PATCH /api/v1/settings` can override it | While enabled, for 3 seconds after `GET /audio/{id}/stream` or `GET /audio/{id}/preview` starts, `POST /waveforms` does not read file attributes. `HEAD` does not open that window. |
+| `pregenerate_list_waveforms` | off when omitted | No | TOML. The admin page and `PATCH /api/v1/settings` can override it | Background generation of list thumbnails. A saved `false` is an override; clearing the override is a different operation and returns to the TOML value. |
+| `list_waveform_rate` | `10` | No | TOML. The admin **波形与资源** tab can override it | Maximum files per second that pre-generation may start, from 1 to 1000. On-demand thumbnail requests are not limited by this rate. |
+| `lan_url` | detected from the host interfaces | No | `admin-settings.json` only. It is not a `config.toml` key | LAN base URL shown to clients. Clear it to detect the address again. |
+
+Provider accounts, model ids and provider API keys are not server settings. The desktop client keeps those in its own data directory.
+
+### AI request relay
+
+Relay is off until `ai_upstreams` lists at least one endpoint. With an empty list, `POST /api/v1/ai/models` and `POST /api/v1/ai/generate` return 403 `AI_DISABLED`. The allowlist is TOML only. The admin page cannot edit it, and a change applies on the next process start. The server configuration has no model-id field; the desktop client sends the model with each request.
+
+```toml
+max_ai_requests = 4
+
+[[ai_upstreams]]
+protocol = "magpie"
+base_url = "http://127.0.0.1:3425/v1"
+
+[[ai_upstreams]]
+protocol = "chat_completions"
+base_url = "https://api.example.com/v1"
+```
+
+`protocol` is one of `chat_completions`, `responses`, `anthropic`, `gemini`, `jev`, `open_code_go`, `deepseek`, `magpie` or `open_ai_official`.
+
+- At most 64 entries. Startup rejects a duplicate protocol and base URL after normalization, and rejects an unknown protocol or base URL.
+- `max_ai_requests` is 1 through 64 and defaults to 4. Further in-flight calls receive 503 `BUSY`. Disconnecting the client does not free the slot until the blocking upstream call finishes.
+- The protocol, host, port and base path must match one entry after normalization. Anything else returns 403 `AI_UPSTREAM_FORBIDDEN`. Redirects are not followed. The client cannot substitute another internal address.
+- A valid AudioLib bearer token is required even when `auth_mode` is `off` and even for a trusted LAN peer. A missing token is 401. The provider API key travels only in that request body. It is not written to the TOML file, `admin-settings.json` or the log.
+- The request body is limited to 64 KiB. This route allows 620 seconds. The provider deadline inside the request is 2 through 600 seconds. Relay does not wait for the library to open and does not read migration state.
+- The published Docker config does not set `ai_upstreams`, so relay stays off until an administrator mounts a TOML file that lists endpoints.
+- Acceptance: an authenticated `POST /api/v1/ai/models` for a listed protocol and base URL is admitted; a different base URL returns 403 `AI_UPSTREAM_FORBIDDEN`; a call without a token returns 401; an empty allowlist returns 403 `AI_DISABLED`. Calling a paid provider is not part of this check.
+
+The request and error contract is [API §12](api/README.md#12-ai-请求转发).
+
+### Limits that need a restart
+
+The admin **波形与资源** tab shows `max_streams`, `max_previews`, `max_transcodes`, `max_waveforms`, `waveform_cache_mb` and `list_waveform_cache_mb` as read-only and marks them as requiring a restart. `max_ai_requests`, `list_waveform_workers` (default 3, never more than `max(1, max_waveforms - 1)`), `ffmpeg_path`, `bind`, `revision_poll_secs`, `snapshot_wait_secs`, `root_check_secs` and `root_offline_secs` are also changed in TOML and then by restarting the process. The admin page does not list every one of those keys.
 
 ## Health check
 

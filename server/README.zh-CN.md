@@ -70,7 +70,7 @@ cargo test  -p audiolib-server --locked --target x86_64-unknown-linux-gnu   # �
 鉴权由 `auth_mode` 决定（API 文档 §2.2）：
 
 - `external`（默认）：使用可信 Host 的局域网直连请求不需要 token；经反向代理（`X-Forwarded-For`、`Forwarded`、`X-Real-IP`、`X-Forwarded-Proto`/`-Host`）或来自非私有网段的请求需要 `Authorization: Bearer <token>`。
-- `off`：任何接口都不需要 token。
+- `off`：普通接口不需要 token。AI 请求转发仍然需要 Bearer 令牌，见[服务端设置](#服务端设置)。
 - `all`（或旧的 `auth = true`）：除 `/health` 外所有接口都需要 token。
 
 有效 token：环境变量 token（`token_env` 指定的变量，默认 `AUDIOLIB_SERVER_TOKEN`，至少 32 个随机可见 ASCII 字符，不会写入日志）和管理页生成的 token。**安全建议：** 任何可从公网访问的部署都应使用带 TLS 的反向代理并要求 token；不要直接暴露明文 HTTP 端口，也不要使用 `auth_mode = "off"`。`external` 模式下局域网客户端无需 token 即被信任。
@@ -80,6 +80,54 @@ cargo test  -p audiolib-server --locked --target x86_64-unknown-linux-gnu   # �
 Docker Desktop、rootless 容器、SNAT 或隐藏真实来源的反代应设置 `trust_lan_peers = false` 与 `auth_mode = "all"`；此时无密码管理页关闭，通过 TOML 管理。容器示例已采用此配置，端口只绑定宿主机回环。免令牌 API 同时校验 Host，失败鉴权按实际 socket IP 每分钟最多 60 次。
 
 原生 TLS 每分钟检查续期文件，成功后只替换新握手的证书，失败时保留旧证书并显示原因。每个监听器最多 1024 连接（含握手）；波形整包复用缓存，最多 8 个下载，每次发送最长 15 分钟。
+
+## 服务端设置
+
+`config.toml` 提供启动时的值。库文件旁边的 `admin-settings.json` 保存局域网管理页和 `PATCH /api/v1/settings` 写入的覆盖。那里缺一个字段，就表示沿用 TOML 的值。清除已保存的覆盖会回到 TOML 的值。服务端不改写 TOML。`trust_lan_peers` 只在启动时读取，管理页不能把它重新打开。英文对照是 [README.md](README.md#server-settings)，部署步骤里的同一节是 [Server deployment](../doc/Server_Deployment.md#server-settings)。
+
+### 不需要重启的设置
+
+| 键 | 默认 | 必填 | 配置位置 | 如何生效 |
+| --- | --- | --- | --- | --- |
+| `legacy_snapshot_enabled` | `true` | 否 | TOML。管理页「数据库」和 `PATCH /api/v1/settings` 可以覆盖 | 开启时，schema 9 的库还可以提供一份派生的只读 schema 8 快照，其中只有 WAV。这些旧客户端不能写 schema 9 源库。关闭后，它们留在最后一次有效缓存。能接受 schema 9 的客户端仍取得原生快照。 |
+| `list_waveform_pause_stats_on_playback` | `false` | 否 | TOML。管理页「波形与资源」和 `PATCH /api/v1/settings` 可以覆盖 | 开启后，`GET /audio/{id}/stream` 或 `GET /audio/{id}/preview` 开始后的 3 秒内，`POST /waveforms` 不读取文件属性。`HEAD` 不开启这段窗口。 |
+| `pregenerate_list_waveforms` | 省略时关闭 | 否 | TOML。管理页和 `PATCH /api/v1/settings` 可以覆盖 | 后台生成列表缩略波形。保存下来的 `false` 是一项覆盖；清除覆盖才会回到 TOML 的值。 |
+| `list_waveform_rate` | `10` | 否 | TOML。管理页「波形与资源」可以覆盖 | 预生成每秒最多开始处理的文件数，范围 1 到 1000。按需缩略图请求不受这个速率限制。 |
+| `lan_url` | 从主机网卡检测 | 否 | 只在 `admin-settings.json`。它不是 `config.toml` 的键 | 显示给客户端的局域网基址。清除后重新检测。 |
+
+供应商账号、模型 ID 和供应商 API Key 不是服务端设置。桌面端把它们保存在自己的数据目录。
+
+### AI 请求转发
+
+`ai_upstreams` 至少有一条之前，转发保持关闭。列表为空时，`POST /api/v1/ai/models` 和 `POST /api/v1/ai/generate` 返回 403 `AI_DISABLED`。允许列表只写在 TOML 里。管理页不能修改它，改动在下一次进程启动后生效。服务端配置没有模型 ID 字段；模型由桌面端在每次请求里提交。
+
+```toml
+max_ai_requests = 4
+
+[[ai_upstreams]]
+protocol = "magpie"
+base_url = "http://127.0.0.1:3425/v1"
+
+[[ai_upstreams]]
+protocol = "chat_completions"
+base_url = "https://api.example.com/v1"
+```
+
+`protocol` 只能是 `chat_completions`、`responses`、`anthropic`、`gemini`、`jev`、`open_code_go`、`deepseek`、`magpie` 或 `open_ai_official`。
+
+- 最多 64 条。规范化之后重复的协议和地址，以及未知协议或地址，都会在启动时被拒绝。
+- `max_ai_requests` 的范围是 1 到 64，默认 4。超出的在途请求返回 503 `BUSY`。客户端断开后，槽位要等正在进行的阻塞上游调用结束才释放。
+- 协议、主机、端口和基础路径在规范化之后必须与某一条一致，否则返回 403 `AI_UPSTREAM_FORBIDDEN`。不跟随重定向。客户端不能另选一个内网地址。
+- 即使 `auth_mode` 是 `off`，或请求来自受信任的局域网，也必须带有效的 AudioLib Bearer 令牌。缺少令牌是 401。供应商 API Key 只在这一次请求正文里，不写入 TOML、`admin-settings.json` 或日志。
+- 请求正文最多 64 KiB。这条路由允许 620 秒。请求里的供应商期限是 2 到 600 秒。转发不等待库打开，也不读取迁移状态。
+- 已发布的 Docker 配置没有 `ai_upstreams`，因此在挂载一份列出端点的 TOML 之前，转发保持关闭。
+- 验收：对已列入允许列表的协议和 Base URL，带令牌的 `POST /api/v1/ai/models` 会被接受；换成另一个 Base URL 返回 403 `AI_UPSTREAM_FORBIDDEN`；不带令牌返回 401；允许列表为空返回 403 `AI_DISABLED`。这项检查不调用付费供应商。
+
+请求和错误契约见 [API §12](../doc/api/README.md#12-ai-请求转发)。
+
+### 需要重启的资源限制
+
+管理页「波形与资源」只读显示 `max_streams`、`max_previews`、`max_transcodes`、`max_waveforms`、`waveform_cache_mb` 和 `list_waveform_cache_mb`，并标明需要重启。`max_ai_requests`、`list_waveform_workers`（默认 3，并且不超过 `max(1, max_waveforms - 1)`）、`ffmpeg_path`、`bind`、`revision_poll_secs`、`snapshot_wait_secs`、`root_check_secs` 和 `root_offline_secs` 也是修改 TOML 后重启进程才生效。管理页不会列出其中的每一个键。
 
 ## 运行
 
