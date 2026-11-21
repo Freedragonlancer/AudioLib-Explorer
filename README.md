@@ -1,98 +1,89 @@
 # AudioLib Explorer
 
-> **English** · [中文](README.zh-CN.md)
+> **中文** · [English](README.en.md)
 >
-> The repository home shows this English page. The same introduction in Chinese is [README.zh-CN.md](README.zh-CN.md). GitHub does not choose between these pages from a visitor's language.
+> 仓库首页显示这份中文说明。同一份英文介绍在 [README.en.md](README.en.md)。GitHub 不会按访客的语言在这两页之间自动选择。
 
-<img src="resources/icons/AudioLibExplorer.png" width="128" height="128" alt="AudioLib Explorer icon">
+<img src="resources/icons/AudioLibExplorer.png" width="128" height="128" alt="AudioLib Explorer 图标">
 
-**AudioLib Explorer helps sound designers build a sound-effects library of their own.**
+**AudioLib Explorer 帮助声音设计师建立自己的音效库。**
 
-It is free, open-source software for sound design, game audio and Foley: browse, search, preview and maintain Metadata for a personal sound-effects library. It is an open-source alternative to Soundminer. The desktop app is written in Rust with a [Slint](https://slint.dev) interface. Libraries are indexed in SQLite with FTS5.
+这是面向声音设计、游戏音频和影视拟音（Foley）的开源免费软件，用来浏览、检索、试听和维护个人音效库的 Metadata，也可作为 Soundminer 的开源替代。桌面端使用 Rust 和 [Slint](https://slint.dev)。资料库索引使用 SQLite 与 FTS5。
 
-Use it on one computer, or connect the desktop app to `audiolib-server` on a LAN or behind a public domain. In server mode the client searches a local snapshot. Internet audio can be cached and read on demand. The desktop interface itself can switch between English and Chinese at runtime; that switch is separate from the link above.
+可以在一台电脑上使用，也可以把桌面端连接到局域网或公网域名上的 `audiolib-server`。服务器模式下，客户端在本地快照上搜索。公网音频可以缓存并按需读取。桌面界面本身可以在运行时切换中文和英文；那个开关与上方的链接是两件事。
 
-From v1.0.0 the desktop app can turn a plain-language sound description into English keyword searches and keep the queries that hit the current library. Limits are in [AI search](#ai-search).
+自 v1.0.0 起，桌面端可以把一段自然语言声音描述转成英文关键词搜索，并保留当前资料库里实际命中的查询。限制见 [AI 智能搜索](#ai-智能搜索)。
 
-This page describes the source in the branch you are reading. Published packages keep the behavior of their own tag. The latest GitHub Release is [v1.1.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.1.0), published 2026-11-20 12:25:23 UTC. Its record is [AudioLib Explorer 1.1.0](doc/Rust_Release_1.1.0.md). The workspace `Cargo.toml` version is shared by the desktop app, `AudioLibCli` and `audiolib-server`.
+本页描述你正在阅读的分支里的源码。已发布的安装包保留各自标签的行为。最新的 GitHub Release 是 [v1.1.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.1.0)，发布于 2026-11-20 12:25:23 UTC。发布记录见 [AudioLib Explorer 1.1.0](doc/Rust_Release_1.1.0.md)。工作区 `Cargo.toml` 中的版本由桌面端、`AudioLibCli` 和 `audiolib-server` 共用。
 
-![English desktop with AI keyword tags, a sound list and an embedded cover](resources/screenshot-en.png)
+![中文桌面：AI 关键词标签、声音列表和内嵌封面](resources/screenshot-zh-CN.png)
 
-English interface. AI is on, **Get tags** has produced verified keyword tags, and the current task lists the matching sounds with their waveforms. The selected sound shows its embedded cover beside the list.
+中文界面。AI 已打开，**生成标签**给出已核验的关键词标签，当前任务列出命中的声音和 Waveform。选中的声音在列表旁显示内嵌封面。
 
-## Features
+## 功能
 
-- Up to 30 independent search tasks. The limit is adjustable from 1 to 30 and defaults to 30; a saved personal limit is kept. Each task has its own folder or library index, filters and list state. See [Search tasks](doc/Rust_Search_Tasks.md).
-- Four search scopes: **Main fields** (filenames and Metadata), **All** (those fields plus directory names), **Path** (directory names and ancestors) and **Filename**. Path needs a prepared directory index. Without that index, All uses Main fields. FTS5 matches letter fragments of at least two characters, and Chinese text is segmented for indexing. Search text is limited to 500 characters. The search performance **target** is **P95 latency <500ms for 1M+ records**.
-- Scan WAV/BWF, MP3, AIFF, FLAC, Ogg Vorbis and Ogg FLAC, including embedded Metadata such as BWF `bext`, iXML, INFO, ID3, XMP and read-only Soundminer `SMED`. Rescans keep user annotations. Source audio is not modified. Opus tags can be probed separately; `.opus` is not scanned by default, and Opus playback is not supported. See [WAV Metadata](doc/Rust_Wav_Metadata.md).
-- Playback uses streaming decode, device-rate resampling, Waveform and spectral views, and independent pitch and rate audition. Windows output is WASAPI, with optional ASIO. The macOS arm64 client uses CoreAudio. A remote Waveform can appear progressively and be zoomed after the full peaks are ready. The audition area can be dragged up to 2.5 times its default height. Double-click the pitch or rate control to reset that control.
-- Import vendor CSV, TSV, TXT, XLS and XLSX Metadata locally, or on a server when management is allowed. Preview the mapping, confirm ambiguous matches, then commit. An import can be rolled back. Embedded Metadata and user annotations are kept. See [library management](doc/Rust_Library_Management.md#厂商-csv--xls--xlsx-资料导入).
-- Library management: add folders, repair moved or renamed files, batch annotations, backup and restore, integrity checks, and JSONL/CSV exchange. Removing records removes database rows and their annotations. It does not delete the source audio.
-- `AudioLibCli` for search, scanning, library management and JSON, table or CSV output. It can also control playback in a running desktop app.
-- Server mode: `audiolib-server` serves one library over `/api/v1/`. The client opens a validated read-only snapshot. Metadata and management writes go through HTTP bound to that library. See [Local and server mode](#local-and-server-mode).
-- English and Chinese desktop interface.
-- Desktop AI search, described in [AI search](#ai-search).
+- 最多 30 个独立搜索任务。上限可在 1 到 30 之间调整，默认 30；已保存的个人上限会保留。每个任务有自己的文件夹或资料库索引、筛选和列表状态。见[搜索任务](doc/Rust_Search_Tasks.md)。
+- 四种搜索范围：**主字段**（文件名和 Metadata）、**全部**（上述字段再加目录名）、**仅路径**（目录名和祖先目录）和**仅文件名**。仅路径需要准备好的目录索引。没有该索引时，全部范围改用主字段。FTS5 匹配至少两个字母的片段，中文文本会分词后索引。搜索文本最长 500 个字符。搜索性能**目标**是 **P95 latency <500ms for 1M+ records**。
+- 扫描 WAV/BWF、MP3、AIFF、FLAC、Ogg Vorbis 和 Ogg FLAC，并提取内嵌 Metadata，包括 BWF `bext`、iXML、INFO、ID3、XMP 和只读 Soundminer `SMED`。重新扫描会保留用户标注。源音频不会被修改。Opus 标签可以单独探测；默认不扫描 `.opus`，也不支持播放 Opus。见 [WAV Metadata](doc/Rust_Wav_Metadata.md)。
+- 播放使用流式解码、按设备采样率重采样、Waveform 与频谱视图，以及彼此独立的音高和速度试听。Windows 输出为 WASAPI，可选 ASIO。macOS arm64 客户端使用 CoreAudio。远端 Waveform 可以逐步显示，完整峰值就绪后再缩放。试听区最多可拖到默认高度的 2.5 倍。双击音高或速度控件可单独复位。
+- 在本地导入厂商 CSV、TSV、TXT、XLS 和 XLSX Metadata；服务器在允许管理时也可以导入。先预览映射并确认歧义匹配，再提交。导入可以回滚。内嵌 Metadata 和用户标注会保留。见[资料库管理](doc/Rust_Library_Management.md#厂商-csv--xls--xlsx-资料导入)。
+- 资料库管理：添加文件夹、修复被移动或改名的文件、批量标注、备份与恢复、完整性检查，以及 JSONL/CSV 交换。移除记录只删除数据库中的行和对应标注，不删除源音频。
+- `AudioLibCli` 用于搜索、扫描、资料库管理，以及 JSON、表格或 CSV 输出。它也可以控制正在运行的桌面端播放。
+- 服务器模式：`audiolib-server` 通过 `/api/v1/` 提供一个资料库。客户端打开经过校验的只读快照。Metadata 和管理写入使用绑定该资料库身份的 HTTP 请求。见[本地与服务器模式](#本地与服务器模式)。
+- 桌面界面支持中文和英文。
+- 桌面端 AI 智能搜索，见 [AI 智能搜索](#ai-智能搜索)。
 
-<a name="download--install"></a>
+<a name="下载与安装"></a>
 
-## Download and quick start
+## 下载与快速开始
 
-Installable builds are on [GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases). From 0.8.5, a release contains seven archives and a `.sha256` file for each (fourteen assets). Version 0.8.4 has six archives and twelve assets; 0.8.3 has three archives and six assets; releases through 0.8.2 have two archives and four assets. A tag ending in `-beta.N` or `-rc.N` is a pre-release. Stable and beta installs keep separate data directories.
+可安装的构建在 [GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases)。从 0.8.5 起，一次 Release 包含七个归档及各自的 `.sha256` 文件，共十四个资产。0.8.4 是六个归档、十二个资产；0.8.3 是三个归档、六个资产；0.8.2 及更早版本是两个归档、四个资产。以 `-beta.N` 或 `-rc.N` 结尾的标签是预发布版。正式版和 beta 使用各自的数据目录。
 
 > [!IMPORTANT]
-> Verify each archive against its `.sha256` file before extracting it. The macOS client is ad-hoc signed unless that release's notes name a Developer ID, and it is not Apple-notarized. Do not commit or print server tokens or provider API keys.
+> 解压前用对应的 `.sha256` 文件核对每个归档。macOS 客户端采用 ad-hoc 签名，除非该版本的发布说明写明了 Developer ID；它没有经过 Apple 公证。不要把服务器令牌或供应商 API Key 提交到仓库，也不要把它打印出来。
 
-| Package | Asset | Updates |
+| 程序包 | 文件 | 更新方式 |
 | --- | --- | --- |
-| Windows x64 desktop client | `AudioLibExplorer-<tag>-win-x64-portable.zip` | In-app prompt |
-| macOS arm64 desktop client | `AudioLibExplorer-<tag>-macos-arm64.zip` | Manual |
-| macOS arm64 server | `AudioLibServer-<tag>-macos-arm64.tar.gz` | Server admin page, after the 0.9 layout is installed |
-| Windows x64 server, from 0.8.5 | `AudioLibServer-<tag>-win-x64.zip` | Server admin page; the program directory must be writable |
-| Linux x64 server | `AudioLibServer-<tag>-linux-x64.tar.gz` | Server admin page, after the 0.9 layout is installed |
-| Docker linux/amd64 | `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` | Load a new image and recreate the container |
-| Docker linux/arm64 | `AudioLibServer-<tag>-docker-linux-arm64.tar.gz` | Load a new image and recreate the container |
+| Windows x64 桌面客户端 | `AudioLibExplorer-<tag>-win-x64-portable.zip` | 程序内提示 |
+| macOS arm64 桌面客户端 | `AudioLibExplorer-<tag>-macos-arm64.zip` | 手动 |
+| macOS arm64 服务端 | `AudioLibServer-<tag>-macos-arm64.tar.gz` | 已装好 0.9 布局后，用服务端管理页 |
+| Windows x64 服务端（0.8.5 起） | `AudioLibServer-<tag>-win-x64.zip` | 服务端管理页；程序目录必须可写 |
+| Linux x64 服务端 | `AudioLibServer-<tag>-linux-x64.tar.gz` | 已装好 0.9 布局后，用服务端管理页 |
+| Docker linux/amd64 | `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` | 导入新镜像并重建容器 |
+| Docker linux/arm64 | `AudioLibServer-<tag>-docker-linux-arm64.tar.gz` | 导入新镜像并重建容器 |
 
-There is no published standalone Linux arm64 server archive. That build is an input to the arm64 Docker image. The desktop updater does not replace the server, and the server updater does not replace the desktop app.
+没有单独发布的 Linux arm64 服务端归档。该构建是 arm64 Docker 镜像的输入。桌面端更新器不替换服务端，服务端更新器也不替换桌面端。
 
-### Windows client
+### Windows 客户端
 
-1. Download `AudioLibExplorer-<tag>-win-x64-portable.zip` and its `.sha256` file.
-2. Compare the archive with that file:
+1. 下载 `AudioLibExplorer-<tag>-win-x64-portable.zip` 及其 `.sha256` 文件。
+2. 用该文件核对归档：
 
    ```powershell
    Get-FileHash .\AudioLibExplorer-<tag>-win-x64-portable.zip -Algorithm SHA256
    ```
 
-3. Extract the ZIP and start `Start-AudioLibExplorer.cmd` or `AudioLibExplorer.exe`. No installer is required.
-4. Settings, logs, caches and libraries stay in `%LOCALAPPDATA%\AudioLibExplorer\v1`, outside the program folder. `AUDIOLIB_DATA_DIR` selects another directory. Keep that data when you replace the program files.
+3. 解压 ZIP，启动 `Start-AudioLibExplorer.cmd` 或 `AudioLibExplorer.exe`。不需要安装程序。
+4. 设置、日志、缓存和资料库位于程序目录之外的 `%LOCALAPPDATA%\AudioLibExplorer\v1`。`AUDIOLIB_DATA_DIR` 用来选择另一个目录。替换程序文件时保留这些数据。
 
-Day-to-day use of the portable build is covered in [PORTABLE_README.md](PORTABLE_README.md), currently written in Chinese.
+便携版的日常使用见 [PORTABLE_README.md](PORTABLE_README.md)，目前为中文。
 
-<a name="macos-client-apple-silicon"></a>
+### macOS 客户端
 
-### macOS client
+Mac 客户端是适用于 macOS 11 或更新版本的 Apple Silicon 应用 `AudioLib Explorer.app`。播放使用 CoreAudio。macOS 上没有 ASIO。
 
-The Mac client is an Apple Silicon `AudioLib Explorer.app` for macOS 11 or newer. Playback uses CoreAudio. ASIO is not available on macOS.
+核对 `AudioLibExplorer-<tag>-macos-arm64.zip.sha256`，解压 ZIP，再把 app 移到“应用程序”。替换应用包之前先退出。资料库和设置位于 `~/Library/Application Support/AudioLibExplorer/v1`；设置了 `AUDIOLIB_DATA_DIR` 时使用该目录。不要把资料库放进 app 包内。更新是手动的。首次打开时的确认是 macOS 对你选择信任的软件给出的提示。详见 [MACOS_README.md](MACOS_README.md)。
 
-Verify `AudioLibExplorer-<tag>-macos-arm64.zip.sha256`, extract the ZIP, and move the app into Applications. Quit the app before replacing the bundle. Libraries and settings stay in `~/Library/Application Support/AudioLibExplorer/v1`, or in `AUDIOLIB_DATA_DIR` when that variable is set. Do not put a library inside the app bundle. Updates are manual. The first-open confirmation is macOS's own prompt for software you choose to trust. Details: [MACOS_README.md](MACOS_README.md).
+<a name="使用"></a>
+<a name="桌面客户端与-cli"></a>
 
-<a name="server-deployment"></a>
-<a name="windows-server"></a>
-<a name="macos-server"></a>
-<a name="linux-server-and-docker"></a>
-<a name="upgrade-health-and-a-client"></a>
-<a name="managing-sound-libraries-on-the-server"></a>
+## 本地与服务器模式
 
-## Local and server mode
+### 本地资料库
 
-<a name="usage"></a>
-<a name="desktop-client-and-cli"></a>
+本地资料库在这台电脑上扫描和搜索。从桌面端添加文件夹，或使用 `AudioLibCli`。增量扫描读取新增和已更改的文件。一次干净完成的全量扫描还可以把已经不在的文件标为缺失。扫描中的单个文件错误会留在该次扫描上，并使这次全量扫描不再把其他文件标为缺失。
 
-### Local library
-
-A local library is scanned and searched on that computer. Add a folder from the desktop app, or use `AudioLibCli`. Incremental scans read new and changed files. A clean full scan can also mark files that are gone. A per-file scan error is kept on that scan and stops that full scan from marking other files missing.
-
-Packaged commands:
+安装包中的命令：
 
 ```powershell
 AudioLibCli scan "D:\Sounds" --full
@@ -100,20 +91,24 @@ AudioLibCli search "explosion" --format table
 AudioLibCli stats
 ```
 
-From a source checkout, the same commands run through `cargo run -p audiolib-cli --`. Creating a library is explicit: `AudioLibCli db create` or `db import`. Ordinary commands do not create a missing library.
+在源码目录中，同样的命令通过 `cargo run -p audiolib-cli --` 运行。创建资料库必须显式执行：`AudioLibCli db create` 或 `db import`。普通命令不会创建缺失的资料库。
 
-User annotations, favorites and playback history for a local library stay in that database. Backup, restore, relinking and import are documented in [library management](doc/Rust_Library_Management.md). Restore and maintenance validate an owned copy and keep a rollback backup.
+本地资料库的用户标注、收藏和播放历史保存在该数据库中。备份、恢复、重新链接和导入见[资料库管理](doc/Rust_Library_Management.md)。恢复和维护会校验自有副本并保留回滚备份。
 
-### Server
+<a name="服务端"></a>
+<a name="linux-服务docker升级与健康检查"></a>
+<a name="服务端音效库管理"></a>
 
-`audiolib-server` publishes one existing library. It does not discover a default configuration and it does not create a library. Start it with `--config <path>` or `AUDIOLIB_SERVER_CONFIG`. There is no port flag; the listen address is `bind` in the config file. Create the database first, for example with `AudioLibCli db create`.
+### 服务器
+
+`audiolib-server` 发布一个已经存在的资料库。它不会发现默认配置，也不会创建资料库。用 `--config <路径>` 或 `AUDIOLIB_SERVER_CONFIG` 启动。没有端口参数；监听地址是配置文件中的 `bind`。先创建数据库，例如使用 `AudioLibCli db create`。
 
 > [!WARNING]
-> On the public internet, place the server behind a TLS reverse proxy, require a token, and do not publish `/admin`. A token is at least 32 random visible ASCII characters. It is read from the environment, not written into the config file. `auth_mode = "external"` can omit the token for a LAN-direct client. Requests that arrive through a proxy need the token.
+> 面向公网时，把服务端放在带 TLS 的反向代理之后，要求提供令牌，并且不要公开 `/admin`。令牌至少为 32 个随机的可见 ASCII 字符。它从环境变量读取，不写入配置文件。`auth_mode = "external"` 时，局域网直连的客户端可以不填令牌。经过代理到达的请求需要令牌。
 
-The long install, upgrade and root-management steps are in [Server deployment](doc/Server_Deployment.md), [Managing sound libraries on the server](doc/Server_Library_Guide.md), [server/README.md](server/README.md) and [server/deploy/README.md](server/deploy/README.md). Windows-specific packaging is in [Windows server release](doc/Rust_Windows_Server_Release.md). Linux packages and the offline Docker images are in [Linux and Docker delivery](doc/Rust_Linux_Docker_Release.md).
+完整的安装、升级和根目录管理步骤见[服务端部署](doc/Server_Deployment.md)、[服务端音效库管理](doc/Server_Library_Guide.md)、[server/README.zh-CN.md](server/README.zh-CN.md) 和 [server/deploy/README.md](server/deploy/README.md)。Windows 打包见 [Windows 服务端发布](doc/Rust_Windows_Server_Release.md)。Linux 包和离线 Docker 镜像见 [Linux 与 Docker 交付](doc/Rust_Linux_Docker_Release.md)。
 
-**Windows.** Verify `AudioLibServer-<tag>-win-x64.zip`, then extract it to a writable program directory. The ZIP does not register a Windows service. Create the config directory yourself and copy the example only when that config does not already exist:
+**Windows。** 核对 `AudioLibServer-<tag>-win-x64.zip`，再解压到可写的程序目录。这个 ZIP 不会注册 Windows 服务。配置目录需要自己创建；只有配置尚不存在时才复制示例：
 
 ```powershell
 $serverData = Join-Path $env:ProgramData 'AudioLibServer'
@@ -125,100 +120,98 @@ if (!(Test-Path -LiteralPath $serverConfig)) {
 .\audiolib-server.exe --config $serverConfig
 ```
 
-Run the copy from the extracted package. Before the first start, replace the example `library_db` and each `[[roots]].server_path` with the existing database and the real audio directories. TOML single quotes keep Windows backslashes literal, for example `library_db = 'C:\ProgramData\AudioLibServer\library.db'`. Keep the existing config and database when upgrading. The desktop updater does not update this program.
+在解压后的程序包目录中执行复制。首次启动前，把示例里的 `library_db` 和每个 `[[roots]].server_path` 换成已有数据库和真实音频目录。TOML 单引号会按字面保留 Windows 反斜杠，例如 `library_db = 'C:\ProgramData\AudioLibServer\library.db'`。升级时保留现有配置和数据库。桌面端更新器不会更新这个程序。
 
-**macOS and Linux.** Verify the archive, then extract it. `audiolib-server` and `audiolib-migrate` are at the archive root. The macOS launchd example is [`server/deploy/launchd/io.github.audiolib.server.plist.example`](server/deploy/launchd/io.github.audiolib.server.plist.example): `AUDIOLIB_LAUNCHD_LABEL` must equal `Label`, and `KeepAlive` must stay enabled, or an admin-page update will not start the process again. The Linux systemd example is [`server/deploy/systemd/audiolib-server.service`](server/deploy/systemd/audiolib-server.service). Its sandbox writes under `/var/lib/audiolib` and reads `/srv/audiolib/music`; another path needs an override. If the library is on a removable or network volume, grant that access to `audiolib-server`, or to a launcher you build from [server/launcher](server/launcher/README.md).
+**macOS 与 Linux。** 核对归档后解压。`audiolib-server` 和 `audiolib-migrate` 位于归档根目录。macOS 的 launchd 示例是 [`server/deploy/launchd/io.github.audiolib.server.plist.example`](server/deploy/launchd/io.github.audiolib.server.plist.example)：`AUDIOLIB_LAUNCHD_LABEL` 必须与 `Label` 相同，并且 `KeepAlive` 必须保持启用，否则管理页更新之后进程不会再次启动。Linux 的 systemd 示例是 [`server/deploy/systemd/audiolib-server.service`](server/deploy/systemd/audiolib-server.service)。它的沙箱可写 `/var/lib/audiolib`，并以只读方式访问 `/srv/audiolib/music`；其他路径需要 override。资料库若在可移动磁盘或网络卷上，把访问权限授给 `audiolib-server`，或授给按 [server/launcher](server/launcher/README.md) 自行构建的 launcher。
 
-**Docker.** Verify the image archive, `docker load` it, and recreate the container from [`server/deploy/docker/docker-compose.release.yml`](server/deploy/docker/docker-compose.release.yml). The data volume must already contain `/data/library.db`. The image config uses `auth_mode = "all"`, `trust_lan_peers = false` and `manage_mode = "off"`, so set `AUDIOLIB_SERVER_TOKEN` and mount your own config when clients should scan. In-container binary updates are disabled. Replace the image and keep the data volume.
+**Docker。** 核对镜像归档，执行 `docker load`，再按 [`server/deploy/docker/docker-compose.release.yml`](server/deploy/docker/docker-compose.release.yml) 重建容器。数据卷中必须已经有 `/data/library.db`。镜像配置使用 `auth_mode = "all"`、`trust_lan_peers = false` 和 `manage_mode = "off"`，因此要设置 `AUDIOLIB_SERVER_TOKEN`；若希望客户端扫描，请挂载自己的配置。容器内的二进制更新已关闭。替换镜像并保留数据卷。
 
-**Preview transcoding.** `GET /audio/{id}/preview?codec=flac` needs a separate ffmpeg and an absolute `ffmpeg_path`. The example default is the macOS Homebrew path. Without ffmpeg, that endpoint returns 503 `TRANSCODER_UNAVAILABLE`. Direct playback of the supported formats uses the bundled decoder and does not need ffmpeg.
+**预览转码。** `GET /audio/{id}/preview?codec=flac` 需要另行安装 ffmpeg，并设置绝对路径 `ffmpeg_path`。示例中的默认值是 macOS Homebrew 路径。没有 ffmpeg 时，该端点返回 503 `TRANSCODER_UNAVAILABLE`。受支持格式的直接播放使用内置解码器，不需要 ffmpeg。
 
-**Health.** `GET /api/v1/health` needs no token and returns HTTP 200 while the process is serving. `"status":"ok"` means the library is open. `"starting"` means other routes return 503 `UNAVAILABLE`. `"error"` means open failed and the process keeps retrying. A request to bare `/health` is 404.
+**健康检查。** 进程在提供服务时，`GET /api/v1/health` 不需要令牌，并返回 HTTP 200。`"status":"ok"` 表示资料库已打开。`"starting"` 时其他接口返回 503 `UNAVAILABLE`。`"error"` 表示打开失败，进程会继续重试。请求裸路径 `/health` 会得到 404。
 
 ```sh
 curl -fsS "http://<server-host>:<port>/api/v1/health"
 ```
 
-**Client.** In the desktop app open **Manage sound library** (Ctrl+D). Add `http://<server-host>:<port>` or `https://audiolib.example.com`, test the connection, then sync. Search uses the snapshot. The client's local working library is a different database and is left unchanged. Embedded covers are requested separately and are not stored in the snapshot. Playback history stays on each client. Windows stores the server token with DPAPI. Secret handling is documented in [Remote mode](doc/Rust_Remote_Mode.md).
+**客户端。** 在桌面端打开**音效库管理**（Ctrl+D）。添加 `http://<server-host>:<port>` 或 `https://audiolib.example.com`，测试连接，然后同步。搜索使用快照。客户端自己的本地工作库是另一个数据库，不会被改动。内嵌封面单独请求，不写入快照。播放历史留在每个客户端上。Windows 用 DPAPI 保存服务器令牌。凭据处理见[远程模式](doc/Rust_Remote_Mode.md)。
 
-**Libraries on the server.** Add a root in `[[roots]]`, on the LAN admin page, or from the client when `manage_mode` allows it. Removing a root deletes indexed records and leaves the audio files in place. Clients see new rows after the snapshot sync.
+**服务器上的资料库。** 根目录可以写在 `[[roots]]` 中，也可以在局域网管理页添加，或在 `manage_mode` 允许时从客户端添加。删除根目录会删除已索引的记录，磁盘上的音频文件保留。客户端在快照同步之后看到新记录。
 
-**Upgrades.** Drain scans and requested Metadata writes before stopping the process. Keep the config, library, SQLite sidecars, tokens and audio directories. Native Windows, macOS arm64 and Linux x64 servers can update from the admin page once `audiolib-migrate` is already beside `audiolib-server`. The first move from a pre-0.9 package is a manual extract. Ordinary local writers stay on schema 8. Schema 9 is an explicit migration:
+**升级。** 停止进程前，先排空扫描和已请求的 Metadata 写入。保留配置、资料库、SQLite 附属文件、令牌和音频目录。原生 Windows、macOS arm64 和 Linux x64 服务端在 `audiolib-migrate` 已经与 `audiolib-server` 放在一起之后，可以从管理页更新。从 0.9 之前的包第一次换上该布局时，需要手动解压。普通本地写入保持 schema 8。schema 9 是显式迁移：
 
 ```sh
 audiolib-migrate status --db /path/to/library.db
 audiolib-migrate start --db /path/to/library.db
 ```
 
-The tool keeps `audiolib-rollback-mig9-*.db` beside the library. Replacing the binary does not downgrade schema 9. Client snapshots can read validated schemas 3 through 9. The first successful extended-source write enables `audio_sources:1` and the matching `-af1` format; older clients need to be upgraded before that write. See the [compatibility contract](doc/api/Library_Migration_Compatibility.md) and the [compatibility catalog](crates/audiolib-core/src/compatibility.rs).
+工具会在资料库旁边保留 `audiolib-rollback-mig9-*.db`。只替换二进制不能把 schema 9 降回去。客户端快照可以读取经过校验的 schema 3 到 9。首次成功写入扩展来源时，会启用 `audio_sources:1` 和对应的 `-af1` 格式；进行该写入之前需要先升级旧客户端。见[兼容契约](doc/api/Library_Migration_Compatibility.md)和[兼容目录](crates/audiolib-core/src/compatibility.rs)。
 
-<a name="ai-智能搜索"></a>
+## AI 智能搜索
 
-## AI search
+桌面端 AI 智能搜索随 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0) 发布。该版本最多保留 5 个已核验标签。当前源码最多保留 6 条主声音查询。允许分层且这些分层有已核验命中时，主声音和分层查询合计停在 8 条，主声音查询本身仍停在 6 条。颜色以及 M／L 标识用来区分主声音和分层。**查询全部**打开当前这组已核验结果。自动搜索仍在 3 个任务以内。
 
-Desktop AI search shipped in [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0). That release kept at most five verified tags. The current source keeps at most six main-sound queries. When layered material is allowed and those layers have verified hits, main and layer queries together stop at eight, and main queries still stop at six. Color and the M/L markers distinguish main sounds from layers. **Search all** opens the current verified set. Automatic search stays within three tasks.
+搜索界面在桌面端。`AudioLibCli` 没有交互式 AI 搜索。只有明确启用时，服务端才会转发供应商请求。转发默认关闭，需要已认证的音库服务器，以及上游协议和 Base URL 的允许列表。供应商密钥只随这一次请求发送，不保存在服务器上。行为、可编辑 Skill 和供应商设置见 [AI 智能搜索](doc/Rust_AI_Search.md)。[研究与设计](doc/AI_Keyword_Search_Design.md) 保留了应用尚未交付的概念。该说明中的 SVG 线框不是应用截图。
 
-The search UI is in the desktop app. `AudioLibCli` has no interactive AI search. The server can relay a provider request only when that relay is explicitly enabled. It is off by default and needs an authenticated library server plus an allowlist of upstream protocol and base URL. The provider key is sent with that single request and is not stored on the server. Behavior, editable skills and provider settings are specified in [AI search](doc/Rust_AI_Search.md). [Research and design](doc/AI_Keyword_Search_Design.md) keeps concepts that the app does not ship. SVG wireframes in that note are not application screenshots.
+在桌面搜索条打开 AI，用 1–500 个字符描述声音。**生成标签**（英文界面为 **Get tags**）向离线词表或已配置的模型请求纯文本关键词，再按当前目录、搜索范围和筛选检索。当前源码最多核验 12 条原始候选。保留下来的每条查询是 1 个或 2 个英文词，空格表示 AND。能核验出单个词时，把它放在第一位。点击标签正文会在当前任务中搜索。标签上的 **+** 用相同目录、范围和筛选新建一个任务，不再请求模型。
 
-Turn AI on in the desktop search bar and describe the sound in 1–500 characters. **Get tags** (Chinese UI: **生成标签**) asks the offline lexicon, or a configured model, for plain-text keywords, then searches the current folder, scope and filters. The current source verifies at most twelve raw candidates. Each kept query is one or two English words, and a space means AND. A verified single word is placed first when one exists. Clicking the tag text searches the current task. The tag **+** opens one new task with the same folder, scope and filters and does not call the model again.
+**允许分层**默认勾选。它允许模型考虑冲击、低频或碎片这类独立素材层。只有这些分层有已核验命中时，结果才从 6 条扩展到 8 条。取消勾选后只请求主声音。**查询全部**为每个已核验标签各建一个任务，无分层最多 6 个，有分层总计最多 8 个；任务名额不足时整批拒绝。**自动搜索**默认关闭。开启后会打开 1–3 个任务，默认 3 个。
 
-**Allow layers** starts checked. It lets the model consider independent layers such as impact, bass or debris. The result grows from six to eight only when those layers have verified hits. Clear it to ask only for the main sound. **Search all** opens one task per verified tag, at most six without layers or eight in total with layers, and rejects the whole batch when too few task slots remain. **Auto-search** starts off. When enabled, it opens 1–3 tasks and defaults to 3.
+离线使用不需要账号、网络或 API Key。内置词表版本为 `1.0.0-UCS8.2.1`：431 条关键词、753 条 UCS 8.2.1 子类和 19 个场景配方。它按这些已存储的条目排序，不是通用语言模型。在**设置 → AI智能搜索…**（英文界面为 **Settings → AI Search…**）中选择**本地词表（离线）**。
 
-Offline use needs no account, network or API key. The built-in lexicon is version `1.0.0-UCS8.2.1`: 431 keywords, 753 UCS 8.2.1 subcategories and 19 scene recipes. It ranks those stored entries. It is not a general language model. Choose **Local reference (offline)** in **Settings → AI Search…** (Chinese UI: **设置 → AI智能搜索…**).
+云端模型是可选的。需要自己提供 HTTPS 地址、API Key 和模型 ID。保存配置前可以获取模型列表。协议包括：OpenAI 兼容 Chat、OpenAI Responses、OpenAI 官方、Anthropic Messages、Gemini、Jev TypeSafe、OpenCode Go、DeepSeek 和 Magpie。HTTP 只允许显式的 loopback 地址。Magpie 还可以使用明确配置的私网 IP 网关。Windows 用当前用户的 DPAPI 保存 AI 密钥。macOS 和 Linux 只在本次会话保留该密钥。应用不设置应用内的每月请求上限，也不销售订阅。供应商费用由供应商收取。
 
-A cloud model is optional. You supply an HTTPS base URL, an API key and a model id. The model list can be fetched before the profile is saved. Protocols: OpenAI-compatible Chat, OpenAI Responses, OpenAI Official, Anthropic Messages, Gemini, Jev TypeSafe, OpenCode Go, DeepSeek and Magpie. HTTP is allowed for an explicit loopback address. Magpie may also use an explicitly configured private-IP gateway. Windows stores the AI key with the current user's DPAPI. macOS and Linux keep that key for the session. The application does not apply an in-app monthly request limit or sell a subscription. Provider billing stays with the provider.
+可选的自定义 Skill 是给云端模型的文本说明。应用不会执行这些文件中的脚本，不会打开其中的链接，也不会从中加载任意路径。Jev 只在有限的本地候选中选择，也可以回答不确定。它的接受阈值是应用策略，尚未用音效库校准。
 
-Optional custom skills are text instructions for a cloud model. The app does not run scripts, open links or load arbitrary paths from those files. Jev selects among a bounded local candidate list and may answer that it is uncertain. Its acceptance thresholds are application policy and have not been calibrated on a sound library.
+请求发送的是描述、所选提示词和有限的参考摘录。除非写进描述或提示词，否则不发送音频、文件路径或当前资料库的 Metadata。模型不能提交 SQL，也不能写入资料库。
 
-The request sends the description, the selected prompt and a bounded reference excerpt. Audio, file paths and the open library's Metadata stay out unless you type them into the description or prompt. The model cannot send SQL or write the library.
+当前应用不包含音频 embedding、应用内购买订阅或 OAuth、供应商账单同步、跨平台持久密钥库、为每一素材层自动建任务，以及根据检索结果自动改写查询。
 
-The current app does not include audio embeddings, in-app subscription purchase or OAuth, provider billing sync, a cross-platform persistent key store, a task for every layer, or a loop that rewrites queries from search results.
+## 文档
 
-## Documentation
+[文档索引](doc/INDEX.md)区分当前指南和历史设计说明。`doc/` 下的许多指南目前是中文，包括[架构](doc/Rust_Architecture.md)、[验证记录](doc/Rust_Validation.md)和[版本规范](doc/Rust_Versioning.md)。贡献者规则见 [AGENTS.md](AGENTS.md)。
 
-The [documentation index](doc/INDEX.md) separates current guides from historical design notes. Many guides under `doc/` are written in Chinese, including [architecture](doc/Rust_Architecture.md), [validation notes](doc/Rust_Validation.md) and the [versioning policy](doc/Rust_Versioning.md). Contributor rules are in [AGENTS.md](AGENTS.md).
-
-| Topic | Document |
+| 主题 | 文档 |
 | --- | --- |
-| Portable Windows use | [PORTABLE_README.md](PORTABLE_README.md) |
-| Mac client | [MACOS_README.md](MACOS_README.md) |
-| AI search | [doc/Rust_AI_Search.md](doc/Rust_AI_Search.md) |
-| Local libraries | [doc/Rust_Library_Management.md](doc/Rust_Library_Management.md) |
-| Server mode | [doc/Rust_Remote_Mode.md](doc/Rust_Remote_Mode.md) |
-| Server install | [doc/Server_Deployment.md](doc/Server_Deployment.md) |
+| Windows 便携版使用 | [PORTABLE_README.md](PORTABLE_README.md) |
+| Mac 客户端 | [MACOS_README.md](MACOS_README.md) |
+| AI 智能搜索 | [doc/Rust_AI_Search.md](doc/Rust_AI_Search.md) |
+| 本地资料库 | [doc/Rust_Library_Management.md](doc/Rust_Library_Management.md) |
+| 服务器模式 | [doc/Rust_Remote_Mode.md](doc/Rust_Remote_Mode.md) |
+| 服务端安装 | [doc/Server_Deployment.md](doc/Server_Deployment.md) |
 | HTTP API | [doc/api/README.md](doc/api/README.md) |
-| Release history | [doc/Rust_Release_Notes.md](doc/Rust_Release_Notes.md) |
+| 发布历史 | [doc/Rust_Release_Notes.md](doc/Rust_Release_Notes.md) |
 
-<a name="versioning"></a>
-<a name="releases-and-ci"></a>
+<a name="版本规范"></a>
+<a name="发布与-ci"></a>
 
-### Versions and releases
+### 版本与发布
 
-The program version, the HTTP API (`/api/v1/`) and the database schema are independent. Ordinary local writers use schema 8. Release tags are `vX.Y.Z`, `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N`, and the numeric version matches `Cargo.toml`. A suffixed tag is published as a pre-release. The release title is `AudioLib Explorer <tag>`. The policy is [doc/Rust_Versioning.md](doc/Rust_Versioning.md).
+程序版本、HTTP API（`/api/v1/`）和数据库 schema 彼此独立。普通本地写入使用 schema 8。发布标签为 `vX.Y.Z`、`vX.Y.Z-beta.N` 或 `vX.Y.Z-rc.N`，数字版本与 `Cargo.toml` 一致。带后缀的标签以预发布版发布。Release 标题为 `AudioLib Explorer <tag>`。规则见 [doc/Rust_Versioning.md](doc/Rust_Versioning.md)。
 
-The Windows desktop client and the supported native servers check GitHub Releases after a normal start. Confirm the prompt before an update is downloaded and applied. macOS desktop updates are manual. Docker updates replace the image. Channels, checks and the files that stay outside the payload are in [automatic updates](doc/Rust_Auto_Update.md).
+Windows 桌面端和支持的原生服务端在正常启动后检查 GitHub Releases。确认提示之后才会下载并应用更新。macOS 桌面端更新是手动的。Docker 更新通过替换镜像完成。渠道、检查以及留在更新包之外的文件见[自动更新](doc/Rust_Auto_Update.md)。
 
-GitHub Actions on this repository runs a format check. Functional tests run locally. Publishing a release is a separate, explicit operation and is not part of opening this page.
+本仓库的 GitHub Actions 运行格式检查。功能测试在本地运行。发布 Release 是单独的明确操作，不属于打开本页的一部分。
 
-<a name="build"></a>
+<a name="构建"></a>
 
-## Building from source
+## 从源码构建
 
-Application users can install a Release package and skip this section. The pinned Rust version is 1.97.1. Windows desktop builds use the MSVC toolchain. An ASIO build uses the SDK prepared by `tools/prepare-asio.ps1`; the release scripts do not download an unpinned SDK. Pass `-WithoutAsio` only when that build should omit ASIO.
+安装 Release 包的用户可以跳过本节。固定的 Rust 版本是 1.97.1。Windows 桌面端构建使用 MSVC 工具链。ASIO 构建使用 `tools/prepare-asio.ps1` 准备的 SDK；发布脚本不会下载未固定的 SDK。只有该构建应当省略 ASIO 时，才传入 `-WithoutAsio`。
 
 ```powershell
 ./tools/build-release.ps1
 ./tools/package-portable.ps1 -SkipBuild
 ```
 
-The server does not need a playback backend. Because this repository's Cargo config defaults to a Windows target, pass the host target explicitly:
+服务端不需要播放后端。本仓库的 Cargo 配置默认目标是 Windows，因此需要显式传入主机目标：
 
 ```sh
 cargo build --release -p audiolib-server --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
 ```
 
-Select checks for the code you changed, as described in [AGENTS.md](AGENTS.md#development-checks-by-change-scope). Mac packaging is documented in [MACOS_README.md](MACOS_README.md). Release delivery, when someone explicitly requests it, is documented in [the release pipeline](doc/Rust_Release_Pipeline.md) and [build cache maintenance](doc/Rust_Build_Cache.md). A documentation change is reviewed by reading the diff and running `git diff --check`.
+按所改代码选择检查，见 [AGENTS.md](AGENTS.md#development-checks-by-change-scope)。Mac 打包见 [MACOS_README.md](MACOS_README.md)。只有有人明确要求交付时，才按[发布管线](doc/Rust_Release_Pipeline.md)和[编译缓存维护](doc/Rust_Build_Cache.md)进行。文档改动通过阅读差异并运行 `git diff --check` 来检查。
 
-## License
+## 许可证
 
-AudioLib Explorer is free software licensed GPL-3.0-only, the GNU General Public License, version 3 only. See [LICENSE](LICENSE). Third-party components are listed in [THIRD_PARTY.md](THIRD_PARTY.md).
+AudioLib Explorer 是自由软件，许可证标识为 GPL-3.0-only，即 GNU 通用公共许可证第 3 版。见 [LICENSE](LICENSE)。第三方组件见 [THIRD_PARTY.md](THIRD_PARTY.md)。
