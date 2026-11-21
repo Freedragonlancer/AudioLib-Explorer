@@ -1,9 +1,9 @@
 // app/audiolib-desktop/src/source_manager.rs
 //! The unified 「音效库管理」 window (design `server-mgmt-gui.md` A1–B2): a
 //! source list (the local library plus every saved server profile) and, per server,
-//! the pages 连接 (connection form, token, transcode, test), 服务器音效库
+//! the pages 连接设置 (connection form, token, transcode, test), 目录与扫描
 //! (roots, capabilities, scan start/pause/resume/cancel and record removal when
-//! `can_manage`, otherwise read-only) and 缓存与导出 (the cached snapshot; for the
+//! `can_manage`, otherwise read-only), 数据库与后台 (server settings and jobs) and 缓存与导出 (the cached snapshot; for the
 //! active server the library management content working on that snapshot).
 //!
 //! Editing a profile never switches the data source: only 「切换到此数据源」 does, through
@@ -27,8 +27,8 @@ use audiolib_core::{ScanSession, ScanState};
 use audiolib_remote::{
     CacheState, Capabilities, ConnectionReport, ListWaveformStatus, ManageMode, ProfileEdit,
     RemoteCache, RemoteClient, RemoteError, RemoteRoot, RemoteSecrets, RootScan, RootState,
-    ScanControl, ScanMode, ScanRequest, ServerScan, ServerSettings, edit_transcode,
-    manage_error_text, remove_server_profile, root_status_text, save_profile_edit,
+    ScanControl, ScanMode, ScanRequest, ServerLibrarySetting, ServerScan, ServerSettings,
+    edit_transcode, manage_error_text, remove_server_profile, root_status_text, save_profile_edit,
     save_profile_secrets, test_connection, use_external_address,
 };
 use slint::{Model, ModelRc, SharedString, VecModel};
@@ -46,6 +46,7 @@ const HISTORY_LIMIT: usize = 20;
 const PAGE_CONNECTION: i32 = 0;
 const PAGE_LIBRARY: i32 = 1;
 const PAGE_CACHE: i32 = 2;
+const PAGE_DATABASE: i32 = 3;
 /// `sm-open-requested` focus values.
 const FOCUS_LIBRARY: i32 = 1;
 const FOCUS_HISTORY: i32 = 2;
@@ -247,6 +248,14 @@ impl Controller {
         ui.on_sm_revert_requested(move || c.reload_selection());
         let c = self.clone();
         ui.on_sm_page_selected(move |page| c.show_page(page));
+        let c = self.clone();
+        ui.on_sm_legacy_setting(move |value| {
+            c.change_database_setting(ServerLibrarySetting::LegacySnapshot, value)
+        });
+        let c = self.clone();
+        ui.on_sm_stat_setting(move |value| {
+            c.change_database_setting(ServerLibrarySetting::PauseWaveformStats, value)
+        });
         let c = self.clone();
         ui.on_sm_open_cache_requested(move || c.open_selected_cache());
         let c = self.clone();
@@ -485,11 +494,8 @@ impl Controller {
             // Reattach to the selected server's current scan and refresh roots/history
             // using the generation established by the successful provider swap.
             PAGE_LIBRARY => self.load_server_library(ui),
-            // 缓存与导出 also hosts the 「波形缓存」 block, read with the library page.
-            PAGE_CACHE => {
-                self.publish_cache_info(ui);
-                self.load_server_library(ui);
-            }
+            PAGE_DATABASE => self.database_page(ui),
+            PAGE_CACHE => self.publish_cache_info(ui),
             _ => {}
         }
     }
@@ -654,12 +660,127 @@ impl Controller {
         ui.set_sm_fs_busy(false);
         match page {
             PAGE_LIBRARY => self.load_server_library(&ui),
-            PAGE_CACHE => {
-                self.publish_cache_info(&ui);
-                self.load_server_library(&ui);
-            }
+            PAGE_DATABASE => self.database_page(&ui),
+            PAGE_CACHE => self.publish_cache_info(&ui),
             _ => {}
         }
+    }
+
+    fn database_page(self: &Arc<Self>, ui: &AppWindow) {
+        ui.set_sm_wave_supported(false);
+        ui.set_sm_db_can_change(false);
+        ui.set_sm_db_legacy_supported(false);
+        ui.set_sm_db_stat_supported(false);
+        ui.set_sm_db_busy(false);
+        ui.set_sm_db_message("".into());
+        if !ui.get_sm_active() || !self.remote_read_only() {
+            return;
+        }
+        let Some(profile) = self.selected_profile() else {
+            return;
+        };
+        let token = self.secrets().token_for(&profile.id).to_owned();
+        match RemoteClient::new(&profile.server_url, &token) {
+            Ok(client) => self.request_database_settings(ui, client, None),
+            Err(error) => {
+                ui.set_sm_db_message(error.localized(self.chinese.load(Ordering::Acquire)).into())
+            }
+        }
+        self.load_server_library(ui);
+    }
+
+    fn change_database_setting(self: &Arc<Self>, setting: ServerLibrarySetting, value: i32) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        if !ui.get_library_visible()
+            || ui.get_sm_page() != PAGE_DATABASE
+            || !ui.get_sm_db_can_change()
+            || ui.get_sm_db_busy()
+        {
+            return;
+        }
+        let value = match value {
+            -1 => None,
+            0 => Some(false),
+            1 => Some(true),
+            _ => return,
+        };
+        match self.active_manage_client() {
+            Ok((_, client, _)) => {
+                self.request_database_settings(&ui, client, Some((setting, value)))
+            }
+            Err(message) => {
+                ui.set_sm_db_can_change(false);
+                ui.set_sm_db_legacy_supported(false);
+                ui.set_sm_db_stat_supported(false);
+                ui.set_sm_db_message(message.into());
+            }
+        }
+    }
+
+    fn request_database_settings(
+        self: &Arc<Self>,
+        ui: &AppWindow,
+        client: RemoteClient,
+        change: Option<(ServerLibrarySetting, Option<bool>)>,
+    ) {
+        ui.set_sm_db_busy(true);
+        ui.set_sm_db_message("".into());
+        let generation = self.remote.lock().unwrap().manager.library_generation;
+        let edited_profile = change.and_then(|_| self.selected_profile().map(|profile| profile.id));
+        let c = self.clone();
+        std::thread::spawn(move || {
+            let result = match change {
+                Some((setting, value)) => client.set_library_setting(setting, value),
+                None => client.library_settings(),
+            };
+            let handle = c.ui.clone();
+            post(handle, move |ui| {
+                if !c.library_current(generation) {
+                    // The same page may have reopened and read before this write committed.
+                    if edited_profile.is_some()
+                        && ui.get_library_visible()
+                        && ui.get_sm_page() == PAGE_DATABASE
+                        && c.selected_profile().map(|profile| profile.id) == edited_profile
+                    {
+                        c.show_page(PAGE_DATABASE);
+                    }
+                    return;
+                }
+                ui.set_sm_db_busy(false);
+                match result {
+                    Ok(settings) => {
+                        let legacy = settings.legacy_snapshot_enabled;
+                        let stat = settings.list_waveform_pause_stats_on_playback;
+                        ui.set_sm_db_legacy_supported(legacy.is_some());
+                        ui.set_sm_db_stat_supported(stat.is_some());
+                        ui.set_sm_db_legacy(legacy.unwrap_or_default());
+                        ui.set_sm_db_stat(stat.unwrap_or_default());
+                        ui.set_sm_db_can_change(
+                            settings.can_change && c.require_remote_write_identity().is_ok(),
+                        );
+                        if legacy.is_none() && stat.is_none() {
+                            ui.set_sm_db_message(c.localized(
+                                "当前服务端版本未提供这些设置。",
+                                "This server version does not expose these settings.",
+                            ));
+                        } else if !ui.get_sm_db_can_change() {
+                            ui.set_sm_db_message(c.localized(
+                                "当前连接只能查看设置。",
+                                "Settings are read-only for this connection.",
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        ui.set_sm_db_can_change(false);
+                        ui.set_sm_db_legacy_supported(false);
+                        ui.set_sm_db_stat_supported(false);
+                        ui.set_sm_db_message(
+                            error.localized(c.chinese.load(Ordering::Acquire)).into(),
+                        );
+                    }
+                }
+            });
+        });
     }
 
     /// Clear root dialogs invalidated by the worker's provider swap. The manager
@@ -712,8 +833,12 @@ impl Controller {
         }
         if !deferred {
             self.publish_manage_busy(ui);
-            if ui.get_library_visible() && matches!(ui.get_sm_page(), PAGE_LIBRARY | PAGE_CACHE) {
-                self.load_server_library(ui);
+            if ui.get_library_visible() {
+                match ui.get_sm_page() {
+                    PAGE_LIBRARY => self.load_server_library(ui),
+                    PAGE_DATABASE => self.database_page(ui),
+                    _ => {}
+                }
             }
         }
     }

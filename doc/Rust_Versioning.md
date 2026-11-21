@@ -1,8 +1,10 @@
 # AudioLib Explorer 版本规范
 
-当前正式版为 **[1.1.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.1.0)**，于 2026-11-20 12:25:23 UTC（北京时间 20:25:23）发布。最终 main/tag 为 `790e8dffe943c46eeddcb74539299b34d7c0280e`。API v1、本地写 schema 8、服务端写 schema 9、快照 3..=9。发布、缓存与安装核验见 [1.1.0 发布记录](Rust_Release_1.1.0.md)。
+当前正式版为 **[1.1.1](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.1.1)**，于 2026-11-20 18:09:43 UTC（北京时间 2026-11-21 02:09:43）发布。最终 main/tag 为 `8d2a74ef22a3437071780181f92dd9dcbe4f3553`。API v1、本地写 schema 8、服务端写 schema 9、快照 3..=9。发布、缓存与安装核验见 [1.1.1 发布记录](Rust_Release_1.1.1.md)。
 
-上一正式版为 **[1.0.9](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.9)**，于 2026-11-19 22:33:03 UTC（北京时间 2026-11-20 06:33:03）发布。最终 main/tag 为 `e5db8deacbd17a6d7d0e755f85ae4ecbc4ad056e`。API v1、本地写 schema 8、服务端写 schema 9、快照 3..=9。发布、缓存与安装核验见 [1.0.9 发布记录](Rust_Release_1.0.9.md)。
+上一正式版为 **[1.1.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.1.0)**，于 2026-11-20 12:25:23 UTC（北京时间 20:25:23）发布。最终 main/tag 为 `790e8dffe943c46eeddcb74539299b34d7c0280e`。API v1、本地写 schema 8、服务端写 schema 9、快照 3..=9。发布、缓存与安装核验见 [1.1.0 发布记录](Rust_Release_1.1.0.md)。
+
+历史正式版为 **[1.0.9](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.9)**，于 2026-11-19 22:33:03 UTC（北京时间 2026-11-20 06:33:03）发布。最终 main/tag 为 `e5db8deacbd17a6d7d0e755f85ae4ecbc4ad056e`。API v1、本地写 schema 8、服务端写 schema 9、快照 3..=9。发布、缓存与安装核验见 [1.0.9 发布记录](Rust_Release_1.0.9.md)。
 
 历史正式版为 **[1.0.8](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.8)**，于 2026-11-19 15:21:14 UTC（北京时间 2026-11-19 23:21:14）发布。最终 main/tag 为 `54377f7d9a60b7d12e01e28bb01178d2c25977f9`。API v1、本地写 schema 8、服务端写 schema 9、快照 3..=9。发布、缓存与安装核验见 [1.0.8 发布记录](Rust_Release_1.0.8.md)。
 

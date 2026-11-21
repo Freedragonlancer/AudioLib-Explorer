@@ -100,7 +100,8 @@ pub use list_waveforms::{
 };
 pub use manage::{
     Capabilities, MAX_HISTORY_LIMIT, MAX_REMOVE_IDS, MAX_SCAN_WORKERS, ManageMode, RemoveReport,
-    RootScan, ScanControl, ScanMode, ScanRequest, ServerScan, manage_error_text,
+    RootScan, ScanControl, ScanMode, ScanRequest, ServerLibrarySetting, ServerLibrarySettings,
+    ServerScan, manage_error_text,
 };
 pub use mapping::{
     EffectiveRoot, RootState, UrlSource, effective_roots, map_server_path, root_for_path,

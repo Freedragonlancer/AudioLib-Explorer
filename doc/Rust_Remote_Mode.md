@@ -1013,7 +1013,7 @@ client does.
   - Damaged shards and leftover temporary files are dropped on scan.
   - Memory: one memory cache holds the cells of recently visible rows (4096 entries).
   - Server items carry no `samples_per_pixel`, so the client stores 1.
-- **Settings page.** The 服务器音效库 page shows the 「列表缩略波形」 section only when
+- **Settings page.** The 数据库与后台 page shows the 「列表缩略波形」 section only when
   the capability is usable.
   - The `pregenerate_list_waveforms` toggle reads `GET /api/v1/settings`. It is disabled
     when `can_change` is false, and changes go through `PATCH /api/v1/settings` with the
@@ -1155,15 +1155,15 @@ on server notices open the active connection page.
 
 - Left: 本地素材库 and each saved server (● = active, address, last test), Up/Down to
   move the selection, 「＋ 添加服务器」, 「删除此服务器配置…」 (inline confirmation; not for
-  the active profile). Leaving the 连接与库信息 page with unsaved edits asks 保存 / 放弃修改 /
+  the active profile). Leaving the 连接设置 page with unsaved edits asks 保存 / 放弃修改 /
   取消 first. Closing the manager or pressing Esc with unsaved server settings asks the
   same question; Save closes only after persistence succeeds, failure keeps the draft,
   and Esc while the question is shown cancels it. 「切换到此数据源」 still switches immediately.
 - Right, local: the library management content while local mode is active; in server mode
   an explanation that it needs local mode first.
-- Right, server: 「切换到此数据源」 when it is not active, and three pages: **连接与库信息**
+- Right, server: 「切换到此数据源」 when it is not active, and four pages: **连接设置**
   (name, address, token, transcode, revision checks, disabled blank 「WebDAV 设置（功能未开发）」,
-  test, 还原 / 保存; a 401 focuses the token field with a hint), **服务器音效库**
+  test, 还原 / 保存; a 401 focuses the token field with a hint), **目录与扫描**
   (roots with status, file count, missing count and last scan; management permission;
   active scan progress; latest 20 scans; for servers advertising `root_management`,
   the active source also offers **添加音效库 / Add sound root**, **修改资源路径 / Edit resource path**
@@ -1180,7 +1180,12 @@ on server notices open the active connection page.
   a server upgrade for root management. For the active server with management
   permission: 开始扫描… / 暂停 / 继续 / 取消扫描, and 移除所选记录… / 删除目录记录…,
   each confirmed inline — only library records are removed, WAV files on the server
-  stay, a rescan re-adds them with new ids) and **缓存与导出** (the cached snapshot of the profile's library; for the active server 立即同步 and the library management content working on the snapshot: history, missing files, check, backup copy, export. Local 「扫描与更新」 buttons stay on 本地设置 only; this page shows a one-line note pointing at 服务器音效库 for scans, and ends the cache options with **试听/性能** for the hold-list-waveform-batches checkbox).
+  stay, a rescan re-adds them with new ids), **数据库与后台** (snapshot compatibility,
+  database migration, vendor Metadata import, server Waveform pre-generation and playback
+  read scheduling), and **缓存与导出** (local snapshot details, sync, history, backup
+  copy and export). Each switch shows the server's effective value and can be reset
+  individually. The desktop enables changes only for the active, writable connection.
+  Older servers can omit either switch.
 
 1. *Library → 音效库管理… → 服务器设置*, then 「＋ 添加服务器」 (or select a saved server).
 2. Enter the server address (full URL such as `https://audiolib.example.com:8443` or

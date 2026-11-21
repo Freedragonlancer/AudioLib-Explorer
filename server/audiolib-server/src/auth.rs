@@ -29,7 +29,10 @@ use std::{
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, Mutex, PoisonError, RwLock},
+    sync::{
+        Arc, Mutex, PoisonError, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::watch;
@@ -556,6 +559,12 @@ pub struct AdminSettings {
     /// Pre-generate list thumbnail waveforms (doc/api/README.md §9.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pregenerate_list_waveforms: Option<bool>,
+    /// Offer a read-only schema-8 snapshot to older clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_snapshot_enabled: Option<bool>,
+    /// Defer list Waveform file-stat reads during the playback prebuffer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_waveform_pause_stats_on_playback: Option<bool>,
     /// List waveform generation rate in files per second, 1..=1000 (§9.5.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_waveform_rate: Option<u32>,
@@ -652,11 +661,13 @@ pub struct TlsStatus {
 }
 
 /// Values from `config.toml` that admin settings override.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct Defaults {
     auth_mode: AuthMode,
     auth_mode_source: Source,
     trust_lan_peers: bool,
+    legacy_snapshot_enabled: AtomicBool,
+    list_waveform_pause_stats_on_playback: bool,
     manage_mode: ManageMode,
     manage_mode_source: Source,
     pregenerate_list_waveforms: bool,
@@ -792,6 +803,8 @@ impl Security {
             auth_mode,
             auth_mode_source,
             trust_lan_peers: config.trust_lan_peers,
+            legacy_snapshot_enabled: AtomicBool::new(config.legacy_snapshot_enabled),
+            list_waveform_pause_stats_on_playback: config.list_waveform_pause_stats_on_playback,
             manage_mode,
             manage_mode_source,
             pregenerate_list_waveforms,
@@ -824,6 +837,8 @@ impl Security {
             auth_mode,
             auth_mode_source: Source::Config,
             trust_lan_peers: true,
+            legacy_snapshot_enabled: AtomicBool::new(true),
+            list_waveform_pause_stats_on_playback: false,
             manage_mode: ManageMode::Lan,
             manage_mode_source: Source::Default,
             pregenerate_list_waveforms: false,
@@ -936,6 +951,37 @@ impl Security {
     /// Effective `list_waveform_rate`.
     pub fn list_waveform_rate(&self) -> u32 {
         self.list_waveform_rate_with_source().0
+    }
+
+    /// Offer a read-only schema-8 snapshot to older clients. Returns the effective value and its settings source.
+    pub fn legacy_snapshot_enabled(&self) -> (bool, Source) {
+        match self.read().settings.legacy_snapshot_enabled {
+            Some(value) => (value, Source::Admin),
+            None => (
+                self.defaults
+                    .legacy_snapshot_enabled
+                    .load(Ordering::Acquire),
+                Source::Config,
+            ),
+        }
+    }
+
+    /// Change the process-local fallback used when there is no persisted compatibility override.
+    pub(crate) fn set_legacy_snapshot_default(&self, enabled: bool) {
+        self.defaults
+            .legacy_snapshot_enabled
+            .store(enabled, Ordering::Release);
+    }
+
+    /// Defer list Waveform file-stat reads during the playback prebuffer. Returns the effective value and its settings source.
+    pub fn list_waveform_pause_stats_on_playback(&self) -> (bool, Source) {
+        match self.read().settings.list_waveform_pause_stats_on_playback {
+            Some(value) => (value, Source::Admin),
+            None => (
+                self.defaults.list_waveform_pause_stats_on_playback,
+                Source::Config,
+            ),
+        }
     }
 
     /// Library roots set on the admin page (replacing `config.toml`'s), if any.
