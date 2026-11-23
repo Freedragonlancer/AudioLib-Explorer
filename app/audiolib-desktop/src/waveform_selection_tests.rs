@@ -1,6 +1,7 @@
 // app/audiolib-desktop/src/waveform_selection_tests.rs
 //! Isolated selection identity, preparation and preview-admission regressions.
 use super::*;
+use std::io::{Read, Write};
 use std::sync::mpsc;
 #[path = "waveform_selection_version_tests.rs"]
 mod version_tests;
@@ -208,7 +209,6 @@ fn selection(
         cancel: Arc::new(AtomicBool::new(false)),
         render_cancel: Arc::new(AtomicBool::new(false)),
         preview_cancel: Arc::new(AtomicBool::new(false)),
-        preview_ready: Arc::new(AtomicBool::new(true)),
     }
 }
 

@@ -975,7 +975,7 @@ component WaveSelectionOverlay inherits Rectangle {
     in property <float> duration;
     in property <string> identity;
     in property <bool> preparing;
-    // 0 idle, 1 preparing, 2 ready, 3 native drag, 4 cancelled, 5 error.
+    // 0 idle, 1 preparing, 2 ready, 3 native drag, 4 cancelled, 5 error, 6 exported.
     in property <int> export-state;
     in property <bool> native-cursor: false;
     in property <string> progress-text;
@@ -1002,11 +1002,13 @@ component WaveSelectionOverlay inherits Rectangle {
     out property <float> captured-end;
     // 0 unowned, 1 crosshair, 2/3 left/right marquee, 4/5 start/end resize,
     // 6 export hover, 7 export held, 8 waiting, 9 seek, 10 unavailable, 11 native.
-    out property <int> pointer-kind: root.export-state == 3 ? 11 : !root.pointer-owned ? 0
+    out property <int> pointer-kind: root.export-state == 3 ? 11
+        : (root.mode == 5 || root.mode == 7) && root.is-preparing ? 8
+        : !root.pointer-owned ? 0
         : root.mode == 1 ? (hit.mouse-x < root.down-x ? 2 : 3)
         : root.mode == 2 ? (root.draft-start <= root.draft-end ? 4 : 5)
         : root.mode == 3 ? (root.draft-end >= root.draft-start ? 5 : 4)
-        : root.mode == 5 || root.mode == 7 ? (root.is-preparing ? 8 : 7)
+        : root.mode == 5 || root.mode == 7 ? 7
         : root.mode == 4 || root.mode == 6 ? 7 : root.mode == 8 ? 9
         : !root.enabled ? (root.seek-enabled ? 9 : 10)
         : grip.has-hover ? 6 : root.shift-held ? 1
@@ -1087,12 +1089,13 @@ component WaveSelectionOverlay inherits Rectangle {
             : (root.chinese ? "单击定位播放 · 拖动导出 WAV · Shift 拖动重选" : "Click to seek and play · Drag out as WAV · Shift-drag to reselect"))
         : root.pointer-kind == 9 ? (root.chinese ? "单击定位播放 · 波形完成后可框选" : "Click to seek and play · Select when Waveform is ready")
         : root.pointer-kind == 10 ? (root.chinese ? "波形暂不可操作" : "Waveform is currently unavailable")
-        : root.pointer-kind == 11 ? (root.chinese ? "拖到目标应用 · Esc 取消" : "Drop in the target application · Esc cancels")
+        : root.pointer-kind == 11 ? (root.chinese ? "鼠标显示复制标记时松开" : "Release when the pointer shows Copy")
         : root.shift-held ? (root.chinese ? "拖动重新框选 · 松开自动试听" : "Drag a new range · Release to audition")
         : "";
     property <string> export-label: root.is-preparing ? (root.progress-text != "" ? root.progress-text : (root.chinese ? "正在准备 WAV…" : "Preparing WAV…"))
         : root.export-state == 2 ? (root.chinese ? "已就绪" : "Ready")
-        : root.export-state == 3 ? (root.chinese ? "正在拖出 WAV" : "Dragging WAV")
+        : root.export-state == 3 ? (root.chinese ? "出现复制标记后松开" : "Release on Copy")
+        : root.export-state == 6 ? (root.chinese ? "已导出" : "Exported")
         : root.export-state == 4 ? (root.chinese ? "已取消 · 再次拖出可重试" : "Cancelled · Drag again to retry")
         : root.export-state == 5 ? (root.progress-text != "" ? root.progress-text : (root.chinese ? "准备失败 · 再次拖出重试" : "Preparation failed · Drag again to retry"))
         : root.hint;
@@ -1226,7 +1229,8 @@ component WaveSelectionOverlay inherits Rectangle {
             }
             status := Rectangle {
                 horizontal-stretch: 1; min-width: 0px;
-                property <string> message: root.editing || root.mode >= 4 ? root.hint : root.export-label;
+                property <string> message: root.pointer-kind == 8 || root.export-state == 3 ? root.export-label
+                    : root.editing || root.mode >= 4 ? root.hint : root.export-label;
                 accessible-role: text; accessible-label: root.chinese ? "波形导出状态" : "Waveform export status";
                 accessible-description: self.message;
                 status-text := Text {
