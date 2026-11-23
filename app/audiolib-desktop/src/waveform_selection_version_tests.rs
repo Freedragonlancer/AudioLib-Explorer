@@ -9,6 +9,7 @@ struct Mock {
     version: Arc<AtomicUsize>,
     offline: Arc<AtomicBool>,
     flip_during_waveform: Arc<AtomicBool>,
+    download_bytes: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -21,6 +22,12 @@ impl Drop for Mock {
 }
 
 fn mock() -> Mock {
+    mock_audio(None)
+}
+
+fn mock_audio(original: Option<Vec<u8>>) -> Mock {
+    let download_bytes = Arc::new(AtomicUsize::new(0));
+    let transferred = download_bytes.clone();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -110,7 +117,9 @@ fn mock() -> Mock {
                 }
                 serde_json::to_vec(&json).unwrap()
             } else {
-                wav(&[version as i16 * 100; 1000], 1000)
+                original
+                    .clone()
+                    .unwrap_or_else(|| wav(&[version as i16 * 100; 1000], 1000))
             };
             let etag = if is_waveform {
                 format!("\"waveform-v{version}\"")
@@ -119,6 +128,33 @@ fn mock() -> Mock {
             } else {
                 format!("\"original-v{version}\"")
             };
+            if !is_head && path.contains("download=1") {
+                if original.is_some()
+                    && let Some((start, end)) = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("range: bytes=")
+                                .map(str::to_owned)
+                        })
+                        .and_then(|s| {
+                            let (a, b) = s.split_once('-')?;
+                            Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?))
+                        })
+                {
+                    let data = &body[start..=end];
+                    let _ = write!(
+                        socket,
+                        "HTTP/1.1 206 Partial Content\r\nETag: {etag}\r\nContent-Range: bytes {start}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len(),
+                        data.len()
+                    );
+                    transferred.fetch_add(data.len(), Ordering::Relaxed);
+                    let _ = socket.write_all(data);
+                    continue;
+                }
+                transferred.fetch_add(body.len(), Ordering::Relaxed);
+            }
             let _ = write!(
                 socket,
                 "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nETag: {}\r\nContent-Disposition: attachment; filename=original.wav\r\nConnection: close\r\n\r\n",
@@ -140,6 +176,7 @@ fn mock() -> Mock {
         version,
         offline,
         flip_during_waveform: flip,
+        download_bytes,
         stop,
         worker: Some(worker),
     }
@@ -200,6 +237,52 @@ fn child_remote_slice_drop() {
         expected,
         "repeat must use the pinned original"
     );
+}
+
+#[test]
+fn cold_remote_pcm_slice_downloads_only_the_header_and_selection() {
+    isolated("version_tests::child_cold_pcm_slice");
+}
+
+#[test]
+#[ignore = "isolated versioned original range export"]
+fn child_cold_pcm_slice() {
+    let f = fixture();
+    let samples: Vec<i16> = (0..2_000_000).map(|i| (i % 32749) as i16).collect();
+    let body = wav(&samples, 1000);
+    let size = body.len() as u64;
+    let server = mock_audio(Some(body));
+    let mut file = remote(&f, &server);
+    file.duration = 2000.0;
+    file.file_size = size;
+    file.filename = "Long original.wav".into();
+    let mut source = WaveSource::capture(&f.c, &file);
+    source
+        .bind_source_version(&f.c, &AtomicBool::new(false))
+        .unwrap();
+    f.c.publish_wave_source(&f.ui, &source);
+    f.ui.set_waveform_ready(true);
+    f.c.commit_wave_selection(1234.0, 1236.0);
+    let c = f.c.clone();
+    wait_for(&f.ui, move || c.slice.lock().unwrap().ready.is_some());
+    let (prepared, selection) = {
+        let state = f.c.slice.lock().unwrap();
+        (
+            state.ready.clone().unwrap(),
+            state.selection.clone().unwrap(),
+        )
+    };
+    assert_eq!(
+        server.download_bytes.load(Ordering::Relaxed),
+        64 * 1024 + 4000
+    );
+    drop(server);
+    let first = prepared.publish(&selection).unwrap();
+    let expected = wav(&samples[1_234_000..1_236_000], 1000);
+    assert_eq!(std::fs::read(&first.path).unwrap(), expected);
+    std::fs::write(&first.path, b"edited by recipient").unwrap();
+    let second = prepared.publish(&selection).unwrap();
+    assert_eq!(std::fs::read(second.path.as_path()).unwrap(), expected);
 }
 
 fn segment(

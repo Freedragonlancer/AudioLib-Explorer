@@ -3459,6 +3459,24 @@ fn native_status_footer_keeps_messages_and_actions_at_bottom_right() {
                     "Waking the library disk… 12 s (fixture_long_remote_audio_filename.wav)"
                 };
                 ui.set_remote_audition_status(waking.into());
+                ui.set_wave_selection_active(true);
+                ui.set_wave_selection_preparing(true);
+                settle();
+                let footer = ElementHandle::find_by_accessible_label(&ui, status_label)
+                    .next()
+                    .unwrap();
+                assert!(
+                    footer
+                        .accessible_description()
+                        .unwrap()
+                        .contains(if chinese {
+                            "首次拖出"
+                        } else {
+                            "first drag"
+                        })
+                );
+                ui.set_wave_selection_preparing(false);
+                ui.set_wave_selection_active(false);
                 // Ordinary completion notifications must not hide an active
                 // remote first-byte wait, including after workbench scrolling.
                 ui.set_status("Background search completed".into());

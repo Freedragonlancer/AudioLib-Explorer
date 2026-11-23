@@ -210,6 +210,50 @@ impl OutputFormat {
     }
 }
 
+/// Exact source bytes and standalone WAV header for a directly copyable PCM selection.
+pub struct PcmWaveSlice {
+    /// Half-open byte interval in the original WAV data chunk.
+    pub source_bytes: std::ops::Range<u64>,
+    /// Output header for exactly the selected frames, including the original PCM format.
+    pub header: Vec<u8>,
+}
+
+/// Plan a lossless slice from a bounded prefix of the versioned original. Other
+/// containers, layouts needing conversion, and headers beyond the prefix use local export.
+pub fn pcm_wave_slice(
+    prefix: &[u8],
+    original_len: u64,
+    range: AudioFrameRange,
+) -> Option<PcmWaveSlice> {
+    if !matches!(prefix.get(..4)?, b"RIFF" | b"RF64" | b"BW64") {
+        return None;
+    }
+    let info = read_info_reader(std::io::Cursor::new(prefix), original_len, false, false).ok()?;
+    let layout = info.pcm_layout?;
+    let format = OutputFormat::for_source(&info).ok()?;
+    if range.sample_rate != info.metadata.sample_rate
+        || range.validate(info.metadata.frames).is_err()
+        || !matches!(layout.endian, ByteOrder::Little)
+        || (layout.bytes_per_sample == 1 && matches!(layout.kind, SampleKind::Signed))
+        || info.block_align != format.align()
+    {
+        return None;
+    }
+    let offset = |frame: u64| {
+        info.data_offset
+            .checked_add(frame.checked_mul(u64::from(info.block_align))?)
+    };
+    let start = offset(range.start_frame)?;
+    let end = offset(range.end_frame)?;
+    if end > original_len {
+        return None;
+    }
+    Some(PcmWaveSlice {
+        source_bytes: start..end,
+        header: format.header(range.end_frame - range.start_frame).ok()?,
+    })
+}
+
 /// Export an end-exclusive source-frame selection as an untransformed WAV file.
 ///
 /// Reads only the real file at `source`, never a registered audition/preview source.
