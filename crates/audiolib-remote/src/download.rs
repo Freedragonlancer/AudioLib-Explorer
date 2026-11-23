@@ -920,7 +920,17 @@ impl DownloadCache {
             item.file.id,
             etag_token(&version.etag)
         ));
-        entry.is_dir()
+        // Interrupted downloads leave the version directory and a resumable .part.
+        // Only a published file can avoid fetching the selected range.
+        let published = std::fs::read_dir(entry).is_ok_and(|files| {
+            files.flatten().any(|file| {
+                !file.file_name().to_string_lossy().ends_with(".part")
+                    && file
+                        .metadata()
+                        .is_ok_and(|m| m.is_file() && m.len() == version.length)
+            })
+        });
+        published
             || memory
                 .complete_original(
                     item.source
@@ -2161,6 +2171,37 @@ mod tests {
                 .is_err(),
             "A legacy filename token cannot stand in for the missing v1 receipt"
         );
+    }
+
+    #[test]
+    fn only_published_originals_skip_the_slice_range_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = DownloadCache::new(directory.path().join("cache"), u64::MAX);
+        let memory = MemoryCache::new(crate::DEFAULT_MEMORY_CACHE_BYTES);
+        let file = record();
+        let version = OriginalVersion {
+            etag: "\"v1\"".into(),
+            length: 40,
+            offline: false,
+        };
+        let mut source = StreamSource::new("http://localhost/unused", SourceAuth::None);
+        source.library_id = Some("lib-1".into());
+        let entry =
+            cache
+                .library_dir("lib-1")
+                .join(format!("{}-{}", file.id, etag_token(&version.etag)));
+        let item = DownloadItem { file, source };
+        let cached = || cache.has_slice_original(&item, &version, &memory);
+        std::fs::create_dir_all(&entry).unwrap();
+        assert!(!cached());
+        let partial = entry.join("original.wav.part");
+        std::fs::write(&partial, [0; 40]).unwrap();
+        assert!(!cached());
+        let published = entry.join("original.wav");
+        std::fs::write(&published, [0; 20]).unwrap();
+        assert!(!cached());
+        std::fs::write(&published, [0; 40]).unwrap();
+        assert!(cached());
     }
 
     #[test]
