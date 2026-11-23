@@ -139,7 +139,10 @@ impl State {
             return;
         }
         let kind = ui.get_wave_pointer_kind();
-        if self.suspended.get() || !self.pointer_in_window.get() || kind == 11 {
+        // Windows keeps mouse capture for the held gesture beyond our window.
+        // Keep the pending cursor visible there until OLE takes over target feedback.
+        let captured_wait = cfg!(windows) && kind == 8;
+        if self.suspended.get() || (!self.pointer_in_window.get() && !captured_wait) || kind == 11 {
             self.last_applied.borrow_mut().take();
             return;
         }

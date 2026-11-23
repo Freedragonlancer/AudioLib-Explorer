@@ -52,6 +52,7 @@ windows = { version = "0.62", features = [
 cc = "1.2"
 
 [dev-dependencies]
+tempfile.workspace = true
 audiolib-db = { path = "../audiolib-db" }
 
 [target.'cfg(target_os = "macos")'.dependencies]

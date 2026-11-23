@@ -160,6 +160,48 @@ fn remote(f: &Fixture, server: &Mock) -> AudioFile {
     file
 }
 
+#[test]
+fn remote_slice_publishes_the_selected_frames_and_repeats_offline_after_daw_edits() {
+    isolated("version_tests::child_remote_slice_drop");
+}
+
+#[test]
+#[ignore = "isolated remote original to durable WAV file drag"]
+fn child_remote_slice_drop() {
+    let f = fixture();
+    let server = mock();
+    let file = remote(&f, &server);
+    let mut source = WaveSource::capture(&f.c, &file);
+    source
+        .bind_source_version(&f.c, &AtomicBool::new(false))
+        .unwrap();
+    f.c.publish_wave_source(&f.ui, &source);
+    f.ui.set_waveform_ready(true);
+    f.c.commit_wave_selection(0.2, 0.6);
+    let c = f.c.clone();
+    wait_for(&f.ui, move || c.slice.lock().unwrap().ready.is_some());
+    let (prepared, selection) = {
+        let state = f.c.slice.lock().unwrap();
+        (
+            state.ready.clone().unwrap(),
+            state.selection.clone().unwrap(),
+        )
+    };
+    drop(server);
+    let mut first = prepared.publish(&selection).unwrap();
+    first.keep = true;
+    let expected = wav(&[100; 400], 1000);
+    assert_eq!(std::fs::read(&first.path).unwrap(), expected);
+    std::fs::write(&first.path, b"edited by DAW").unwrap();
+    let second = prepared.publish(&selection).unwrap();
+    assert_ne!(first.path, second.path);
+    assert_eq!(
+        std::fs::read(&second.path).unwrap(),
+        expected,
+        "repeat must use the pinned original"
+    );
+}
+
 fn segment(
     f: &Fixture,
     version: &audiolib_remote::OriginalVersion,
