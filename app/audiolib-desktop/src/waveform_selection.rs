@@ -3,7 +3,6 @@
 use super::status_feedback::AudioActivity;
 use super::*;
 use audiolib_core::AudioFrameRange;
-use std::io::{Read, Write};
 #[cfg(test)]
 #[path = "waveform_selection_tests.rs"]
 mod integration_tests;
@@ -196,7 +195,6 @@ struct Selection {
     cancel: Arc<AtomicBool>,
     render_cancel: Arc<AtomicBool>,
     preview_cancel: Arc<AtomicBool>,
-    preview_ready: Arc<AtomicBool>,
 }
 
 impl Selection {
@@ -225,11 +223,30 @@ impl SourceStamp {
 }
 
 struct PreparedSlice {
+    // Release the original's Windows read lease before cleaning its staging directory.
+    original: SliceOriginal,
     _directory: crate::slice_staging::SliceStaging,
     path: PathBuf,
     export_directory: PathBuf,
     stem: String,
-    local_source: Option<(PathBuf, SourceStamp)>,
+}
+
+enum SliceOriginal {
+    Local(PathBuf, SourceStamp),
+    Remote(audiolib_remote::OwnedOriginal),
+}
+
+impl SliceOriginal {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Local(path, _) => path,
+            Self::Remote(original) => &original.path,
+        }
+    }
+
+    fn changed(&self) -> bool {
+        matches!(self, Self::Local(path, stamp) if SourceStamp::read(path).ok().as_ref() != Some(stamp))
+    }
 }
 
 #[derive(Default)]
@@ -281,6 +298,7 @@ enum ExportFeedback {
     NativeDrag = 3,
     Cancelled = 4,
     Error = 5,
+    Exported = 6,
 }
 
 fn show_export_feedback(ui: &AppWindow, phase: ExportFeedback) {
@@ -562,7 +580,6 @@ impl Controller {
                 cancel,
                 render_cancel: Arc::new(AtomicBool::new(false)),
                 preview_cancel,
-                preview_ready: Arc::new(AtomicBool::new(false)),
             };
             state.selection = Some(selection.clone());
             selection
@@ -604,7 +621,6 @@ impl Controller {
                 return;
             }
             if let Err(error) = selection.source.check_local_version() {
-                selection.preview_ready.store(true, Ordering::Release);
                 c.report_wave_preview_error(&selection, error);
                 return;
             }
@@ -612,7 +628,6 @@ impl Controller {
                 .source
                 .check_remote_version(&c, &selection.preview_cancel)
             {
-                selection.preview_ready.store(true, Ordering::Release);
                 c.report_wave_preview_error(&selection, error);
                 return;
             }
@@ -628,7 +643,6 @@ impl Controller {
             let path = match prepared {
                 Ok(path) => path,
                 Err(error) => {
-                    selection.preview_ready.store(true, Ordering::Release);
                     c.report_wave_preview_error(&selection, error);
                     return;
                 }
@@ -694,7 +708,6 @@ impl Controller {
                 c.clear_audio_reload(selection.source.file.id);
                 Ok(())
             })();
-            selection.preview_ready.store(true, Ordering::Release);
             if let Err(error) = result {
                 if !matches!(error, audiolib_core::Error::Cancelled) && !error.is_read_interrupted()
                 {
@@ -1018,16 +1031,6 @@ impl Controller {
         self.slice_render_jobs.submit(Box::new(move || {
             let _guard = guard;
             let result = (|| -> Result<Arc<PreparedSlice>, String> {
-                let deadline = Instant::now() + Duration::from_secs(3);
-                while !selection.preview_ready.load(Ordering::Acquire) && Instant::now() < deadline
-                {
-                    if !c.selection_current(&selection)
-                        || selection.render_cancel.load(Ordering::Acquire)
-                    {
-                        return Err("Cancelled".into());
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
                 if !c.selection_current(&selection)
                     || selection.render_cancel.load(Ordering::Acquire)
                 {
@@ -1072,34 +1075,32 @@ impl Controller {
                 } else {
                     None
                 };
-                let source = if let Some(original) = original.as_ref() {
+                let source = if let Some(original) = original {
                     let expected = selection.source.remote_version.as_ref()
                         .ok_or_else(|| c.localized("该波形没有已验证的原素材版本，请重新载入音频", "This Waveform has no verified original version; reload the sound").to_string())?;
                     if original.etag.as_deref() != Some(expected.etag.as_str()) || original.length != expected.length {
                         return Err(c.localized("原素材已在波形绘制后改变，请重新载入音频", "The original changed since this Waveform was rendered; reload the sound").into());
                     }
-                    original.path.clone()
+                    SliceOriginal::Remote(original)
                 } else {
                     let roots = c.config.lock().unwrap().allowed_scan_roots.clone();
-                    audiolib_core::validate_audio_path(
+                    let path = audiolib_core::validate_audio_path(
                         Path::new(&selection.source.file.file_path),
                         &roots,
                     )
-                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?;
+                    let stamp = SourceStamp::read(&path).map_err(|e| e.to_string())?;
+                    SliceOriginal::Local(path, stamp)
                 };
                 if !c.selection_current(&selection)
                     || selection.render_cancel.load(Ordering::Acquire)
                 {
                     return Err("Cancelled".into());
                 }
-                let local_source = (!selection.source.remote)
-                    .then(|| SourceStamp::read(&source).map(|stamp| (source.clone(), stamp)))
-                    .transpose()
-                    .map_err(|e| e.to_string())?;
                 let path = directory.directory.path().join("slice.wav");
                 let mut last = Instant::now() - Duration::from_secs(1);
                 audiolib_audio::export_audio_slice(
-                    &source,
+                    source.path(),
                     &path,
                     selection.range,
                     &selection.render_cancel,
@@ -1126,11 +1127,11 @@ impl Controller {
                     return Err("Cancelled".into());
                 }
                 Ok(Arc::new(PreparedSlice {
+                    original: source,
                     _directory: directory,
                     path,
                     export_directory,
                     stem: slice_stem(&selection.source.file.filename),
-                    local_source,
                 }))
             })();
             let c2 = c.clone();
@@ -1235,25 +1236,17 @@ impl Controller {
         let c = self.clone();
         std::thread::spawn(move || {
             let _guard = guard;
-            let result =
-                if ready.local_source.as_ref().is_some_and(|(path, stamp)| {
-                    SourceStamp::read(path).ok().as_ref() != Some(stamp)
-                }) {
-                    Err(if c.chinese.load(Ordering::Acquire) {
-                        "原素材已更改，请重新框选".into()
-                    } else {
-                        "The original changed; select the range again".into()
-                    })
-                } else if let Some(published) = published {
-                    Ok(published)
+            let result = if ready.original.changed() {
+                Err(if c.chinese.load(Ordering::Acquire) {
+                    "原素材已更改，请重新框选".into()
                 } else {
-                    publish_numbered_slice(
-                        &ready.path,
-                        &ready.export_directory,
-                        &ready.stem,
-                        &selection.render_cancel,
-                    )
-                };
+                    "The original changed; select the range again".into()
+                })
+            } else if let Some(published) = published {
+                Ok(published)
+            } else {
+                ready.publish(&selection)
+            };
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
                 let _busy = busy;
@@ -1298,7 +1291,7 @@ impl Controller {
                             Ok(audiolib_windows::DragOutcome::Copied) => {
                                 published.keep = true;
                                 if c2.selection_current(&selection) {
-                                    show_export_feedback(&ui, ExportFeedback::Ready);
+                                    show_export_feedback(&ui, ExportFeedback::Exported);
                                     ui.set_wave_selection_progress(
                                         if c2.chinese.load(Ordering::Acquire) {
                                             "已导出 · 可再次拖出 WAV"
@@ -1402,45 +1395,51 @@ fn slice_stem(name: &str) -> String {
     }
 }
 
+impl PreparedSlice {
+    fn publish(&self, selection: &Selection) -> Result<PublishedSlice, String> {
+        // The first drag consumes the already flushed staging WAV. Later drags render
+        // independent bytes from the pinned original, even if a DAW edited its copy.
+        if !self.path.try_exists().map_err(|e| e.to_string())? {
+            audiolib_audio::export_audio_slice(
+                self.original.path(),
+                &self.path,
+                selection.range,
+                &selection.render_cancel,
+                &mut |_, _| {},
+            )
+            .map_err(|e| e.to_string())?;
+            selection.source.check_local_version()?;
+        }
+        publish_numbered_slice(
+            &self.path,
+            &self.export_directory,
+            &self.stem,
+            &selection.render_cancel,
+        )
+    }
+}
+
 fn publish_numbered_slice(
     source: &Path,
     directory: &Path,
     stem: &str,
     cancel: &AtomicBool,
 ) -> Result<PublishedSlice, String> {
+    // Both paths are on the export volume. Transfer the completed file without a
+    // byte copy, preserving other apps' files if they win a sequence-number race.
+    let mut staged = tempfile::TempPath::try_from_path(source).map_err(|e| e.to_string())?;
     for sequence in 1..=999_999_u32 {
         if cancel.load(Ordering::Acquire) {
             return Err("Cancelled".into());
         }
         let path = directory.join(format!("{stem}_slice_{sequence:03}.wav"));
-        // Each durable file owns its bytes: a DAW may edit it in place without
-        // changing the prepared slice reused by a subsequent export.
-        let mut output = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(format!("{}: {error}", path.display())),
-        };
-        let published = PublishedSlice { path, keep: false };
-        let mut input = std::fs::File::open(source).map_err(|e| e.to_string())?;
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            if cancel.load(Ordering::Acquire) {
-                return Err("Cancelled".into());
+        match staged.persist_noclobber(&path) {
+            Ok(()) => return Ok(PublishedSlice { path, keep: false }),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                staged = error.path;
             }
-            let read = input.read(&mut buffer).map_err(|e| e.to_string())?;
-            if read == 0 {
-                break;
-            }
-            output
-                .write_all(&buffer[..read])
-                .map_err(|e| e.to_string())?;
+            Err(error) => return Err(format!("{}: {}", path.display(), error.error)),
         }
-        output.sync_all().map_err(|e| e.to_string())?;
-        return Ok(published);
     }
     Err("No available slice sequence number".into())
 }
@@ -1457,6 +1456,8 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut first = publish_numbered_slice(&source, root.path(), "音效", &cancel).unwrap();
         first.keep = true;
+        assert!(!source.exists());
+        std::fs::write(&source, b"second WAV").unwrap();
         let second = publish_numbered_slice(&source, root.path(), "音效", &cancel).unwrap();
         assert!(first.path.ends_with("音效_slice_001.wav"));
         assert!(second.path.ends_with("音效_slice_002.wav"));
@@ -1464,7 +1465,7 @@ mod tests {
         drop(second);
         assert!(!cancelled.exists());
         assert_eq!(std::fs::read(&first.path).unwrap(), b"complete WAV fixture");
-        assert_eq!(std::fs::read(&source).unwrap(), b"complete WAV fixture");
+        assert!(!source.exists());
         cancel.store(true, Ordering::Release);
         assert!(publish_numbered_slice(&source, root.path(), "音效", &cancel).is_err());
     }

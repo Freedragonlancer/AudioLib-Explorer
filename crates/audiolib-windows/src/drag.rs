@@ -18,8 +18,10 @@ pub enum DragOutcome {
 #[cfg(windows)]
 mod native {
     use super::DragOutcome;
-    use std::os::windows::ffi::OsStrExt;
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::path::PathBuf;
+    use std::path::{Component, Path, Prefix};
     use windows::Win32::Foundation::{
         DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, DV_E_FORMATETC,
         DV_E_TYMED, E_NOTIMPL, E_OUTOFMEMORY, OLE_E_ADVISENOTSUPPORTED, POINT, S_OK,
@@ -37,9 +39,56 @@ mod native {
     };
     use windows::Win32::System::SystemServices::{MK_LBUTTON, MK_RBUTTON, MODIFIERKEYS_FLAGS};
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
-    use windows::Win32::UI::Shell::{DROPFILES, SHCreateStdEnumFmtEtc};
+    use windows::Win32::UI::Shell::{
+        BHID_DataObject, DROPFILES, IShellItem, SHCreateItemFromParsingName, SHCreateStdEnumFmtEtc,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
     use windows::core::{BOOL, HRESULT, Ref, implement};
+
+    /// Explorer and several DAWs cannot import a verbatim Win32 path. Only
+    /// shorten drive/UNC spellings that still resolve to the exact same file.
+    fn shell_path(path: &Path) -> PathBuf {
+        let Some(Component::Prefix(prefix)) = path.components().next() else {
+            return path.to_owned();
+        };
+        let mut units: Vec<u16>;
+        match prefix.kind() {
+            Prefix::VerbatimDisk(_) => units = path.as_os_str().encode_wide().skip(4).collect(),
+            Prefix::VerbatimUNC(_, _) => {
+                units = vec![u16::from(b'\\'); 2];
+                units.extend(path.as_os_str().encode_wide().skip(8));
+            }
+            _ => return path.to_owned(),
+        }
+        let ordinary = PathBuf::from(OsString::from_wide(&units));
+        if ordinary
+            .canonicalize()
+            .is_ok_and(|resolved| resolved == path)
+        {
+            ordinary
+        } else {
+            path.to_owned()
+        }
+    }
+
+    pub(super) fn file_data_object(paths: &[PathBuf]) -> IDataObject {
+        let paths: Vec<_> = paths.iter().map(|path| shell_path(path)).collect();
+        if let [path] = paths.as_slice() {
+            let name = windows::core::HSTRING::from(path.as_os_str());
+            // SAFETY: the caller owns an initialized OLE apartment. The input
+            // UTF-16 name lives through parsing. Both COM interfaces are owned.
+            let shell_data = unsafe {
+                SHCreateItemFromParsingName::<_, _, IShellItem>(&name, None)
+                    .and_then(|item| item.BindToHandler(None, &BHID_DataObject))
+            };
+            if let Ok(data) = shell_data {
+                return data;
+            }
+        }
+        // Also supports mixed-folder multi-selections and files outside the
+        // Shell namespace. These are still complete files offered as CF_HDROP.
+        FileDrop::new(&paths).into()
+    }
 
     fn hdrop_format() -> FORMATETC {
         FORMATETC {
@@ -213,10 +262,12 @@ mod native {
         // loop and uninitialized again only when this call initialized it.
         unsafe {
             OleInitialize(None).map_err(std::io::Error::other)?;
-            let data: IDataObject = FileDrop::new(paths).into();
+            let data = file_data_object(paths);
             let source: IDropSource = DropSource.into();
             let mut effect = DROPEFFECT_NONE;
             let result = DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut effect);
+            drop(source);
+            drop(data);
             OleUninitialize();
             if result == DRAGDROP_S_DROP && effect.0 & DROPEFFECT_COPY.0 != 0 {
                 Ok(DragOutcome::Copied)
@@ -287,6 +338,65 @@ mod tests {
     use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
     use windows::Win32::System::Ole::{CF_HDROP, ReleaseStgMedium};
     use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+
+    #[test]
+    fn explorer_folder_copies_a_canonical_slice_path() {
+        use windows::Win32::Foundation::POINTL;
+        use windows::Win32::System::Ole::{
+            DROPEFFECT_COPY, IDropTarget, OleInitialize, OleUninitialize,
+        };
+        use windows::Win32::System::SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS};
+        use windows::Win32::UI::Shell::{BHID_SFUIObject, IShellItem, SHCreateItemFromParsingName};
+
+        let root = tempfile::tempdir().unwrap();
+        let target_dir = root.path().join("Project Media");
+        std::fs::create_dir(&target_dir).unwrap();
+        let name = "现场 录音_slice_001.wav";
+        let path = root.path().join(name);
+        std::fs::write(&path, b"real file contents").unwrap();
+        let canonical = path.canonicalize().unwrap();
+        // SAFETY: shell interfaces and their media live inside this STA scope.
+        unsafe {
+            OleInitialize(None).unwrap();
+            {
+                let data = super::native::file_data_object(&[canonical]);
+                let format = FORMATETC {
+                    cfFormat: CF_HDROP.0,
+                    dwAspect: DVASPECT_CONTENT.0,
+                    lindex: -1,
+                    tymed: TYMED_HGLOBAL.0 as u32,
+                    ..Default::default()
+                };
+                let mut medium = data.GetData(&format).unwrap();
+                let drop = HDROP(medium.u.hGlobal.0);
+                let length = DragQueryFileW(drop, 0, None) as usize;
+                let mut units = vec![0; length + 1];
+                assert_eq!(DragQueryFileW(drop, 0, Some(&mut units)) as usize, length);
+                let received = String::from_utf16(&units[..length]).unwrap();
+                ReleaseStgMedium(&mut medium);
+                assert_eq!(PathBuf::from(received), path);
+                let folder: IShellItem = SHCreateItemFromParsingName(
+                    &windows::core::HSTRING::from(target_dir.as_os_str()),
+                    None,
+                )
+                .unwrap();
+                let target: IDropTarget = folder.BindToHandler(None, &BHID_SFUIObject).unwrap();
+                let mut effect = DROPEFFECT_COPY;
+                target
+                    .DragEnter(&data, MK_LBUTTON, POINTL::default(), &mut effect)
+                    .unwrap();
+                assert_eq!(effect, DROPEFFECT_COPY);
+                target
+                    .Drop(&data, MODIFIERKEYS_FLAGS(0), POINTL::default(), &mut effect)
+                    .unwrap();
+            }
+            OleUninitialize();
+        }
+        assert_eq!(
+            std::fs::read(target_dir.join(name)).unwrap(),
+            std::fs::read(path).unwrap()
+        );
+    }
 
     #[test]
     fn data_object_offers_real_paths_as_cf_hdrop() {

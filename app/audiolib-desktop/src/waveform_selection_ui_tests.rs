@@ -827,6 +827,17 @@ fn narrow_selection_has_a_separate_drag_grip_without_covering_plot_or_ruler() {
         for offset in [8.0, 18.0] {
             moved(&ui, LogicalPosition::new(start.x + offset, start.y));
         }
+        // A captured drag still needs the waiting cursor over the destination,
+        // outside both the Waveform plot and its docked handle.
+        ui.set_wave_selection_preparing(true);
+        ui.set_wave_selection_export_state(1);
+        moved(&ui, LogicalPosition::new(-60.0, -60.0));
+        pointer(&ui, 8);
+        ui.set_wave_selection_preparing(false);
+        ui.set_wave_selection_export_state(3);
+        settle();
+        pointer(&ui, 11);
+        ui.set_wave_selection_export_state(2);
         assert_eq!(*requests.borrow(), 1);
         assert_eq!(
             *endings.borrow(),
