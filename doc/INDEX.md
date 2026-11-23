@@ -4,7 +4,7 @@ AudioLib Explorer is a Rust + Slint Windows desktop application with SQLite FTS5
 
 ## Current implementation
 
-AI 智能搜索、可编辑 Skill 与设置使用见 [Rust AI Search](Rust_AI_Search.md)，发布、验收与安装记录见 [1.1.1 发布记录](Rust_Release_1.1.1.md)。历史 1.0.0 的五标签指南保留在 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/v1.0.0/doc/Rust_AI_Search.md)。研究、Agent skill、补全词表及概念设计见 [AI Keyword Search](AI_Keyword_Search_Design.md)。
+AI 智能搜索、可编辑 Skill 与设置使用见 [Rust AI Search](Rust_AI_Search.md)，发布、验收与安装记录见 [1.1.2 发布记录](Rust_Release_1.1.2.md)。历史 1.0.0 的五标签指南保留在 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/v1.0.0/doc/Rust_AI_Search.md)。研究、Agent skill、补全词表及概念设计见 [AI Keyword Search](AI_Keyword_Search_Design.md)。
 
 | Document | Purpose |
 |----------|---------|
@@ -37,6 +37,7 @@ AI 智能搜索、可编辑 Skill 与设置使用见 [Rust AI Search](Rust_AI_Se
 | [Scan and Search Performance](Rust_Scan_Search_Performance.md) | Bounded Metadata workers, batch writes and measured scan/search latency |
 | [Large-library GUI Search](Rust_GUI_Search_Performance.md) | Query cancellation, directory facet reuse, virtualized tree models and GUI benchmark |
 | [Release Notes](Rust_Release_Notes.md) | Candidate changes and published client/server release history |
+| [1.1.2 release record](Rust_Release_1.1.2.md) | Windows Waveform slice drag, REAPER import and platform release validation |
 | [1.1.1 release record](Rust_Release_1.1.1.md) | Folder navigation, server management, native validation, Docker upload and fixed installation |
 | [1.1.0 release record](Rust_Release_1.1.0.md) | Search task indexes, progressive Waveform, native validation, Docker recovery and fixed installation |
 | [1.0.9 release record](Rust_Release_1.0.9.md) | Compact library rows, audition controls, native validation, Docker recovery and fixed installation |
