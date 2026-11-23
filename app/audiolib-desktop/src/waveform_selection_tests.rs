@@ -684,7 +684,14 @@ fn child_remote_invalidation() {
     });
     let mut file = f.a.clone();
     file.file_path = "/sounds/Displayed A.wav".into();
-    let source = WaveSource::capture(&f.c, &file);
+    let mut source = WaveSource::capture(&f.c, &file);
+    // The displayed Waveform already has its original identity. Block the export's
+    // revalidation so this test cancels an actual in-flight original request.
+    source.remote_version = Some(audiolib_remote::OriginalVersion {
+        etag: "\"owned-original\"".into(),
+        length: file.file_size,
+        offline: false,
+    });
     assert!(source.remote);
     assert!(f.c.publish_wave_source(&f.ui, &source));
     let selected = selection(

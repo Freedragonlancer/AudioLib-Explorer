@@ -372,6 +372,101 @@ fn error_body(source: &StreamSource) -> String {
     }
 }
 
+/// Maximum bytes held by one original-range request for a short WAV slice.
+pub const MAX_SLICE_RANGE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Read a bounded interval of the displayed original. A server ignoring Range
+/// returns None without consuming its full body. Every accepted partial response
+/// must identify the same library request, strong validator, extent and total size.
+pub fn read_original_range(
+    source: &StreamSource,
+    version: &OriginalVersion,
+    bytes: std::ops::Range<u64>,
+    cancel: &AtomicBool,
+) -> Result<Option<Vec<u8>>> {
+    let count = bytes.end.saturating_sub(bytes.start);
+    if count == 0 || count > MAX_SLICE_RANGE_BYTES || bytes.end > version.length {
+        return Err(RemoteError::Protocol("Invalid slice byte range".into()));
+    }
+    let etag = strong_etag(Some(version.etag.clone()))?;
+    let length = version.length;
+    let source = source.clone();
+    call_cancellable(
+        move |abort| {
+            let agent = crate::abort::abortable_stream_agent(
+                source.first_byte_timeout,
+                crate::stream::READ_STALL_TIMEOUT,
+                abort,
+            );
+            let span = format!("{}-{}", bytes.start, bytes.end - 1);
+            let mut response = crate::abort::call_fresh(|| {
+                let mut request = agent
+                    .get(&source.url)
+                    .header("Range", format!("bytes={span}"))
+                    .header("If-Range", &etag);
+                if let Some(auth) = source.auth.header() {
+                    request = request.header("Authorization", &auth);
+                }
+                if let Some(id) = &source.library_id {
+                    request = request.header(crate::client::LIBRARY_ID_HEADER, id);
+                }
+                request
+            })
+            .map_err(|e| first_byte_error(e, &source))?;
+            let status = response.status().as_u16();
+            if status == 200 || status == 206 {
+                let actual = header(response.headers(), "etag");
+                if actual.as_ref().is_some_and(|actual| actual != &etag) {
+                    return Err(RemoteError::Changed(
+                        "Original differs from the displayed Waveform version".into(),
+                    ));
+                }
+                if status == 200 {
+                    return Ok(None);
+                }
+                if actual.is_none()
+                    || header(response.headers(), "content-range").as_deref()
+                        != Some(&format!("bytes {span}/{length}"))
+                    || header(response.headers(), "content-length")
+                        .is_some_and(|h| h.parse::<u64>().ok() != Some(count))
+                {
+                    return Err(RemoteError::Protocol(
+                        "Invalid versioned slice range response".into(),
+                    ));
+                }
+                let mut data = Vec::with_capacity(count as usize);
+                response
+                    .body_mut()
+                    .as_reader()
+                    .take(count + 1)
+                    .read_to_end(&mut data)?;
+                if data.len() as u64 != count {
+                    return Err(RemoteError::Protocol(
+                        "Incomplete or oversized slice range".into(),
+                    ));
+                }
+                return Ok(Some(data));
+            }
+            let retry = crate::client::retry_after(response.headers());
+            let body = response
+                .body_mut()
+                .with_config()
+                .limit(64 * 1024)
+                .read_to_string()
+                .unwrap_or_default();
+            let error =
+                RemoteError::from_audio_response(status, &body, "Original WAV range", retry);
+            Err(if matches!(source.auth, crate::stream::SourceAuth::None) {
+                error.without_token()
+            } else {
+                error
+            })
+        },
+        cancel,
+        &mut |_| {},
+    )
+}
+
 /// One record to make available locally.
 #[derive(Clone, Debug)]
 pub struct DownloadItem {
@@ -582,7 +677,7 @@ impl DownloadCache {
         report: &mut dyn FnMut(Event),
         cancel: &AtomicBool,
     ) -> Result<PathBuf> {
-        self.ensure_versioned(library_id, item, playback, report, cancel)
+        self.ensure_versioned(library_id, item, playback, None, report, cancel)
             .map(|original| original.path)
     }
 
@@ -591,13 +686,14 @@ impl DownloadCache {
         library_id: &str,
         item: &DownloadItem,
         playback: Option<&MemoryCache>,
+        expected: Option<&OriginalVersion>,
         report: &mut dyn FnMut(Event),
         cancel: &AtomicBool,
     ) -> Result<EnsuredOriginal> {
-        match self.ensure_once(library_id, item, playback, report, cancel) {
-            Err(RemoteError::Changed(detail)) => {
+        match self.ensure_once(library_id, item, playback, expected, report, cancel) {
+            Err(RemoteError::Changed(detail)) if expected.is_none() => {
                 tracing::info!(%detail, "download changed on the server; retrying");
-                self.ensure_once(library_id, item, playback, report, cancel)
+                self.ensure_once(library_id, item, playback, expected, report, cancel)
             }
             other => other,
         }
@@ -608,6 +704,7 @@ impl DownloadCache {
         library_id: &str,
         item: &DownloadItem,
         playback: Option<&MemoryCache>,
+        expected: Option<&OriginalVersion>,
         report: &mut dyn FnMut(Event),
         cancel: &AtomicBool,
     ) -> Result<EnsuredOriginal> {
@@ -649,7 +746,11 @@ impl DownloadCache {
                             | RemoteError::Busy { .. }
                     ) =>
             {
-                let path = self.newest_entry(&library, file.id).ok_or(error)?;
+                let path = match expected {
+                    Some(version) => self.exact_complete(&library, file.id, version),
+                    None => self.newest_entry(&library, file.id),
+                }
+                .ok_or(error)?;
                 let length = std::fs::metadata(&path)?.len();
                 let etag = self.read_source_version(&path, length);
                 return Ok(EnsuredOriginal {
@@ -661,6 +762,15 @@ impl DownloadCache {
             }
             Err(error) => return Err(error),
         };
+        // Validate against the same HEAD that selects the cache entry and binds the GET.
+        if let Some(expected) = expected
+            && (probe.etag.as_deref() != Some(&expected.etag)
+                || probe.length != Some(expected.length))
+        {
+            return Err(RemoteError::Changed(
+                "Original differs from the displayed Waveform version".into(),
+            ));
+        }
         let version = probe.etag.clone().unwrap_or_else(|| {
             format!(
                 "size-{}-{}",
@@ -794,6 +904,48 @@ impl DownloadCache {
         }
     }
 
+    /// Whether a selection should prefer the full-file cache path. This is a routing
+    /// hint only. The normal download path revalidates before publishing any bytes.
+    pub fn has_slice_original(
+        &self,
+        item: &DownloadItem,
+        version: &OriginalVersion,
+        memory: &MemoryCache,
+    ) -> bool {
+        let Some(library) = item.source.library_id.as_deref() else {
+            return false;
+        };
+        let entry = self.library_dir(library).join(format!(
+            "{}-{}",
+            item.file.id,
+            etag_token(&version.etag)
+        ));
+        // Interrupted downloads leave the version directory and a resumable .part.
+        // Only a published file can avoid fetching the selected range.
+        let published = std::fs::read_dir(entry).is_ok_and(|files| {
+            files.flatten().any(|file| {
+                !file.file_name().to_string_lossy().ends_with(".part")
+                    && file
+                        .metadata()
+                        .is_ok_and(|m| m.is_file() && m.len() == version.length)
+            })
+        });
+        published
+            || memory
+                .complete_original(
+                    item.source
+                        .url
+                        .split('?')
+                        .next()
+                        .unwrap_or(&item.source.url),
+                    Some(library),
+                    &version.etag,
+                    Some(version.length),
+                    None,
+                )
+                .unwrap_or(false)
+    }
+
     /// Prepare a real original in a new path inside an existing caller-owned staging
     /// directory. A hard link pins immutable cached bytes where supported; otherwise
     /// a bounded copy reads an already opened source handle. Concurrent LRU deletion
@@ -849,27 +1001,17 @@ impl DownloadCache {
         cancel: &AtomicBool,
     ) -> Result<OwnedOriginal> {
         if let Some(expected) = expected {
-            let current = self.original_version_expected(
-                library_id,
-                item.file.id,
-                &item.source,
-                cancel,
-                expected,
-            )?;
-            if current.etag != expected.etag || current.length != expected.length {
-                return Err(RemoteError::Changed(
-                    "Original differs from the displayed Waveform version".into(),
-                ));
-            }
+            strong_etag(Some(expected.etag.clone()))?;
         }
         for attempt in 0..2 {
             if cancel.load(Ordering::Acquire) {
                 return Err(RemoteError::Cancelled);
             }
-            let mut original = self.ensure_versioned(
+            let original = self.ensure_versioned(
                 library_id,
                 item,
                 playback,
+                expected,
                 &mut |event| {
                     let (received, total, waiting) = match event {
                         Event::Bytes(received, total) => (received, total, None),
@@ -885,25 +1027,13 @@ impl DownloadCache {
                 },
                 cancel,
             )?;
-            if let Some(expected) = expected {
-                if original.offline
-                    && let Some(path) =
-                        self.exact_complete(&self.library_dir(library_id), item.file.id, expected)
-                {
-                    original = EnsuredOriginal {
-                        path,
-                        etag: Some(expected.etag.clone()),
-                        length: expected.length,
-                        offline: true,
-                    };
-                }
-                if original.etag.as_deref() != Some(expected.etag.as_str())
-                    || original.length != expected.length
-                {
-                    return Err(RemoteError::Changed(
-                        "Original differs from the displayed Waveform version".into(),
-                    ));
-                }
+            if let Some(expected) = expected
+                && (original.etag.as_deref() != Some(&expected.etag)
+                    || original.length != expected.length)
+            {
+                return Err(RemoteError::Changed(
+                    "Original differs from the displayed Waveform version".into(),
+                ));
             }
             let mut input = match open_pinned(&original.path) {
                 Ok(file) => file,
@@ -1255,12 +1385,12 @@ fn copy_from_memory(
 ) -> Result<bool> {
     let url = source.url.split('?').next().unwrap_or(&source.url);
     let mut buffer = Vec::new();
-    if !playback.copy_complete_for_library(
+    if !playback.complete_original(
         url,
         source.library_id.as_deref(),
         etag,
         length,
-        &mut buffer,
+        Some(&mut buffer),
     )? {
         return Ok(false);
     }
@@ -2041,6 +2171,109 @@ mod tests {
                 .is_err(),
             "A legacy filename token cannot stand in for the missing v1 receipt"
         );
+    }
+
+    #[test]
+    fn only_published_originals_skip_the_slice_range_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = DownloadCache::new(directory.path().join("cache"), u64::MAX);
+        let memory = MemoryCache::new(crate::DEFAULT_MEMORY_CACHE_BYTES);
+        let file = record();
+        let version = OriginalVersion {
+            etag: "\"v1\"".into(),
+            length: 40,
+            offline: false,
+        };
+        let mut source = StreamSource::new("http://localhost/unused", SourceAuth::None);
+        source.library_id = Some("lib-1".into());
+        let entry =
+            cache
+                .library_dir("lib-1")
+                .join(format!("{}-{}", file.id, etag_token(&version.etag)));
+        let item = DownloadItem { file, source };
+        let cached = || cache.has_slice_original(&item, &version, &memory);
+        std::fs::create_dir_all(&entry).unwrap();
+        assert!(!cached());
+        let partial = entry.join("original.wav.part");
+        std::fs::write(&partial, [0; 40]).unwrap();
+        assert!(!cached());
+        let published = entry.join("original.wav");
+        std::fs::write(&published, [0; 20]).unwrap();
+        assert!(!cached());
+        std::fs::write(&published, [0; 40]).unwrap();
+        assert!(cached());
+    }
+
+    #[test]
+    fn versioned_slice_reuses_one_head_and_rejects_a_changed_file_before_get() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = fixture("\"v1\"", 1);
+        let server = server(state.clone());
+        let cache = DownloadCache::new(directory.path().join("cache"), u64::MAX);
+        let version = OriginalVersion {
+            etag: "\"v1\"".into(),
+            length: 300_000,
+            offline: false,
+        };
+        let pin = |path: &Path| {
+            cache.prepare_owned_original_version(
+                "lib-1",
+                &item(&server),
+                None,
+                (path, &version),
+                &mut |_| {},
+                &AtomicBool::new(false),
+            )
+        };
+        let first = pin(&directory.path().join("first.wav")).unwrap();
+        assert_eq!(first.length, 300_000);
+        assert_eq!(state.lock().unwrap().heads, 1);
+        state.lock().unwrap().etag = "\"v2\"".into();
+        assert!(matches!(
+            pin(&directory.path().join("second.wav")),
+            Err(RemoteError::Changed(_))
+        ));
+        let state = state.lock().unwrap();
+        assert_eq!(state.heads, 2);
+        assert_eq!(state.gets.len(), 1);
+    }
+
+    #[test]
+    fn slice_ranges_require_matching_validator_extent_and_body() {
+        let server = TestServer::start(|request| {
+            assert_eq!(request.header("Range"), Some("bytes=10-13"));
+            assert_eq!(request.header("If-Range"), Some("\"v1\""));
+            assert_eq!(
+                request.header(crate::client::LIBRARY_ID_HEADER),
+                Some("wave-library")
+            );
+            let (status, tag, span, data) = match request.path.as_str() {
+                "/ok" => (206, "\"v1\"", "bytes 10-13/40", vec![1; 4]),
+                "/changed" => (206, "\"v2\"", "bytes 10-13/40", vec![1; 4]),
+                "/wrong" => (206, "\"v1\"", "bytes 11-14/40", vec![1; 4]),
+                "/short" => (206, "\"v1\"", "bytes 10-13/40", vec![1; 3]),
+                "/ignored" => (200, "\"v1\"", "", vec![1; 40]),
+                _ => unreachable!(),
+            };
+            TestResponse::bytes(status, data)
+                .with_header("ETag", tag)
+                .with_header("Content-Range", span)
+        });
+        let read = |route: &str| {
+            let mut source = StreamSource::new(format!("{}/{route}", server.url), SourceAuth::None);
+            source.library_id = Some("wave-library".into());
+            let version = OriginalVersion {
+                etag: "\"v1\"".into(),
+                length: 40,
+                offline: false,
+            };
+            read_original_range(&source, &version, 10..14, &AtomicBool::new(false))
+        };
+        assert_eq!(read("ok").unwrap(), Some(vec![1; 4]));
+        assert!(matches!(read("changed"), Err(RemoteError::Changed(_))));
+        assert!(matches!(read("wrong"), Err(RemoteError::Protocol(_))));
+        assert!(matches!(read("short"), Err(RemoteError::Protocol(_))));
+        assert!(read("ignored").unwrap().is_none());
     }
 
     #[test]

@@ -234,14 +234,49 @@ struct PreparedSlice {
 enum SliceOriginal {
     Local(PathBuf, SourceStamp),
     Remote(audiolib_remote::OwnedOriginal),
+    RemotePcm(Vec<u8>),
 }
 
 impl SliceOriginal {
-    fn path(&self) -> &Path {
-        match self {
+    fn render(
+        &self,
+        destination: &Path,
+        selection: &Selection,
+        progress: &mut dyn FnMut(u64, u64),
+    ) -> Result<(), String> {
+        let path = match self {
             Self::Local(path, _) => path,
             Self::Remote(original) => &original.path,
-        }
+            Self::RemotePcm(wav) => {
+                // Keep independent, immutable selection bytes for later drags. A cancelled
+                // rewrite cannot leave a partial slice.wav for the next attempt to reuse.
+                use std::io::Write;
+                let save = || -> std::io::Result<()> {
+                    let directory = destination
+                        .parent()
+                        .ok_or_else(|| std::io::Error::other("Missing slice staging directory"))?;
+                    let mut tmp = tempfile::NamedTempFile::new_in(directory)?;
+                    for part in wav.chunks(256 * 1024) {
+                        if selection.render_cancel.load(Ordering::Acquire) {
+                            return Err(std::io::Error::other("Cancelled"));
+                        }
+                        tmp.write_all(part)?;
+                    }
+                    tmp.as_file().sync_all()?;
+                    tmp.persist_noclobber(destination)?;
+                    Ok(())
+                };
+                return save().map_err(|e| e.to_string());
+            }
+        };
+        audiolib_audio::export_audio_slice(
+            path,
+            destination,
+            selection.range,
+            &selection.render_cancel,
+            progress,
+        )
+        .map_err(|e| e.to_string())
     }
 
     fn changed(&self) -> bool {
@@ -1020,6 +1055,60 @@ impl Controller {
         });
     }
 
+    fn prepare_selection_original(
+        self: &Arc<Self>,
+        remote: &super::remote_mode::RemoteDragSource,
+        selection: &Selection,
+        destination: &Path,
+    ) -> Result<SliceOriginal, String> {
+        let expected = selection.source.remote_version.as_ref().ok_or_else(|| {
+            self.localized(
+                "该波形没有已验证的原素材版本，请重新载入音频",
+                "This Waveform has no verified original version; reload the sound",
+            )
+            .to_string()
+        })?;
+        if let Some(wav) = remote
+            .short_pcm_slice(
+                &selection.source.file,
+                expected,
+                selection.range,
+                &selection.render_cancel,
+            )
+            .map_err(|e| e.localized(self.chinese.load(Ordering::Acquire)))?
+        {
+            return Ok(SliceOriginal::RemotePcm(wav));
+        }
+        let mut last = Instant::now() - Duration::from_secs(1);
+        let original = self.prepare_remote_slice(
+            remote,
+            &selection.source.file,
+            destination,
+            Some(expected),
+            &mut |progress| {
+                if last.elapsed() >= Duration::from_millis(100)
+                    || progress.total == Some(progress.received)
+                {
+                    last = Instant::now();
+                    let percent = progress
+                        .total
+                        .filter(|n| *n > 0)
+                        .map_or(0, |n| progress.received.saturating_mul(100) / n);
+                    self.slice_progress(
+                        selection,
+                        if self.chinese.load(Ordering::Acquire) {
+                            format!("下载原素材 {percent}%")
+                        } else {
+                            format!("Downloading original {percent}%")
+                        },
+                    );
+                }
+            },
+            &selection.render_cancel,
+        )?;
+        Ok(SliceOriginal::Remote(original))
+    }
+
     fn prepare_wave_slice(self: &Arc<Self>, selection: Selection) {
         let remote = if selection.source.remote {
             self.remote_drag_source().map(Some)
@@ -1044,44 +1133,12 @@ impl Controller {
                     export_directory.canonicalize().map_err(|e| e.to_string())?;
                 let directory = crate::slice_staging::prepare_staging(&export_directory)
                     .map_err(|e| e.to_string())?;
-                let original = if let Some(remote) = remote? {
-                    let mut last = Instant::now() - Duration::from_secs(1);
-                    Some(c.prepare_remote_slice(
+                let source = if let Some(remote) = remote? {
+                    c.prepare_selection_original(
                         &remote,
-                        &selection.source.file,
+                        &selection,
                         &directory.directory.path().join("original.audio"),
-                        selection.source.remote_version.as_ref(),
-                        &mut |progress| {
-                            if last.elapsed() >= Duration::from_millis(100)
-                                || progress.total == Some(progress.received)
-                            {
-                                last = Instant::now();
-                                let percent = progress
-                                    .total
-                                    .filter(|n| *n > 0)
-                                    .map_or(0, |n| progress.received.saturating_mul(100) / n);
-                                c.slice_progress(
-                                    &selection,
-                                    if c.chinese.load(Ordering::Acquire) {
-                                        format!("下载原素材 {percent}%")
-                                    } else {
-                                        format!("Downloading original {percent}%")
-                                    },
-                                );
-                            }
-                        },
-                        &selection.render_cancel,
-                    )?)
-                } else {
-                    None
-                };
-                let source = if let Some(original) = original {
-                    let expected = selection.source.remote_version.as_ref()
-                        .ok_or_else(|| c.localized("该波形没有已验证的原素材版本，请重新载入音频", "This Waveform has no verified original version; reload the sound").to_string())?;
-                    if original.etag.as_deref() != Some(expected.etag.as_str()) || original.length != expected.length {
-                        return Err(c.localized("原素材已在波形绘制后改变，请重新载入音频", "The original changed since this Waveform was rendered; reload the sound").into());
-                    }
-                    SliceOriginal::Remote(original)
+                    )?
                 } else {
                     let roots = c.config.lock().unwrap().allowed_scan_roots.clone();
                     let path = audiolib_core::validate_audio_path(
@@ -1099,27 +1156,20 @@ impl Controller {
                 }
                 let path = directory.directory.path().join("slice.wav");
                 let mut last = Instant::now() - Duration::from_secs(1);
-                audiolib_audio::export_audio_slice(
-                    source.path(),
-                    &path,
-                    selection.range,
-                    &selection.render_cancel,
-                    &mut |done, total| {
-                        if last.elapsed() >= Duration::from_millis(100) || done == total {
-                            last = Instant::now();
-                            let percent = done.saturating_mul(100).checked_div(total).unwrap_or(0);
-                            c.slice_progress(
-                                &selection,
-                                if c.chinese.load(Ordering::Acquire) {
-                                    format!("裁剪 WAV {percent}%")
-                                } else {
-                                    format!("Rendering WAV {percent}%")
-                                },
-                            );
-                        }
-                    },
-                )
-                .map_err(|e| e.to_string())?;
+                source.render(&path, &selection, &mut |done, total| {
+                    if last.elapsed() >= Duration::from_millis(100) || done == total {
+                        last = Instant::now();
+                        let percent = done.saturating_mul(100).checked_div(total).unwrap_or(0);
+                        c.slice_progress(
+                            &selection,
+                            if c.chinese.load(Ordering::Acquire) {
+                                format!("裁剪 WAV {percent}%")
+                            } else {
+                                format!("Rendering WAV {percent}%")
+                            },
+                        );
+                    }
+                })?;
                 selection.source.check_local_version()?;
                 if !c.selection_current(&selection)
                     || selection.render_cancel.load(Ordering::Acquire)
@@ -1400,14 +1450,8 @@ impl PreparedSlice {
         // The first drag consumes the already flushed staging WAV. Later drags render
         // independent bytes from the pinned original, even if a DAW edited its copy.
         if !self.path.try_exists().map_err(|e| e.to_string())? {
-            audiolib_audio::export_audio_slice(
-                self.original.path(),
-                &self.path,
-                selection.range,
-                &selection.render_cancel,
-                &mut |_, _| {},
-            )
-            .map_err(|e| e.to_string())?;
+            self.original
+                .render(&self.path, selection, &mut |_, _| {})?;
             selection.source.check_local_version()?;
         }
         publish_numbered_slice(

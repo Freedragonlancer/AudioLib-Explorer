@@ -276,6 +276,73 @@ pub(super) struct RemoteDragSource {
     cache_directory: PathBuf,
 }
 
+impl RemoteDragSource {
+    /// Fetch only a short PCM selection of a cold original. Both ranges use the
+    /// displayed version; a full-file cache hit or unsupported WAV uses the existing exporter.
+    pub(super) fn short_pcm_slice(
+        &self,
+        file: &AudioFile,
+        version: &audiolib_remote::OriginalVersion,
+        range: audiolib_core::AudioFrameRange,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Vec<u8>>, RemoteError> {
+        const PREFIX: u64 = 64 * 1024;
+        if version.offline
+            || version.length < 4 * PREFIX
+            || !Path::new(&file.filename)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    matches!(
+                        ext.to_ascii_lowercase().as_str(),
+                        "wav" | "wave" | "bwf" | "rf64" | "bw64"
+                    )
+                })
+            || (range.end_frame - range.start_frame) as f64 * 2.0
+                >= file.duration * f64::from(range.sample_rate)
+        {
+            return Ok(None);
+        }
+
+        let item = DownloadItem {
+            file: file.clone(),
+            source: self.client.download_source(file.id),
+        };
+        let cache = DownloadCache::new(self.cache_directory.clone(), DEFAULT_DOWNLOAD_CACHE_BYTES);
+        if cache.has_slice_original(&item, version, MemoryCache::global()) {
+            return Ok(None);
+        }
+        let read =
+            |bytes| audiolib_remote::read_original_range(&item.source, version, bytes, cancel);
+        let Some(prefix) = read(0..PREFIX)? else {
+            return Ok(None);
+        };
+        let Some(plan) = audiolib_audio::pcm_wave_slice(&prefix, version.length, range) else {
+            return Ok(None);
+        };
+        let span = plan.source_bytes;
+        if span.end - span.start > audiolib_remote::MAX_SLICE_RANGE_BYTES {
+            return Ok(None);
+        }
+        let mut wav = plan.header;
+        if span.end <= PREFIX {
+            wav.extend_from_slice(&prefix[span.start as usize..span.end as usize]);
+        } else {
+            if span.start < PREFIX {
+                wav.extend_from_slice(&prefix[span.start as usize..]);
+            }
+            let Some(data) = read(span.start.max(PREFIX)..span.end)? else {
+                return Ok(None);
+            };
+            wav.extend_from_slice(&data);
+        }
+        if !wav.len().is_multiple_of(2) {
+            wav.push(0);
+        }
+        Ok(Some(wav))
+    }
+}
+
 /// Mutable server-mode state shared by the dialog, sync and playback.
 #[derive(Default)]
 pub(super) struct RemoteRuntime {
