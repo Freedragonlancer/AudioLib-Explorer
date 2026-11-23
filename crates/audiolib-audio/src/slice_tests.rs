@@ -32,6 +32,45 @@ fn format(bytes: u16, channels: u16, float: bool) -> OutputFormat {
     }
 }
 
+#[test]
+fn prefix_slice_matches_local_export_for_pcm_float_and_extensible_wav() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.wav");
+    let selection = range(5, 10, 48000);
+    for (i, fmt) in [
+        format(1, 1, false),
+        format(3, 2, false),
+        format(4, 2, true),
+        OutputFormat {
+            mask: 0x3f,
+            valid_bits: 20,
+            ..format(3, 6, false)
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let bytes: Vec<_> = (0..128 * usize::from(fmt.align()))
+            .map(|i| i as u8)
+            .collect();
+        let original = wave(fmt, 128, &bytes);
+        std::fs::write(&source, &original).unwrap();
+        let out = dir.path().join(format!("local{i}.wav"));
+        export(&source, &out, selection);
+        let prefix = &original[..fmt.header(128).unwrap().len()];
+        let plan = pcm_wave_slice(prefix, original.len() as u64, selection).unwrap();
+        let mut rendered = plan.header;
+        rendered.extend_from_slice(
+            &original[plan.source_bytes.start as usize..plan.source_bytes.end as usize],
+        );
+        if !rendered.len().is_multiple_of(2) {
+            rendered.push(0);
+        }
+        assert_eq!(rendered, std::fs::read(out).unwrap());
+        assert!(pcm_wave_slice(&prefix[..12], original.len() as u64, selection).is_none());
+    }
+}
+
 fn export(source: &Path, output: &Path, selection: AudioFrameRange) {
     export_audio_slice(
         source,

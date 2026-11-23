@@ -710,16 +710,17 @@ impl MemoryCache {
         length: Option<u64>,
         output: &mut dyn io::Write,
     ) -> io::Result<bool> {
-        self.copy_complete_for_library(url, None, etag, length, output)
+        self.complete_original(url, None, etag, length, Some(output))
     }
 
-    pub(crate) fn copy_complete_for_library(
+    /// Verify the cached representation under its entry lock, optionally copying its bytes.
+    pub(crate) fn complete_original(
         &self,
         url: &str,
         library_id: Option<&str>,
         etag: &str,
         length: Option<u64>,
-        output: &mut dyn io::Write,
+        output: Option<&mut dyn io::Write>,
     ) -> io::Result<bool> {
         let found = self
             .entries()
@@ -744,6 +745,9 @@ impl MemoryCache {
         {
             return Ok(false);
         }
+        let Some(output) = output else {
+            return Ok(true);
+        };
         for index in 0..total.div_ceil(CHUNK_BYTES) {
             let chunk = state
                 .chunks
@@ -2254,12 +2258,12 @@ mod tests {
         assert_eq!(read_all(&reused), vec![11; 64]);
         assert!(
             !cache
-                .copy_complete_for_library(
+                .complete_original(
                     &source_a.url,
                     Some("library-b"),
                     "\"same-validator\"",
                     Some(64),
-                    &mut Vec::new()
+                    Some(&mut Vec::new())
                 )
                 .unwrap()
         );
