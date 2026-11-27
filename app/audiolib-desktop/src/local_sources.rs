@@ -22,9 +22,12 @@ pub(in crate::controller) enum LocalSourceRequest {
         name: String,
         description: String,
         path: PathBuf,
+        database: Option<PathBuf>,
         existing: bool,
         pregenerate: bool,
     },
+    /// Copy and rebind the active registration while preserving its local state.
+    Relocate(PathBuf),
     /// Open a registered local library after pending writes and scans drain.
     Switch { id: String },
 }
@@ -36,7 +39,9 @@ impl Controller {
         let c = self.clone();
         ui.on_sm_local_edit_requested(move || c.open_local_form(true));
         let c = self.clone();
-        ui.on_sm_local_browse_requested(move || c.browse_local_source());
+        ui.on_sm_local_browse_requested(move || c.browse_local_source(false));
+        let c = self.clone();
+        ui.on_sm_database_browse_requested(move || c.browse_local_source(true));
         let c = self.clone();
         ui.on_sm_local_save_requested(move || c.save_local_form());
     }
@@ -101,6 +106,7 @@ impl Controller {
                 .unwrap_or_default()
                 .into(),
         );
+        ui.set_sm_database_draft("".into());
         ui.set_sm_local_path_draft(
             library
                 .as_ref()
@@ -121,7 +127,7 @@ impl Controller {
         ui.set_sm_local_form(true);
     }
 
-    fn browse_local_source(self: &Arc<Self>) {
+    fn browse_local_source(self: &Arc<Self>, database: bool) {
         if !self.available() {
             return;
         }
@@ -136,7 +142,9 @@ impl Controller {
         ui.set_ds_applying(true);
         let c = self.clone();
         std::thread::spawn(move || {
-            let result = if existing {
+            let result = if database {
+                crate::dialogs::choose(true, crate::dialogs::FileKind::NewLibrary, chinese, owner)
+            } else if existing {
                 crate::dialogs::choose(false, crate::dialogs::FileKind::Database, chinese, owner)
             } else {
                 crate::dialogs::choose_folder(chinese, owner)
@@ -148,6 +156,9 @@ impl Controller {
                     return;
                 }
                 match result {
+                    Ok(Some(path)) if database => {
+                        ui.set_sm_database_draft(path.display().to_string().into())
+                    }
                     Ok(Some(path)) => ui.set_sm_local_path_draft(path.display().to_string().into()),
                     Ok(None) => {}
                     Err(error) => ui.set_sm_local_message(error.into()),
@@ -189,6 +200,9 @@ impl Controller {
                     name,
                     description,
                     path,
+                    database: (!ui.get_sm_local_existing()
+                        && !ui.get_sm_database_draft().trim().is_empty())
+                    .then(|| PathBuf::from(ui.get_sm_database_draft().trim())),
                     existing: ui.get_sm_local_existing(),
                     pregenerate,
                 },
@@ -307,6 +321,7 @@ impl Controller {
                 name,
                 description,
                 path,
+                database,
                 existing,
                 pregenerate,
             } => {
@@ -318,6 +333,8 @@ impl Controller {
                 };
                 let database = if *existing {
                     source
+                } else if let Some(path) = database {
+                    path.clone()
                 } else {
                     new_database_path(&configuration.data_root())?
                 };
@@ -336,6 +353,7 @@ impl Controller {
                     Some((name.as_str(), description.as_str(), *pregenerate)),
                 )
             }
+            LocalSourceRequest::Relocate(path) => (path.clone(), false, None),
             LocalSourceRequest::Switch { id } => {
                 let library = configuration.local_library(id).ok_or_else(|| {
                     cn_or(
@@ -363,8 +381,41 @@ impl Controller {
                 "New library destination already exists.",
             ));
         }
-        let provider =
-            self.open_local_for_switch(&path, create, registration.is_some(), progress)?;
+        let original = self.provider();
+        let relocation = matches!(request, LocalSourceRequest::Relocate(_));
+        let (provider, _guard) = if relocation {
+            if self.remote_read_only()
+                || !crate::controller::same_path(
+                    original.database_path(),
+                    &configuration.paths.database,
+                )
+            {
+                return Err(cn_or(
+                    chinese,
+                    "活动本地库已改变。",
+                    "The active local library changed.",
+                ));
+            }
+            progress.stage(
+                "copying_database",
+                "正在复制并校验数据库…",
+                "Copying and validating the database…",
+            );
+            let (provider, guard) = original
+                .prepare_local_relocation(
+                    &path,
+                    &configuration.data_root(),
+                    configuration.play_history_limit,
+                    &self.shutdown,
+                )
+                .map_err(|e| e.to_string())?;
+            (provider, Some(guard))
+        } else {
+            (
+                self.open_local_for_switch(&path, create, registration.is_some(), progress)?,
+                None,
+            )
+        };
         progress.stage(
             "applying_local",
             "正在应用音效库并保存设置…",
@@ -372,7 +423,7 @@ impl Controller {
         );
         // Open can be slow. Apply only this source operation to the latest settings,
         // including any preference or server profile updates saved in the meantime.
-        {
+        (|| -> Result<(), String> {
             let mut config = self.config.lock().unwrap();
             if self.shutdown.load(Ordering::Acquire) {
                 return Err("Desktop is shutting down".into());
@@ -387,6 +438,9 @@ impl Controller {
                     .register_local_library(name, description, &path, pregenerate)
                     .map_err(|error| error.to_string())?,
                 None => match request {
+                    LocalSourceRequest::Relocate(_) => committed
+                        .relocate_selected_library(original.database_path(), &path)
+                        .map_err(|e| e.to_string())?,
                     LocalSourceRequest::Switch { id } => id.clone(),
                     _ => unreachable!(),
                 },
@@ -405,7 +459,23 @@ impl Controller {
             self.list_waveforms
                 .set_pregenerate(committed.pregenerate_list_waveforms);
             *config = committed;
-        }
+            Ok(())
+        })()
+        .map_err(|error| {
+            if relocation {
+                format!(
+                    "{} {} — {error}",
+                    if chinese {
+                        "数据库副本："
+                    } else {
+                        "Database copy:"
+                    },
+                    path.display()
+                )
+            } else {
+                error
+            }
+        })?;
         self.cancel_remote();
         self.source_generation.fetch_add(1, Ordering::AcqRel);
         self.stop_remote_stream();
@@ -594,6 +664,7 @@ mod tests {
                     name: "Audit required".into(),
                     description: String::new(),
                     path: path.clone(),
+                    database: None,
                     existing: true,
                     pregenerate: false,
                 })
@@ -894,6 +965,7 @@ mod tests {
                 name: "Foley".into(),
                 description: "Local effects".into(),
                 path: other.database_path().to_owned(),
+                database: None,
                 existing: true,
                 pregenerate: false,
             })
@@ -973,6 +1045,7 @@ mod tests {
                     name: "Invalid".into(),
                     description: String::new(),
                     path: invalid.clone(),
+                    database: None,
                     existing: true,
                     pregenerate: true,
                 })
@@ -1147,6 +1220,178 @@ mod tests {
         controller.shutdown();
         ui.hide().unwrap();
         drop(source);
+    }
+
+    #[test]
+    fn local_path_tools_use_the_registered_source_and_restore_after_settings_failure() {
+        source_transition_tests::isolated_module(
+            "source_manager::local_sources::tests",
+            "child_local_path_tools",
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated desktop export, location switch, preview and commit"]
+    fn child_local_path_tools() {
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let root = source_transition_tests::root();
+        let (ui, controller, _engine) = local_controller(&root);
+        let (_source, _) = source_transition_tests::indexed_sounds(&root.join("original"));
+        let audio = root.join("original/sounds");
+        let custom = root.join("custom.db");
+        ui.invoke_sm_local_add_requested();
+        ui.set_sm_local_name("My field recordings".into());
+        ui.set_sm_local_pregenerate(false);
+        ui.set_sm_local_path_draft(audio.display().to_string().into());
+        ui.set_sm_database_draft(custom.display().to_string().into());
+        ui.invoke_sm_local_save_requested();
+        let c = controller.clone();
+        source_transition_tests::run_until(&ui, move || {
+            c.provider().stats().is_ok_and(|s| s.audio_files == 2)
+                && c.scan_cancel.lock().unwrap().is_none()
+        });
+        let original = controller.provider();
+        assert_eq!(original.database_path(), custom.canonicalize().unwrap());
+        let file = original
+            .find_audio_by_path(&audio.join("metal.wav"))
+            .unwrap()
+            .unwrap();
+        original
+            .update_metadata(
+                file.id,
+                &MetadataPatch {
+                    notes: Some("field notes".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let registered = controller
+            .config
+            .lock()
+            .unwrap()
+            .selected_local_library()
+            .unwrap()
+            .id
+            .clone();
+        let wait = || {
+            let c = controller.clone();
+            source_transition_tests::run_until(&ui, move || c.available());
+        };
+        let export = root.join("export.db");
+        *controller.test_file_choice.lock().unwrap() = Some(export.clone());
+        ui.invoke_library_action(12);
+        wait();
+        assert_eq!(
+            SqliteProvider::open_existing(&export)
+                .unwrap()
+                .get_audio(file.id)
+                .unwrap()
+                .notes,
+            "field notes"
+        );
+        assert_eq!(
+            controller.provider().database_path(),
+            original.database_path()
+        );
+        let dest = root.join("daily.db");
+        *controller.test_file_choice.lock().unwrap() = Some(dest.clone());
+        ui.invoke_library_action(13);
+        wait();
+        assert_eq!(
+            controller.provider().database_path(),
+            dest.canonicalize().unwrap(),
+            "{}",
+            ui.get_management_report()
+        );
+        assert_eq!(
+            controller
+                .config
+                .lock()
+                .unwrap()
+                .selected_local_library()
+                .unwrap()
+                .id,
+            registered
+        );
+        let settings = controller.config.lock().unwrap().paths.settings.clone();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        assert_eq!(
+            PathBuf::from(saved["active_database"].as_str().unwrap()),
+            dest.canonicalize().unwrap()
+        );
+        let moved = root.join("new audio");
+        std::fs::rename(&audio, &moved).unwrap();
+        *controller.test_file_choice.lock().unwrap() = Some(moved.clone());
+        let source = original.folders(None).unwrap().remove(0).path;
+        ui.invoke_repair_start(source.into(), false);
+        wait();
+        assert!(ui.get_repair_reviewing(), "{}", ui.get_management_report());
+        assert_eq!(ui.get_repair_rows().row_count(), 2);
+        assert!(ui.get_repair_can_apply());
+        ui.invoke_repair_choice(0, 0);
+        assert!(!ui.get_repair_rows().row_data(0).unwrap().chosen);
+        ui.invoke_repair_choice(0, 0);
+        ui.invoke_repair_apply();
+        wait();
+        let repaired = controller
+            .provider()
+            .find_audio_by_path(&moved.join("metal.wav"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (repaired.id, repaired.notes.as_str()),
+            (file.id, "field notes")
+        );
+        assert!(!ui.get_repair_reviewing());
+        let results = controller
+            .provider()
+            .search(&audiolib_core::SearchRequest {
+                query: "metal".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let row = results.results.iter().find(|r| r.id == file.id).unwrap();
+        assert_eq!(row.file_path, repaired.file_path);
+        controller.select_id(row.id, true);
+        let expected_audio = PathBuf::from(&repaired.file_path).canonicalize().unwrap();
+        let c = controller.clone();
+        source_transition_tests::run_until(&ui, move || {
+            c.audio
+                .status()
+                .file_path
+                .and_then(|p| p.canonicalize().ok())
+                .as_ref()
+                == Some(&expected_audio)
+        });
+        let saved = settings.with_extension("hold");
+        std::fs::rename(&settings, &saved).unwrap();
+        std::fs::create_dir(&settings).unwrap();
+        let failed = root.join("complete-copy.db");
+        *controller.test_file_choice.lock().unwrap() = Some(failed.clone());
+        ui.invoke_library_action(13);
+        wait();
+        assert_eq!(
+            controller.provider().database_path(),
+            dest.canonicalize().unwrap()
+        );
+        assert!(
+            ui.get_management_report().contains("complete-copy.db"),
+            "{}",
+            ui.get_management_report()
+        );
+        assert_eq!(
+            SqliteProvider::open_existing(&failed)
+                .unwrap()
+                .get_audio(file.id)
+                .unwrap()
+                .notes,
+            "field notes"
+        );
+        std::fs::remove_dir(&settings).unwrap();
+        std::fs::rename(saved, settings).unwrap();
+        controller.shutdown();
+        ui.hide().unwrap();
     }
 
     #[test]

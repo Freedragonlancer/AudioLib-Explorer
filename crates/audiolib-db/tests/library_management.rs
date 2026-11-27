@@ -1337,3 +1337,540 @@ fn root_relocation_rejects_volume_roots_before_changing_any_paths() {
     ));
     assert_eq!(f.provider.stats().unwrap().audio_files, 2);
 }
+
+mod local_paths {
+    use super::*;
+    use audiolib_core::path_repair::{MatchKind, RepairRequest};
+    use std::sync::atomic::AtomicBool;
+
+    fn request(f: &Fixture, target: &Path, whole: bool) -> RepairRequest {
+        RepairRequest {
+            source: f
+                .provider
+                .folders(None)
+                .unwrap()
+                .into_iter()
+                .find(|v| v.name == "audio")
+                .unwrap()
+                .path,
+            target: target.into(),
+            missing_only: !whole,
+        }
+    }
+
+    #[test]
+    fn review_restructured_audio_and_commit_selected_records_atomically() {
+        let f = fixture();
+        let root = f.temp.path().join("new");
+        fs::create_dir_all(root.join("reorganized")).unwrap();
+        let first = root.join("metal.wav");
+        let second = root.join("reorganized/wood.wav");
+        fs::copy(&f.paths[0], &first).unwrap();
+        fs::copy(&f.paths[1], &second).unwrap();
+        f.provider
+            .update_metadata(f.ids[0], &patch("retained"))
+            .unwrap();
+        let cancel = AtomicBool::new(false);
+        let preview = |whole| {
+            f.provider
+                .preview_path_repair(&request(&f, &root, whole), &[], &cancel)
+                .unwrap()
+        };
+        assert!(preview(false).rows.is_empty());
+        let whole = preview(true);
+        assert_eq!(whole.rows.len(), 2);
+        let held = f.temp.path().join("temporarily-missing.wav");
+        fs::rename(&f.paths[1], &held).unwrap();
+        let partial = preview(false);
+        assert_eq!(partial.rows.len(), 1);
+        assert_eq!(partial.rows[0].id, f.ids[1]);
+        fs::rename(&held, &f.paths[1]).unwrap();
+        fs::rename(f.temp.path().join("audio"), f.temp.path().join("offline")).unwrap();
+        let review = preview(false);
+        let a = review.rows.iter().position(|r| r.id == f.ids[0]).unwrap();
+        let b = review.rows.iter().position(|r| r.id == f.ids[1]).unwrap();
+        assert_eq!(review.rows[a].kind, MatchKind::Relative);
+        assert_eq!(review.rows[b].kind, MatchKind::Filename);
+        let choices = [(a, 0), (b, 0)];
+        assert!(
+            f.provider
+                .apply_path_repair(
+                    &review,
+                    &choices,
+                    std::slice::from_ref(&f.temp.path().join("offline")),
+                    &cancel,
+                    &mut |_| {}
+                )
+                .is_err()
+        );
+        let other = SqliteProvider::open_existing(f.provider.database_path()).unwrap();
+        assert!(
+            other
+                .apply_path_repair(&review, &choices, &[], &cancel, &mut |_| {})
+                .is_err()
+        );
+        let mut staged = 0;
+        let result = f
+            .provider
+            .apply_path_repair(&review, &choices, &[], &cancel, &mut |count| {
+                staged = count;
+                cancel.store(true, std::sync::atomic::Ordering::Release);
+            });
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert_eq!(staged, 1);
+        for (row, _) in choices {
+            let source = &review.rows[row];
+            assert_eq!(
+                f.provider.get_audio(source.id).unwrap().file_path,
+                source.original
+            );
+        }
+        assert!(f.provider.find_audio_by_path(&first).unwrap().is_none());
+        cancel.store(false, std::sync::atomic::Ordering::Release);
+        fs::write(&second, b"changed").unwrap();
+        assert!(
+            f.provider
+                .apply_path_repair(&review, &choices, &[], &cancel, &mut |_| {})
+                .is_err()
+        );
+        assert_eq!(
+            f.provider.get_audio(f.ids[0]).unwrap().file_path,
+            review.rows[a].original
+        );
+        assert!(
+            f.provider
+                .apply_path_repair(&review, &choices, &[], &AtomicBool::new(true), &mut |_| {})
+                .is_err()
+        );
+        let backup = f
+            .provider
+            .apply_path_repair(&review, &[(a, 0)], &[], &cancel, &mut |_| {})
+            .unwrap();
+        assert!(backup.destination.is_file());
+        let repaired = f.provider.find_audio_by_path(&first).unwrap().unwrap();
+        assert_eq!(repaired.id, f.ids[0]);
+        assert_eq!(repaired.tags, "retained");
+        assert!(audiolib_audio::probe(Path::new(&repaired.file_path)).is_ok());
+        assert_eq!(
+            f.provider.get_audio(f.ids[1]).unwrap().file_path,
+            review.rows[b].original
+        );
+        assert!(f.provider.check_library().unwrap().is_ok());
+    }
+
+    #[test]
+    fn contested_occupied_and_incompatible_candidates_remain_explicit() {
+        let f = fixture();
+        let old = f.temp.path().join("audio");
+        let dest = f.temp.path().join("new");
+        fs::create_dir_all(dest.join("alt")).unwrap();
+        fs::copy(&f.paths[0], old.join("child/metal.wav")).unwrap();
+        ScanService::new(f.provider.clone())
+            .scan(
+                &old,
+                &ScanOptions::default(),
+                &ScanCancellation::default(),
+                |_| {},
+            )
+            .unwrap();
+        fs::copy(&f.paths[0], dest.join("alt/metal.wav")).unwrap();
+        wav(&dest.join("alt/wood.wav"), 44100);
+        let cancel = AtomicBool::new(false);
+        let request = request(&f, &dest, true);
+        let preview = f
+            .provider
+            .preview_path_repair(&request, &[], &cancel)
+            .unwrap();
+        let disputed = preview
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.kind == MatchKind::Ambiguous)
+            .map(|(i, _)| (i, 0))
+            .collect::<Vec<_>>();
+        assert_eq!(disputed.len(), 2);
+        assert_eq!(
+            preview
+                .rows
+                .iter()
+                .filter(|r| r.kind == MatchKind::Missing)
+                .count(),
+            1
+        );
+        assert!(
+            f.provider
+                .apply_path_repair(&preview, &disputed, &[], &cancel, &mut |_| {})
+                .is_err()
+        );
+        ScanService::new(f.provider.clone())
+            .scan(
+                &dest,
+                &ScanOptions::default(),
+                &ScanCancellation::default(),
+                |_| {},
+            )
+            .unwrap();
+        let preview = f
+            .provider
+            .preview_path_repair(&request, &[], &cancel)
+            .unwrap();
+        assert_eq!(
+            preview
+                .rows
+                .iter()
+                .filter(|r| r.kind == MatchKind::Occupied)
+                .count(),
+            2
+        );
+        assert_eq!(
+            f.provider
+                .find_audio_by_path(&f.paths[0])
+                .unwrap()
+                .unwrap()
+                .id,
+            f.ids[0]
+        );
+    }
+
+    #[test]
+    fn matches_a_stored_windows_drive_before_other_identical_filenames() {
+        let f = fixture();
+        let target = f.temp.path().join("new volume/Takes");
+        fs::create_dir_all(target.join("duplicates")).unwrap();
+        fs::copy(&f.paths[0], target.join("metal.wav")).unwrap();
+        // The old drive is represented only in SQLite; this test never accesses that volume.
+        let old_root = r"Q:\Field\Takes";
+        let old_file = format!(r"{old_root}\metal.wav");
+        let folder = f.provider.get_audio(f.ids[0]).unwrap().folder_id.unwrap();
+        let db = support::connection(f.provider.database_path()).unwrap();
+        db.execute(
+            "UPDATE folders SET folder_path=?2 WHERE id=?1",
+            rusqlite::params![folder, old_root],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE audio_files SET file_path=?2,path_key=?3 WHERE id=?1",
+            rusqlite::params![
+                f.ids[0],
+                old_file,
+                old_file.replace('\\', "/").to_lowercase()
+            ],
+        )
+        .unwrap();
+        drop(db);
+        fs::copy(&f.paths[0], target.join("duplicates/metal.wav")).unwrap();
+        let cancel = AtomicBool::new(false);
+        let preview = f
+            .provider
+            .preview_path_repair(
+                &RepairRequest {
+                    source: old_root.into(),
+                    target: target.clone(),
+                    missing_only: false,
+                },
+                &[],
+                &cancel,
+            )
+            .unwrap();
+        let index = preview.rows.iter().position(|r| r.id == f.ids[0]).unwrap();
+        assert_eq!(preview.rows[index].kind, MatchKind::Relative);
+        assert_eq!(preview.rows[index].candidates.len(), 1);
+        f.provider
+            .apply_path_repair(&preview, &[(index, 0)], &[], &cancel, &mut |_| {})
+            .unwrap();
+        assert_eq!(
+            f.provider
+                .find_audio_by_path(&target.join("metal.wav"))
+                .unwrap()
+                .unwrap()
+                .id,
+            f.ids[0]
+        );
+    }
+
+    #[test]
+    fn refuses_stale_database_sidecars_without_creating_a_library() {
+        let f = fixture();
+        let target = f.temp.path().join("abandoned.db");
+        let journal = f.temp.path().join("abandoned.db-wal");
+        fs::write(&journal, b"existing user data").unwrap();
+        assert!(f.provider.backup_library(&target).is_err());
+        let cancel = AtomicBool::new(false);
+        assert!(
+            SqliteProvider::create_new_local(&target, f.temp.path(), 10, &cancel, |_| {}).is_err()
+        );
+        assert!(
+            f.provider
+                .prepare_local_relocation(&target, f.temp.path(), 10, &cancel)
+                .is_err()
+        );
+        assert!(!target.exists());
+        assert_eq!(fs::read(journal).unwrap(), b"existing user data");
+    }
+
+    #[test]
+    fn stored_foreign_paths_can_be_repaired_and_directory_links_cannot_escape() {
+        let f = fixture();
+        let root = f.temp.path().join("moved");
+        let outside = f.temp.path().join("outside");
+        fs::create_dir_all(root.join("child")).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::copy(&f.paths[0], root.join("metal.wav")).unwrap();
+        fs::copy(&f.paths[1], outside.join("wood.wav")).unwrap();
+        let link = root.join("linked");
+        #[cfg(windows)]
+        {
+            // Use fixed shell arguments and a fixture-owned working directory.
+            let result = std::process::Command::new("cmd")
+                .args(["/D", "/C", "mklink", "/J", "linked", r"..\outside"])
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let stored = if cfg!(windows) {
+            "/Volumes/Offline/Field"
+        } else {
+            "Q:/Offline/Field"
+        };
+        let db = support::connection(f.provider.database_path()).unwrap();
+        for (i, path) in [(0, "metal.wav"), (1, "child/wood.wav")] {
+            let folder = f.provider.get_audio(f.ids[i]).unwrap().folder_id.unwrap();
+            let dir = if i == 0 {
+                stored.to_string()
+            } else {
+                format!("{stored}/child")
+            };
+            db.execute(
+                "UPDATE folders SET folder_path=?2 WHERE id=?1",
+                rusqlite::params![folder, dir],
+            )
+            .unwrap();
+            let text = format!("{stored}/{path}");
+            db.execute(
+                "UPDATE audio_files SET file_path=?2,path_key=?3 WHERE id=?1",
+                rusqlite::params![f.ids[i], text, text.to_lowercase()],
+            )
+            .unwrap();
+        }
+        drop(db);
+        let cancel = AtomicBool::new(false);
+        let mut preview = f
+            .provider
+            .preview_path_repair(
+                &RepairRequest {
+                    source: stored.into(),
+                    target: root.clone(),
+                    missing_only: true,
+                },
+                &[],
+                &cancel,
+            )
+            .unwrap();
+        let found = preview
+            .rows
+            .iter()
+            .position(|r| r.kind == MatchKind::Relative)
+            .unwrap();
+        assert_eq!(
+            preview
+                .rows
+                .iter()
+                .filter(|r| r.kind == MatchKind::Missing)
+                .count(),
+            1
+        );
+        fs::copy(&f.paths[0], outside.join("metal.wav")).unwrap();
+        Arc::make_mut(&mut preview.rows[found].candidates)[0].path = link.join("metal.wav");
+        assert!(
+            f.provider
+                .apply_path_repair(&preview, &[(found, 0)], &[], &cancel, &mut |_| {})
+                .is_err()
+        );
+        assert_eq!(
+            f.provider.get_audio(f.ids[0]).unwrap().file_path,
+            format!("{stored}/metal.wav")
+        );
+        // Remove the test-owned junction itself before TempDir removes its target.
+        #[cfg(windows)]
+        fs::remove_dir(link).unwrap();
+    }
+
+    #[test]
+    fn repair_attaches_a_new_subdirectory_to_its_indexed_ancestor() {
+        let f = fixture();
+        let root = f.temp.path().join("audio");
+        let destination = root.join("new/nested");
+        fs::create_dir_all(&destination).unwrap();
+        fs::rename(&f.paths[0], destination.join("metal.wav")).unwrap();
+        let cancel = AtomicBool::new(false);
+        let review = f
+            .provider
+            .preview_path_repair(&request(&f, &destination, false), &[], &cancel)
+            .unwrap();
+        assert_eq!(review.rows.len(), 1);
+        f.provider
+            .apply_path_repair(&review, &[(0, 0)], &[], &cancel, &mut |_| {})
+            .unwrap();
+        let roots = f.provider.folders(None).unwrap();
+        assert_eq!(roots.len(), 1);
+        let children = f.provider.folders(Some(roots[0].id)).unwrap();
+        let new = children.iter().find(|folder| folder.name == "new").unwrap();
+        let nested = f.provider.folders(Some(new.id)).unwrap();
+        assert_eq!(
+            f.provider.get_audio(f.ids[0]).unwrap().folder_id,
+            Some(nested[0].id)
+        );
+    }
+
+    #[test]
+    fn occupied_relative_target_leaves_free_alternatives_for_manual_review() {
+        let f = fixture();
+        let dest = f.temp.path().join("replacement");
+        fs::create_dir_all(&dest).unwrap();
+        let occupied = dest.join("metal.wav");
+        fs::copy(&f.paths[0], &occupied).unwrap();
+        ScanService::new(f.provider.clone())
+            .scan(
+                &dest,
+                &ScanOptions::default(),
+                &ScanCancellation::default(),
+                |_| {},
+            )
+            .unwrap();
+        let owner = f.provider.find_audio_by_path(&occupied).unwrap().unwrap();
+        fs::create_dir(dest.join("spare")).unwrap();
+        let alternate = dest.join("spare/metal.wav");
+        fs::copy(&f.paths[0], &alternate).unwrap();
+        let cancel = AtomicBool::new(false);
+        let review = f
+            .provider
+            .preview_path_repair(&request(&f, &dest, true), &[], &cancel)
+            .unwrap();
+        let (i, row) = review
+            .rows
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.id == f.ids[0])
+            .unwrap();
+        assert_eq!(row.kind, MatchKind::Ambiguous);
+        assert_eq!(row.candidates.len(), 1);
+        assert_eq!(row.candidates[0].path, alternate.canonicalize().unwrap());
+        f.provider
+            .apply_path_repair(&review, &[(i, 0)], &[], &cancel, &mut |_| {})
+            .unwrap();
+        assert_eq!(
+            f.provider
+                .find_audio_by_path(&occupied)
+                .unwrap()
+                .unwrap()
+                .id,
+            owner.id
+        );
+        assert_eq!(
+            f.provider
+                .find_audio_by_path(&alternate)
+                .unwrap()
+                .unwrap()
+                .id,
+            f.ids[0]
+        );
+    }
+
+    #[test]
+    fn relocating_snapshot_carries_personal_state_and_resumable_vendor_input() {
+        use audiolib_core::vendor_import::{VendorImportOptions, VendorMappingTemplate};
+        use audiolib_db::local_play_history::{LocalPlayHistory, local_library_id};
+        let f = fixture();
+        let db = f.provider.database_path();
+        let data = f.temp.path().join("preferences");
+        let old_id = local_library_id(db).unwrap();
+        let history = LocalPlayHistory::open(&data, &old_id, 100).unwrap();
+        let audio = f.provider.get_audio(f.ids[0]).unwrap();
+        history
+            .record(Some(audio.id), &audio.file_path, &audio.filename)
+            .unwrap();
+        let target = SearchWorkspaceTarget::new(&data, &old_id);
+        let mut workspace = SearchWorkspace::for_scope(&old_id);
+        workspace.session.tasks.push(SearchTask::default());
+        workspace.session.tasks[0].id = "task-one".into();
+        workspace.session.tasks[0].title = "Field collection".into();
+        f.provider
+            .save_search_workspace(&target, &workspace)
+            .unwrap();
+        f.provider
+            .update_metadata(audio.id, &patch("snapshot"))
+            .unwrap();
+        let csv = f.temp.path().join("catalog.csv");
+        fs::write(&csv, "Filename,Description\nmetal.wav,test\n").unwrap();
+        let vendor = f.provider.vendor_import_preview_impl(&csv).unwrap();
+        let template = f
+            .provider
+            .vendor_import_save_template_impl(&VendorMappingTemplate {
+                name: "template".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let staging = db.with_file_name("library.db.vendor-import");
+        let invalid = staging.join("reserved.db");
+        assert!(
+            f.provider
+                .prepare_local_relocation(&invalid, &data, 100, &AtomicBool::new(false))
+                .is_err()
+        );
+        assert!(!invalid.exists());
+        assert!(!staging.join(".audiolib-import-leases").exists());
+        let destination = f.temp.path().join("new.db");
+        let (new, guard) = f
+            .provider
+            .prepare_local_relocation(&destination, &data, 100, &AtomicBool::new(false))
+            .unwrap();
+        assert!(
+            f.provider
+                .update_metadata(audio.id, &patch("busy"))
+                .is_err()
+        );
+        assert!(SqliteProvider::open_existing(&destination).is_err());
+        assert_eq!(new.get_audio(audio.id).unwrap().tags, "snapshot");
+        assert_eq!(new.vendor_import_templates_impl().unwrap(), vec![template]);
+        fs::rename(
+            db.with_file_name("library.db.vendor-import"),
+            db.with_file_name("offline-vendor"),
+        )
+        .unwrap();
+        assert!(
+            new.vendor_import_mapping_impl(&vendor.import_id, &VendorImportOptions::default())
+                .is_ok()
+        );
+        let new_id = local_library_id(&destination).unwrap();
+        assert_eq!(
+            LocalPlayHistory::open(&data, &new_id, 100)
+                .unwrap()
+                .page(10, 0)
+                .unwrap()[0]
+                .audio_id,
+            Some(audio.id)
+        );
+        assert_eq!(
+            new.load_search_workspace(&SearchWorkspaceTarget::new(&data, &new_id))
+                .unwrap()
+                .session,
+            workspace.session
+        );
+        drop(guard);
+        let reopened = SqliteProvider::open_existing(&destination).unwrap();
+        assert_eq!(reopened.album_namespace(), f.provider.album_namespace());
+        assert!(
+            f.provider
+                .prepare_local_relocation(&destination, &data, 100, &AtomicBool::new(false))
+                .is_err()
+        );
+        assert_eq!(history.page(10, 0).unwrap().len(), 1);
+    }
+}

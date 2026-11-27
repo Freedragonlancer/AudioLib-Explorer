@@ -194,6 +194,8 @@ pub fn choose_folder(_chinese: bool, _owner: usize) -> Result<Option<PathBuf>, S
 pub enum FileKind {
     Database,
     NewLibrary,
+    ExportDatabase,
+    RelocateDatabase,
     Audio,
     Image,
     JsonLines,
@@ -244,10 +246,20 @@ pub fn choose(
         fn CommDlgExtendedError() -> u32;
     }
     let (filter, ext) = match (kind, chinese) {
-        (FileKind::Database | FileKind::NewLibrary, true) => {
-            ("音效库 SQLite 数据库 (*.db)\0*.db\0所有文件\0*.*\0\0", "db")
-        }
-        (FileKind::Database | FileKind::NewLibrary, false) => (
+        (
+            FileKind::Database
+            | FileKind::NewLibrary
+            | FileKind::ExportDatabase
+            | FileKind::RelocateDatabase,
+            true,
+        ) => ("音效库 SQLite 数据库 (*.db)\0*.db\0所有文件\0*.*\0\0", "db"),
+        (
+            FileKind::Database
+            | FileKind::NewLibrary
+            | FileKind::ExportDatabase
+            | FileKind::RelocateDatabase,
+            false,
+        ) => (
             "Library SQLite database (*.db)\0*.db\0All files\0*.*\0\0",
             "db",
         ),
@@ -274,6 +286,14 @@ pub fn choose(
     let filter = filter.encode_utf16().collect::<Vec<_>>();
     let ext = ext.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
     let title = match (kind, save, chinese) {
+        (FileKind::ExportDatabase, _, true) => "导出数据库（音频文件与本机偏好另行保存）",
+        (FileKind::ExportDatabase, _, false) => {
+            "Export database (audio files and preferences are stored separately)"
+        }
+        (FileKind::RelocateDatabase, _, true) => "选择新的数据库位置（保留原数据库）",
+        (FileKind::RelocateDatabase, _, false) => {
+            "Choose new database location (keep original database)"
+        }
         (FileKind::NewLibrary, _, true) => "新建音效库",
         (FileKind::NewLibrary, _, false) => "Create sound library",
         (FileKind::Database, true, true) => "备份音效库",
@@ -299,7 +319,9 @@ pub fn choose(
         let date = chrono::Local::now().format("%Y-%m-%d");
         let name = match kind {
             FileKind::Database => format!("AudioLib-backup-{date}.db"),
-            FileKind::NewLibrary => "AudioLib-library.db".into(),
+            FileKind::NewLibrary | FileKind::RelocateDatabase | FileKind::ExportDatabase => {
+                "AudioLib-library.db".into()
+            }
             FileKind::Csv => format!("AudioLib-annotations-{date}.csv"),
             FileKind::JsonLines | FileKind::Annotations => {
                 format!("AudioLib-annotations-{date}.jsonl")
@@ -361,6 +383,14 @@ pub fn choose(
     _owner: usize,
 ) -> Result<Option<PathBuf>, String> {
     let title = match (kind, save, chinese) {
+        (FileKind::ExportDatabase, _, true) => "导出数据库（音频文件与本机偏好另行保存）",
+        (FileKind::ExportDatabase, _, false) => {
+            "Export database (audio files and preferences are stored separately)"
+        }
+        (FileKind::RelocateDatabase, _, true) => "选择新的数据库位置（保留原数据库）",
+        (FileKind::RelocateDatabase, _, false) => {
+            "Choose new database location (keep original database)"
+        }
         (FileKind::NewLibrary, _, true) => "新建音效库",
         (FileKind::NewLibrary, _, false) => "Create sound library",
         (FileKind::Database, true, true) => "备份音效库",
@@ -379,7 +409,10 @@ pub fn choose(
         (_, false, false) => "Import library annotations",
     };
     let types = match kind {
-        FileKind::Database | FileKind::NewLibrary => "db\nsqlite\nsqlite3",
+        FileKind::Database
+        | FileKind::NewLibrary
+        | FileKind::ExportDatabase
+        | FileKind::RelocateDatabase => "db\nsqlite\nsqlite3",
         FileKind::Audio => "wav\nbwf\nflac\nogg\noga\nmp3\naif\naiff",
         FileKind::Image => "png\njpg\njpeg",
         FileKind::JsonLines => "jsonl",
@@ -391,7 +424,9 @@ pub fn choose(
     let name = if save {
         match kind {
             FileKind::Database => format!("AudioLib-backup-{date}.db"),
-            FileKind::NewLibrary => "AudioLib-library.db".into(),
+            FileKind::NewLibrary | FileKind::RelocateDatabase | FileKind::ExportDatabase => {
+                "AudioLib-library.db".into()
+            }
             FileKind::Csv => format!("AudioLib-annotations-{date}.csv"),
             FileKind::JsonLines | FileKind::Annotations => {
                 format!("AudioLib-annotations-{date}.jsonl")

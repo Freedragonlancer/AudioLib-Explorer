@@ -78,6 +78,8 @@ mod history;
 mod ipc_load_tests;
 #[path = "library_progress.rs"]
 mod library_progress;
+#[path = "path_repair.rs"]
+mod path_repair;
 #[path = "result_page_navigation.rs"]
 mod result_page_navigation;
 #[path = "result_window.rs"]
@@ -245,6 +247,7 @@ pub use remote_mode::{RemoteStartup, open_remote_placeholder, open_remote_startu
 #[derive(Clone)]
 enum LibraryOperation {
     Backup(PathBuf),
+    ExportDatabase(PathBuf),
     Restore(PathBuf),
     Check,
     Maintain(MaintenanceAction),
@@ -257,6 +260,11 @@ enum LibraryOperation {
     RemoveAudio(Vec<i64>),
     RemoveFolder(i64),
     Relink(i64, PathBuf),
+    PreviewPaths(audiolib_core::path_repair::RepairRequest),
+    ApplyPaths(
+        Arc<audiolib_core::path_repair::RepairPreview>,
+        Vec<(usize, usize)>,
+    ),
     Batch(BatchMetadataRequest),
     /// Swap between the local library and a read-only server snapshot.
     DataSource(remote_mode::DataSourceSwitch),
@@ -286,6 +294,7 @@ impl LibraryOperation {
                 | Self::Import(_)
                 | Self::RemoveAudio(_)
                 | Self::RemoveFolder(_)
+                | Self::ApplyPaths(..)
                 | Self::Relink(..)
                 | Self::Batch(_)
                 | Self::DataSource(_)
@@ -295,7 +304,10 @@ impl LibraryOperation {
     }
 
     fn is_read_only(&self) -> bool {
-        matches!(self, Self::Backup(_) | Self::Check | Self::Export(..))
+        matches!(
+            self,
+            Self::PreviewPaths(_) | Self::Backup(_) | Self::Check | Self::Export(..)
+        )
     }
 
     fn retains_library_identity(&self) -> bool {
@@ -304,6 +316,7 @@ impl LibraryOperation {
             Self::Import(_)
                 | Self::RemoveAudio(_)
                 | Self::RemoveFolder(_)
+                | Self::ApplyPaths(..)
                 | Self::Relink(..)
                 | Self::Batch(_)
         )
@@ -321,6 +334,7 @@ impl LibraryOperation {
                 file.folder_id
                     .is_some_and(|id| removed_folders.contains(&id))
             }),
+            Self::ApplyPaths(..) => true,
             Self::Relink(id, _) => file.is_some_and(|file| file.id == *id),
             _ => false,
         }
@@ -895,6 +909,10 @@ pub struct Controller {
     source_generation: AtomicU64,
     close_after_operation: AtomicBool,
     pending_operation: Mutex<Option<LibraryOperation>>,
+    path_review: Mutex<Option<path_repair::Review>>,
+    repair_cancel: AtomicBool,
+    #[cfg(test)]
+    test_file_choice: Mutex<Option<PathBuf>>,
     multi_selection: Mutex<HashSet<i64>>,
     selection_anchor: Mutex<Option<i64>>,
     history_generation: AtomicU64,
@@ -1222,6 +1240,10 @@ impl Controller {
             source_generation: AtomicU64::new(0),
             close_after_operation: AtomicBool::new(false),
             pending_operation: Mutex::new(None),
+            path_review: Mutex::new(None),
+            repair_cancel: AtomicBool::new(false),
+            #[cfg(test)]
+            test_file_choice: Mutex::new(None),
             multi_selection: Mutex::new(HashSet::new()),
             selection_anchor: Mutex::new(None),
             history_generation: AtomicU64::new(0),
@@ -1376,6 +1398,7 @@ impl Controller {
     }
 
     fn bind(self: &Arc<Self>, ui: &AppWindow) {
+        self.bind_path_repair(ui);
         self.bind_appearance(ui);
         self.bind_search_tasks(ui);
         self.bind_ai_search(ui);
@@ -2286,6 +2309,8 @@ impl Controller {
         use crate::dialogs::FileKind;
         let (save, kind) = match action {
             1 => (true, FileKind::Database),
+            12 => (true, FileKind::ExportDatabase),
+            13 => (true, FileKind::RelocateDatabase),
             6 => (true, FileKind::NewLibrary),
             2 | 7 => (false, FileKind::Database),
             8 => (true, FileKind::JsonLines),
@@ -2293,8 +2318,12 @@ impl Controller {
             10 => (false, FileKind::Annotations),
             _ => return,
         };
-        self.choose_file(save, kind, move |path| match action {
+        self.choose_file(save, Some(kind), move |path| match action {
             1 => LibraryOperation::Backup(path),
+            12 => LibraryOperation::ExportDatabase(path),
+            13 => LibraryOperation::LocalSource(Box::new(
+                remote_mode::LocalSourceRequest::Relocate(path),
+            )),
             2 => LibraryOperation::Restore(path),
             6 | 7 => LibraryOperation::Switch {
                 path,
@@ -2309,7 +2338,7 @@ impl Controller {
     fn choose_file(
         self: &Arc<Self>,
         save: bool,
-        kind: crate::dialogs::FileKind,
+        kind: Option<crate::dialogs::FileKind>,
         operation: impl FnOnce(PathBuf) -> LibraryOperation + Send + 'static,
     ) {
         if !self.available() || self.library_busy.swap(true, Ordering::AcqRel) {
@@ -2325,10 +2354,20 @@ impl Controller {
             ui.set_library_busy(true);
             ui.set_file_choice_busy(true);
         }
+        #[cfg(test)]
+        if let Some(path) = self.test_file_choice.lock().unwrap().take()
+            && let Some(ui) = self.ui.upgrade()
+        {
+            self.complete_file_choice(&ui, Ok(Some(path)), scan_was_running, operation);
+            return;
+        }
         let c = self.clone();
         std::thread::spawn(move || {
-            let result =
-                crate::dialogs::choose(save, kind, c.chinese.load(Ordering::Acquire), owner);
+            let chinese = c.chinese.load(Ordering::Acquire);
+            let result = match kind {
+                Some(kind) => crate::dialogs::choose(save, kind, chinese, owner),
+                None => crate::dialogs::choose_folder(chinese, owner),
+            };
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
                 c2.complete_file_choice(&ui, result, scan_was_running, operation);
@@ -2550,6 +2589,17 @@ impl Controller {
         if already_busy {
             return;
         }
+        if matches!(
+            operation,
+            LibraryOperation::PreviewPaths(_) | LibraryOperation::ApplyPaths(..)
+        ) {
+            if matches!(operation, LibraryOperation::PreviewPaths(_)) {
+                *self.path_review.lock().unwrap() = None;
+                self.publish_path_review(&ui);
+            }
+            self.repair_cancel.store(false, Ordering::Release);
+            ui.set_repair_busy(true);
+        }
         if switches_workspace {
             self.freeze_search_workspace();
         }
@@ -2679,6 +2729,18 @@ impl Controller {
                     LibraryOperation::Backup(path) => json(serde_json::json!(
                         provider.backup_library(path).map_err(|e| e.to_string())?
                     )),
+                    LibraryOperation::ExportDatabase(path) => {
+                        let copy = provider.backup_library(path).map_err(|e| e.to_string())?;
+                        if c.chinese.load(Ordering::Acquire) {
+                            format!("已导出 {} 条记录：{}", copy.total_records, path.display())
+                        } else {
+                            format!(
+                                "Exported {} records to {}",
+                                copy.total_records,
+                                path.display()
+                            )
+                        }
+                    }
                     LibraryOperation::Restore(path) => json(serde_json::json!(
                         provider.restore_library(path).map_err(|e| e.to_string())?
                     )),
@@ -2732,6 +2794,61 @@ impl Controller {
                             c.hide_removed(&[], &subtree, removed);
                         }
                         removal_summary(removed, server_removal, c.chinese.load(Ordering::Acquire))
+                    }
+                    LibraryOperation::PreviewPaths(request) => {
+                        progress.stage(
+                            "matching_paths",
+                            "正在比较音频路径和文件属性…",
+                            "Comparing audio paths and file properties…",
+                        );
+                        let allowed = c.config.lock().unwrap().allowed_scan_roots.clone();
+                        let preview = provider
+                            .preview_path_repair(request, &allowed, &c.repair_cancel)
+                            .map_err(|e| e.to_string())?;
+                        *c.path_review.lock().unwrap() = Some(path_repair::Review::new(preview));
+                        c.localized("匹配预览已就绪", "Path preview ready")
+                            .to_string()
+                    }
+                    LibraryOperation::ApplyPaths(preview, choices) => {
+                        progress.stage(
+                            "applying_paths",
+                            "正在备份并更新所选路径…",
+                            "Backing up the library and updating selected paths…",
+                        );
+                        let allowed = c.config.lock().unwrap().allowed_scan_roots.clone();
+                        let backup = provider
+                            .apply_path_repair(
+                                preview,
+                                choices,
+                                &allowed,
+                                &c.repair_cancel,
+                                &mut |done| {
+                                    if done == 1
+                                        || done.is_multiple_of(100)
+                                        || done == choices.len()
+                                    {
+                                        progress.stage(
+                                            "staging_paths",
+                                            &format!("正在更新路径 {done}/{}…", choices.len()),
+                                            &format!("Updating paths {done}/{}…", choices.len()),
+                                        );
+                                    }
+                                },
+                            )
+                            .map_err(|e| e.to_string())?;
+                        if c.chinese.load(Ordering::Acquire) {
+                            format!(
+                                "已更新 {} 条路径。回退备份：{}",
+                                choices.len(),
+                                backup.destination.display()
+                            )
+                        } else {
+                            format!(
+                                "Updated {} paths. Rollback copy: {}",
+                                choices.len(),
+                                backup.destination.display()
+                            )
+                        }
                     }
                     LibraryOperation::Relink(id, path) => {
                         let allowed_roots = c.config.lock().unwrap().allowed_scan_roots.clone();
@@ -2894,6 +3011,17 @@ impl Controller {
                     ui.set_audio_ready(false);
                 }
                 let succeeded = result.is_ok();
+                if matches!(
+                    operation,
+                    LibraryOperation::PreviewPaths(_) | LibraryOperation::ApplyPaths(..)
+                ) {
+                    ui.set_repair_busy(false);
+                    if matches!(operation, LibraryOperation::ApplyPaths(..)) && succeeded {
+                        ui.set_repair_whole(false);
+                        *c2.path_review.lock().unwrap() = None;
+                    }
+                    c2.publish_path_review(&ui);
+                }
                 if switches_workspace && !succeeded {
                     c2.thaw_search_workspace();
                 }
@@ -2955,7 +3083,9 @@ impl Controller {
                         ui.set_management_report(report.clone().into());
                         if matches!(
                             operation,
-                            LibraryOperation::Relink(..)
+                            LibraryOperation::ExportDatabase(_)
+                                | LibraryOperation::ApplyPaths(..)
+                                | LibraryOperation::Relink(..)
                                 | LibraryOperation::RemoveAudio(_)
                                 | LibraryOperation::RemoveFolder(_)
                                 | LibraryOperation::DataSource(_)
@@ -2965,7 +3095,9 @@ impl Controller {
                         ui.set_status(
                             if matches!(
                                 operation,
-                                LibraryOperation::Relink(..)
+                                LibraryOperation::ExportDatabase(_)
+                                    | LibraryOperation::ApplyPaths(..)
+                                    | LibraryOperation::Relink(..)
                                     | LibraryOperation::RemoveAudio(_)
                                     | LibraryOperation::RemoveFolder(_)
                                     | LibraryOperation::DataSource(_)
@@ -3156,6 +3288,9 @@ impl Controller {
     }
 
     fn reset_library_view(&self, ui: &AppWindow, reset_request: bool, retain_navigation: bool) {
+        *self.path_review.lock().unwrap() = None;
+        self.publish_path_review(ui);
+        ui.set_repair_whole(false);
         self.result_pages.lock().unwrap().clear();
         self.window_coverage.lock().unwrap().take();
         // A forced source reset must invalidate the old import's UI admission and
@@ -6330,6 +6465,7 @@ impl Controller {
             || (self.source_changing.load(Ordering::Acquire) && !pending_source_sync)
         {
             self.close_after_operation.store(true, Ordering::Release);
+            self.repair_cancel.store(true, Ordering::Release);
             self.cancel_vendor_for_transition();
             return;
         }
@@ -7729,7 +7865,7 @@ impl Controller {
             return;
         }
         if action == 20 {
-            self.choose_file(false, crate::dialogs::FileKind::Audio, move |path| {
+            self.choose_file(false, Some(crate::dialogs::FileKind::Audio), move |path| {
                 LibraryOperation::Relink(id, path)
             });
         } else if action == 21 {

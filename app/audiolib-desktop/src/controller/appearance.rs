@@ -257,6 +257,7 @@ impl Controller {
         std::thread::spawn(move || c.reload_tree());
         if let Some(ui) = self.ui.upgrade() {
             ui.set_chinese(chinese);
+            self.publish_path_review(&ui);
             ui.set_language_index(crate::appearance::language_index(language));
             self.publish_system_fonts(&ui);
             self.publish_search_tasks(&ui);

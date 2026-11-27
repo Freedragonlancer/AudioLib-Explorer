@@ -299,3 +299,59 @@ fn incremental_vorbis_reextract_preserves_hot_rankings_annotations_and_directory
     assert_eq!(unchanged.errors, 0);
     assert!(provider.search(&requests[1]).unwrap().cache_hit);
 }
+
+#[test]
+fn repaired_flac_and_ogg_paths_retain_metadata_and_decode() {
+    use audiolib_core::path_repair::{MatchKind, RepairRequest};
+    use std::sync::atomic::AtomicBool;
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("old");
+    copy_sources(&source);
+    let db = Arc::new(SqliteProvider::open(&temp.path().join("field.db")).unwrap());
+    ScanService::new(db.clone())
+        .scan(
+            &source,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+    let original = db.search(&SearchRequest::default()).unwrap().results;
+    assert_eq!(original.len(), 3);
+    let target = temp.path().join("new");
+    fs::rename(&source, &target).unwrap();
+    let request = RepairRequest {
+        source: db.folders(None).unwrap().remove(0).path,
+        target,
+        missing_only: true,
+    };
+    let cancel = AtomicBool::new(false);
+    let review = db.preview_path_repair(&request, &[], &cancel).unwrap();
+    assert!(
+        review
+            .rows
+            .iter()
+            .all(|row| row.kind == MatchKind::Relative)
+    );
+    db.apply_path_repair(
+        &review,
+        &[(0, 0), (1, 0), (2, 0)],
+        &[],
+        &cancel,
+        &mut |_| {},
+    )
+    .unwrap();
+    for before in original {
+        let after = db.get_audio(before.id).unwrap();
+        // The DTO adds the latest row timestamp to its projected attributes.
+        assert!(before.attributes["wav_metadata"]["vorbis"].is_object());
+        assert_eq!(
+            after.attributes["wav_metadata"],
+            before.attributes["wav_metadata"]
+        );
+        assert_eq!(after.filename, before.filename);
+        let wave =
+            audiolib_audio::waveform(Path::new(&after.file_path), Default::default()).unwrap();
+        assert!(wave.frames > 0 && wave.peaks.iter().any(|channel| !channel.is_empty()));
+    }
+}
