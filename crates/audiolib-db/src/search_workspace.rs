@@ -166,6 +166,32 @@ fn reject_unknown_fields(
     Ok(())
 }
 
+pub(crate) fn copy_scope(root: &Path, old: &str, new: &str) -> Result<()> {
+    let target = SearchWorkspaceTarget::new(root, new);
+    let destination =
+        workspace_path(&target, true)?.ok_or_else(|| invalid("Workspace directory unavailable"))?;
+    if check_file(&destination)?.is_some() {
+        return Err(invalid("Destination already has a search workspace"));
+    }
+    let source = SearchWorkspaceTarget::new(root, old);
+    let Some(path) = workspace_path(&source, false)? else {
+        return Ok(());
+    };
+    let Some(mut workspace) = read_existing(&path, &source)? else {
+        return Ok(());
+    };
+    workspace.library_scope = new.into();
+    workspace.validate()?;
+    let mut stage = tempfile::NamedTempFile::new_in(destination.parent().unwrap())?;
+    serde_json::to_writer_pretty(stage.as_file_mut(), &workspace)
+        .map_err(|e| invalid(e.to_string()))?;
+    stage.as_file().sync_all()?;
+    stage
+        .persist_noclobber(destination)
+        .map_err(|e| Error::Io(e.error))?;
+    Ok(())
+}
+
 pub(crate) fn load(target: &SearchWorkspaceTarget) -> Result<SearchWorkspace> {
     let Some(path) = workspace_path(target, false)? else {
         return Ok(SearchWorkspace::for_scope(&target.library_scope));

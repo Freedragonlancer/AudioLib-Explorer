@@ -21,6 +21,7 @@ pub mod list_waveform;
 pub mod list_waveform_i8;
 pub mod local_upgrade;
 mod metadata;
+pub mod path_repair;
 pub mod profiles;
 pub mod search_workspace;
 pub mod server_upgrade;
@@ -940,6 +941,31 @@ pub trait DataProvider: Send + Sync {
     fn maintain_library(&self, action: MaintenanceAction) -> Result<MaintenanceReport>;
     fn update_metadata_batch(&self, request: &BatchMetadataRequest) -> Result<BatchMetadataReport>;
     fn find_audio_by_path(&self, path: &Path) -> Result<Option<AudioFile>>;
+    /// Find possible replacements without changing any library records.
+    fn preview_path_repair(
+        &self,
+        _request: &path_repair::RepairRequest,
+        _roots: &[PathBuf],
+        _cancel: &AtomicBool,
+    ) -> Result<path_repair::RepairPreview> {
+        Err(Error::Validation(
+            "Path matching requires a writable local library".into(),
+        ))
+    }
+    /// Validate reviewed replacements and publish them in a single transaction.
+    /// Progress counts staged rows; the operation may still roll back before it returns.
+    fn apply_path_repair(
+        &self,
+        _preview: &path_repair::RepairPreview,
+        _choices: &[(usize, usize)],
+        _roots: &[PathBuf],
+        _cancel: &AtomicBool,
+        _progress: &mut dyn FnMut(usize),
+    ) -> Result<BackupReport> {
+        Err(Error::Validation(
+            "Path matching requires a writable local library".into(),
+        ))
+    }
     /// Resolve one indexed directory by its stored path, preferring an exact
     /// source spelling and refusing ambiguous aliases. Read-only snapshots must
     /// resolve their own path syntax without probing the reader's filesystem.

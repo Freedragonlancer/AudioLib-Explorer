@@ -189,11 +189,14 @@ impl Drop for SearchUpgradeLease {
 #[cfg(test)]
 mod search_upgrade_pool_tests;
 
-fn administration_lock_path(database: &Path) -> Result<PathBuf> {
-    let database = database.canonicalize()?;
+fn administration_sidecar(database: &Path) -> PathBuf {
     let mut name = database.file_name().unwrap_or_default().to_os_string();
     name.push(".admin.lock");
-    Ok(database.with_file_name(name))
+    database.with_file_name(name)
+}
+
+fn administration_lock_path(database: &Path) -> Result<PathBuf> {
+    Ok(administration_sidecar(&database.canonicalize()?))
 }
 
 /// Only a uniquely owned temporary database may remove its otherwise persistent lock.
@@ -209,13 +212,13 @@ impl Drop for OwnedAdministrationSidecar {
     }
 }
 impl AdministrationLease {
-    fn acquire(database: &Path, exclusive: bool) -> Result<Self> {
+    fn acquire(sidecar: &Path, exclusive: bool) -> Result<Self> {
         let file = fs::File::options()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(administration_lock_path(database)?)?;
+            .open(sidecar)?;
         let result = if exclusive {
             file.try_lock()
         } else {
@@ -231,10 +234,16 @@ impl AdministrationLease {
         }
     }
     pub(crate) fn shared(database: &Path) -> Result<Self> {
-        Self::acquire(database, false)
+        Self::acquire(&administration_lock_path(database)?, false)
+    }
+    /// A creation lease fixes the canonical parent even before the database exists.
+    pub(crate) fn shared_for_creation(
+        lease: &import_lease::ImportDestinationLease,
+    ) -> Result<Self> {
+        Self::acquire(&administration_sidecar(lease.destination()), false)
     }
     pub(crate) fn exclusive(database: &Path) -> Result<Self> {
-        Self::acquire(database, true)
+        Self::acquire(&administration_lock_path(database)?, true)
     }
 }
 impl Drop for AdministrationLease {
@@ -301,6 +310,20 @@ fn normalize_page_size(staging: &Connection, target_page_size: i64) -> Result<()
     }
     Ok(())
 }
+/// A new standalone database must never inherit an abandoned journal or WAL.
+pub(crate) fn check_new_database_sidecars(path: &Path) -> Result<()> {
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        match fs::symlink_metadata(PathBuf::from(name)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+            Ok(_) => return Err(validation("Destination has existing SQLite sidecars")),
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn snapshot_to_file(
     source: &mut Connection,
     destination: &Path,
@@ -316,6 +339,7 @@ pub(crate) fn snapshot_to_file_cancellable(
     if cancel.load(Ordering::Acquire) {
         return Err(Error::Cancelled);
     }
+    check_new_database_sidecars(destination)?;
     let stage = output_stage(destination, "audiolib-backup-")?;
     // The copy is as large as the live database (WAL content included); fail before
     // writing anything instead of with a half-written copy and a generic I/O error.
@@ -366,6 +390,7 @@ pub(crate) fn snapshot_to_file_cancellable(
     }
     stage.as_file().sync_all()?;
     let bytes = stage.as_file().metadata()?.len();
+    check_new_database_sidecars(destination)?;
     stage
         .persist_noclobber(destination)
         .map_err(|e| Error::Io(e.error))?;
@@ -550,7 +575,7 @@ fn remove_one(conn: &Connection, id: i64) -> Result<u64> {
 }
 
 impl SqliteProvider {
-    fn require_writable(&self) -> Result<()> {
+    pub(crate) fn require_writable(&self) -> Result<()> {
         schema::ensure_ready(&*self.writer_unlocked()?)?;
         if self
             .writer_unlocked()?
@@ -1450,14 +1475,7 @@ impl SqliteProvider {
             ));
         }
         // Reuse a registered ancestor when possible so the target remains browsable in its tree.
-        let mut root = parent.to_path_buf();
-        for ancestor in parent.ancestors() {
-            let found = path_identity::folder_id(&tx, &folder_path_text(ancestor))?.is_some();
-            if found {
-                root = ancestor.to_path_buf();
-                break;
-            }
-        }
+        let root = indexed_ancestor_or_self(&tx, parent)?.to_owned();
         tx.execute(
             "UPDATE audio_files SET file_path=?2,path_key=?3 WHERE id=?1",
             params![id, display_path(&path), key],

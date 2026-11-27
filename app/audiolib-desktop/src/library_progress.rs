@@ -141,7 +141,7 @@ impl Controller {
         let result = (|| {
             let mut report = |stage| progress.migration(stage);
             let provider = if create {
-                SqliteProvider::open_local_with_progress_cancellable(
+                SqliteProvider::create_new_local(
                     path,
                     &config.data_root(),
                     config.play_history_limit,
