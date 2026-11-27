@@ -10,30 +10,54 @@ pub struct LocalRelocationGuard {
 }
 
 impl SqliteProvider {
-    /// Create a new user-selected library without ever adopting an existing file.
+    /// Initialize a new user-selected library before publishing it without replacement.
     pub fn create_new_local(
         path: &Path,
         data_root: &Path,
         limit: u32,
         cancel: &AtomicBool,
-        progress: impl FnMut(SnapshotUpgradeProgress),
+        mut progress: impl FnMut(SnapshotUpgradeProgress),
     ) -> Result<Self> {
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
         if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
         let lease = import_lease::ImportDestinationLease::acquire(path)?;
-        management::check_new_database_sidecars(lease.destination())?;
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(lease.destination())?;
-        Self::open_with_history_owner_cancellable(
-            lease.destination(),
-            Some((data_root, limit)),
-            cancel,
-            progress,
-            Some(&lease),
-        )
+        let destination = lease.destination();
+        management::check_new_database_sidecars(destination)?;
+        let parent = destination
+            .parent()
+            .ok_or_else(|| Error::Validation("New library needs a parent directory".into()))?;
+        // SQLite journals and persistent lock files created during initialization
+        // stay inside this owned directory even when initialization is interrupted.
+        let owned = tempfile::Builder::new()
+            .prefix("audiolib-create-")
+            .tempdir_in(parent)?;
+        let mut builder = tempfile::Builder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Preserve the mode that a regular database creation gets from the umask.
+            builder.permissions(fs::Permissions::from_mode(0o666));
+        }
+        let staged = builder.suffix(".db").tempfile_in(owned.path())?;
+        progress(SnapshotUpgradeProgress::Preparing);
+        migration::prepare_local_writable(staged.path(), data_root, limit, cancel, &mut progress)?;
+        management::check_new_database_sidecars(staged.path())?;
+        staged.as_file().sync_all()?;
+
+        let _admin = management::AdministrationLease::shared_for_creation(&lease)?;
+        management::check_new_database_sidecars(destination)?;
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
+        // Publication commits the completed database, after all cancellable work.
+        staged
+            .persist_noclobber(destination)
+            .map_err(|error| Error::Io(error.error))?;
+        Self::open_prepared_writable(destination)
     }
     /// Copy the active local database and its path-scoped personal data; keep the source usable on any failure.
     pub fn prepare_local_relocation(
