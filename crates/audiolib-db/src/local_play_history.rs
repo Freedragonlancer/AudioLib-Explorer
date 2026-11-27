@@ -440,6 +440,52 @@ impl LocalPlayHistory {
         })
     }
 
+    /// Copy committed events and legacy receipts to the new path scope, without replacing an existing store.
+    pub(crate) fn copy_scope(root: &Path, old: &str, new: &str) -> Result<()> {
+        let root = root.canonicalize()?;
+        let histories = checked_directory(&root, "play-history")?;
+        let old_dir = checked_directory(&histories, &safe_library_id(old)?)?;
+        let old_file = old_dir.join("history.db");
+        check_files(&old_file)?;
+        let new_dir = checked_directory(&histories, &safe_library_id(new)?)?;
+        let new_file = new_dir.join("history.db");
+        check_files(&new_file)?;
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            if sidecar(&new_file, suffix).try_exists()? {
+                return Err(invalid("Destination has an existing playback history"));
+            }
+        }
+        if !old_file.try_exists()? {
+            return Ok(());
+        }
+        let source = connection(&old_file, false)?;
+        validate(&source, old)?;
+        let file = tempfile::NamedTempFile::new_in(new_dir)?;
+        {
+            let mut copy = Connection::open(file.path()).map_err(db_error)?;
+            rusqlite::backup::Backup::new(&source, &mut copy)
+                .map_err(db_error)?
+                .run_to_completion(4096, Duration::ZERO, None)
+                .map_err(db_error)?;
+            copy.execute_batch("PRAGMA journal_mode=DELETE")
+                .map_err(db_error)?;
+            let tx = copy.transaction().map_err(db_error)?;
+            tx.execute("UPDATE meta SET value=?1 WHERE key='library_id'", [new])
+                .map_err(db_error)?;
+            tx.execute(
+                "UPDATE plays SET library_id=?1 WHERE library_id=?2",
+                params![new, old],
+            )
+            .map_err(db_error)?;
+            tx.commit().map_err(db_error)?;
+            validate(&copy, new)?;
+        }
+        file.as_file().sync_all()?;
+        file.persist_noclobber(new_file)
+            .map_err(|e| Error::Io(e.error))?;
+        Ok(())
+    }
+
     /// Persistent local file, never a main library or downloadable snapshot.
     pub fn database_path(&self) -> &Path {
         &self.path

@@ -12,6 +12,8 @@ mod id_membership;
 mod import_lease;
 mod list_waveforms;
 pub mod local_play_history;
+mod local_relocation;
+pub use local_relocation::LocalRelocationGuard;
 mod management;
 #[cfg(test)]
 mod metadata_plain_tests;
@@ -20,6 +22,8 @@ pub mod migration;
 pub mod migration9;
 mod owned_cancellation;
 mod path_identity;
+#[cfg(feature = "scanner")]
+mod path_repair;
 #[cfg(feature = "scanner")]
 pub mod scanner;
 mod schema;
@@ -3232,6 +3236,26 @@ impl DataProvider for SqliteProvider {
         ).optional().map_err(db_error)?;
         transaction.commit().map_err(db_error)?;
         Ok(folder)
+    }
+    #[cfg(feature = "scanner")]
+    fn preview_path_repair(
+        &self,
+        request: &audiolib_core::path_repair::RepairRequest,
+        roots: &[PathBuf],
+        cancel: &AtomicBool,
+    ) -> Result<audiolib_core::path_repair::RepairPreview> {
+        self.preview_replacements(request, roots, cancel)
+    }
+    #[cfg(feature = "scanner")]
+    fn apply_path_repair(
+        &self,
+        preview: &audiolib_core::path_repair::RepairPreview,
+        choices: &[(usize, usize)],
+        roots: &[PathBuf],
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(usize),
+    ) -> Result<BackupReport> {
+        self.commit_replacements(preview, choices, roots, cancel, progress)
     }
     fn relink_audio(&self, id: i64, path: &Path) -> Result<AudioFile> {
         self.management_relink(id, path)

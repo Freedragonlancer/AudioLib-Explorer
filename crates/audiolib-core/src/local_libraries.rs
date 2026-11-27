@@ -295,6 +295,42 @@ impl AppConfig {
         Ok(id)
     }
 
+    /// Rebind the active registration after its verified database has been copied.
+    pub fn relocate_selected_library(&mut self, old: &Path, new: &Path) -> Result<String> {
+        let mut updated = self.clone();
+        let entry = updated
+            .selected_local_library()
+            .ok_or_else(|| Error::Validation("Select a local library first".into()))?;
+        if !same_database(&entry.database, old) || !same_database(&updated.paths.database, old) {
+            return Err(Error::Validation("The active local library changed".into()));
+        }
+        let id = entry.id.clone();
+        let new = new.canonicalize()?;
+        if !new.is_file()
+            || updated
+                .data_source
+                .local_libraries
+                .iter()
+                .any(|entry| same_database(&entry.database, &new))
+        {
+            return Err(Error::Validation(
+                "Destination is not a new library location".into(),
+            ));
+        }
+        updated
+            .data_source
+            .local_libraries
+            .iter_mut()
+            .find(|entry| entry.id == id)
+            .unwrap()
+            .database = new.clone();
+        updated.paths.database = new;
+        updated.paths.legacy_database = None;
+        updated.data_source.validate_local_libraries()?;
+        *self = updated;
+        Ok(id)
+    }
+
     /// Update display information and the per-library checkbox, preserving path/id.
     pub fn update_local_library(
         &mut self,
@@ -379,6 +415,45 @@ mod tests {
 
     fn config(root: &Path) -> AppConfig {
         AppConfig::load_with_roots(root.to_owned(), &[]).unwrap()
+    }
+
+    #[test]
+    fn relocated_registration_survives_restart_and_rejects_an_occupied_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = config(dir.path());
+        state.reconcile_local_libraries().unwrap();
+        let old = state.paths.database.clone();
+        std::fs::write(&old, b"original").unwrap();
+        let occupied = dir.path().join("other.db");
+        std::fs::write(&occupied, b"another library").unwrap();
+        state
+            .register_local_library("Other", "", &occupied, false)
+            .unwrap();
+        assert!(state.relocate_selected_library(&old, &occupied).is_err());
+        let new = dir.path().join("new.db");
+        std::fs::copy(&old, &new).unwrap();
+        state
+            .update_local_library(
+                DEFAULT_LOCAL_LIBRARY_ID,
+                "Recordings",
+                "My recordings",
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            state.relocate_selected_library(&old, &new).unwrap(),
+            DEFAULT_LOCAL_LIBRARY_ID
+        );
+        state.save().unwrap();
+        let reopened = config(dir.path());
+        let entry = reopened.selected_local_library().unwrap();
+        assert_eq!(entry.id, DEFAULT_LOCAL_LIBRARY_ID);
+        assert_eq!(entry.name, "Recordings");
+        assert_eq!(entry.description, "My recordings");
+        assert!(!entry.pregenerate_list_waveforms);
+        assert_eq!(entry.database, new.canonicalize().unwrap());
+        assert_eq!(reopened.paths.database, entry.database);
+        assert_eq!(std::fs::read(old).unwrap(), b"original");
     }
 
     #[test]

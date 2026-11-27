@@ -253,6 +253,96 @@ impl SqliteProvider {
         Ok(None)
     }
 
+    pub(crate) fn copy_vendor_staging(&self, destination: &Path) -> Result<()> {
+        let source = self.vendor_root_directory(false)?;
+        let filename = destination
+            .file_name()
+            .ok_or_else(|| invalid("Missing database filename"))?
+            .to_string_lossy();
+        let target = destination.with_file_name(format!("{filename}.vendor-import"));
+        unlinked(&target)?;
+        if target.try_exists()? {
+            return Err(invalid(
+                "Destination already has a vendor staging directory",
+            ));
+        }
+        if !source.try_exists()? {
+            return Ok(());
+        }
+        if target.starts_with(&source) {
+            return Err(invalid("Destination is inside the source vendor directory"));
+        }
+        // Validate the owner marker, including the supported legacy layout.
+        let source = self.vendor_root_directory(true)?;
+        let staging = tempfile::Builder::new()
+            .prefix("audiolib-vendor-copy-")
+            .tempdir_in(
+                destination
+                    .parent()
+                    .ok_or_else(|| invalid("Missing destination directory"))?,
+            )?;
+        for child in fs::read_dir(&source)? {
+            let child = child?;
+            let path = child.path();
+            unlinked(&path)?;
+            let name = child.file_name();
+            let name = name.to_string_lossy();
+            match name.as_ref() {
+                ".audiolib-owner" | "templates.json" => {
+                    fs::copy(&path, staging.path().join(name.as_ref()))?;
+                }
+                "templates.lock" => {}
+                id if id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()) => {
+                    let original = self.vendor_job_directory(id)?;
+                    let job = staging.path().join(id);
+                    fs::create_dir(&job)?;
+                    fs::copy(original.join("owner"), job.join("owner"))?;
+                    let old_db = original.join("preview.db");
+                    unlinked(&old_db)?;
+                    let old = Connection::open_with_flags(
+                        old_db,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                    )
+                    .map_err(db_error)?;
+                    let mut copy = Connection::open(job.join("preview.db")).map_err(db_error)?;
+                    rusqlite::backup::Backup::new(&old, &mut copy)
+                        .map_err(db_error)?
+                        .run_to_completion(4096, std::time::Duration::ZERO, None)
+                        .map_err(db_error)?;
+                    let mut inputs: Vec<Input> = get_meta(&copy, "inputs")?;
+                    for input in &mut inputs {
+                        unlinked(&input.path)?;
+                        let file = input
+                            .path
+                            .file_name()
+                            .and_then(|v| v.to_str())
+                            .ok_or_else(|| invalid("Invalid staged input"))?;
+                        if input.path.parent() != Some(original.as_path())
+                            || !file
+                                .strip_prefix("input-")
+                                .is_some_and(|n| n.parse::<usize>().is_ok())
+                        {
+                            return Err(invalid("Input is outside its vendor job"));
+                        }
+                        let next = job.join(file);
+                        fs::copy(&input.path, &next)?;
+                        input.path = target.join(id).join(file);
+                    }
+                    set_meta(&copy, "inputs", &inputs)?;
+                }
+                _ => return Err(invalid("Unrecognized entry in vendor staging directory")),
+            }
+        }
+        // The destination import lease also prevents another AudioLib writer from
+        // creating staging here before the registration handoff.
+        unlinked(&target)?;
+        if target.try_exists()? {
+            return Err(invalid("Destination vendor directory already exists"));
+        }
+        fs::rename(staging.path(), &target)?;
+        Ok(())
+    }
+
     fn vendor_job_directory(&self, id: &str) -> Result<PathBuf> {
         if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(invalid("Invalid vendor import id"));
@@ -329,6 +419,7 @@ impl SqliteProvider {
                 "Recovering import history requires an owned writable data directory",
             ));
         }
+        let _administration = crate::management::AdministrationLease::shared(&self.path)?;
         fs::create_dir_all(&directory)?;
         File::create(directory.join("owner"))?.write_all(self.album_namespace().as_bytes())?;
         let stage = Connection::open(directory.join("preview.db")).map_err(db_error)?;
@@ -362,6 +453,7 @@ impl SqliteProvider {
         files: &[PathBuf],
         options: &VendorImportOptions,
     ) -> Result<VendorImportPreview> {
+        let _administration = crate::management::AdministrationLease::shared(&self.path)?;
         if self.read_only {
             return Err(invalid("Vendor import requires a writable library"));
         }
@@ -701,6 +793,7 @@ impl SqliteProvider {
         id: &str,
         options: &VendorImportOptions,
     ) -> Result<VendorImportPreview> {
+        let _administration = crate::management::AdministrationLease::shared(&self.path)?;
         let _lock = self.vendor_job_lock(id)?;
         {
             let conn = self.reader()?;
@@ -835,6 +928,7 @@ impl SqliteProvider {
 
     /// Request cancellation at the next committed batch boundary; retains sources/checkpoints.
     pub fn vendor_import_cancel_impl(&self, id: &str) -> Result<VendorImportStatus> {
+        let _administration = crate::management::AdministrationLease::shared(&self.path)?;
         let stage = self.vendor_stage(id)?;
         set_meta(&stage, "cancel", &true)?;
         let active = {
@@ -917,6 +1011,7 @@ impl SqliteProvider {
         &self,
         template: &VendorMappingTemplate,
     ) -> Result<VendorMappingTemplate> {
+        let _administration = crate::management::AdministrationLease::shared(&self.path)?;
         if template.name.trim().is_empty() || template.name.len() > 200 {
             return Err(invalid(
                 "Template name is required and must be at most 200 bytes",
