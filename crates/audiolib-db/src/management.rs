@@ -189,11 +189,14 @@ impl Drop for SearchUpgradeLease {
 #[cfg(test)]
 mod search_upgrade_pool_tests;
 
-fn administration_lock_path(database: &Path) -> Result<PathBuf> {
-    let database = database.canonicalize()?;
+fn administration_sidecar(database: &Path) -> PathBuf {
     let mut name = database.file_name().unwrap_or_default().to_os_string();
     name.push(".admin.lock");
-    Ok(database.with_file_name(name))
+    database.with_file_name(name)
+}
+
+fn administration_lock_path(database: &Path) -> Result<PathBuf> {
+    Ok(administration_sidecar(&database.canonicalize()?))
 }
 
 /// Only a uniquely owned temporary database may remove its otherwise persistent lock.
@@ -209,13 +212,13 @@ impl Drop for OwnedAdministrationSidecar {
     }
 }
 impl AdministrationLease {
-    fn acquire(database: &Path, exclusive: bool) -> Result<Self> {
+    fn acquire(sidecar: &Path, exclusive: bool) -> Result<Self> {
         let file = fs::File::options()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(administration_lock_path(database)?)?;
+            .open(sidecar)?;
         let result = if exclusive {
             file.try_lock()
         } else {
@@ -231,10 +234,16 @@ impl AdministrationLease {
         }
     }
     pub(crate) fn shared(database: &Path) -> Result<Self> {
-        Self::acquire(database, false)
+        Self::acquire(&administration_lock_path(database)?, false)
+    }
+    /// A creation lease fixes the canonical parent even before the database exists.
+    pub(crate) fn shared_for_creation(
+        lease: &import_lease::ImportDestinationLease,
+    ) -> Result<Self> {
+        Self::acquire(&administration_sidecar(lease.destination()), false)
     }
     pub(crate) fn exclusive(database: &Path) -> Result<Self> {
-        Self::acquire(database, true)
+        Self::acquire(&administration_lock_path(database)?, true)
     }
 }
 impl Drop for AdministrationLease {

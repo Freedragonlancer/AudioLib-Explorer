@@ -683,6 +683,29 @@ impl SqliteProvider {
             None => migration::prepare_writable(path, cancel, &mut progress)?,
         }
         let _isolation = management::AdministrationLease::shared(path)?;
+        let provider = Self::open_prepared_writable(path)?;
+        // Identity admission obtains the exclusive administration lease itself;
+        // never retain startup's shared lease while asking for that exclusion.
+        drop(_isolation);
+        // Only a completed local/p1 provider can retire the durable import owner.
+        // Keep its lock inode; contention during shared-to-exclusive cleanup
+        // leaves the receipt available for the next matching local open.
+        if let Some(intent) = &import_intent {
+            let namespace = intent.admission_namespace()?;
+            provider.admit_import_identity(Some(&namespace))?;
+            if let Some(owner) = import_owner {
+                owner.clear_completed_intent(intent)?;
+            } else if let Some(lease) = &creation_lease {
+                lease.clear_completed_intent(intent)?;
+            } else if let Some(lease) = &existing_import_lease {
+                lease.try_clear_completed_intent(intent)?;
+            }
+        }
+        Ok(provider)
+    }
+
+    /// Open a prepared library at its final path while the caller holds the administration lease.
+    fn open_prepared_writable(path: &Path) -> Result<Self> {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(db_error)?;
         // An administrator may replace a file between preparation and lease acquisition.
@@ -703,7 +726,7 @@ impl SqliteProvider {
         let tokenizer = load_tokenizer();
         schema::register_tokenizer(&conn, tokenizer.clone())?;
         let derived = schema::source_tags_ready(&conn)?;
-        let provider = Self {
+        Ok(Self {
             album_namespace: RwLock::new(albums::namespace(&conn)?),
             legacy_album_scope: RwLock::new(albums::legacy_scope(&conn)?),
             path: path.to_path_buf(),
@@ -725,25 +748,7 @@ impl SqliteProvider {
             list_waveform_memory: Default::default(),
             dir_index: Default::default(),
             _owned_snapshot_directory: None,
-        };
-        // Identity admission obtains the exclusive administration lease itself;
-        // never retain startup's shared lease while asking for that exclusion.
-        drop(_isolation);
-        // Only a completed local/p1 provider can retire the durable import owner.
-        // Keep its lock inode; contention during shared-to-exclusive cleanup
-        // leaves the receipt available for the next matching local open.
-        if let Some(intent) = &import_intent {
-            let namespace = intent.admission_namespace()?;
-            provider.admit_import_identity(Some(&namespace))?;
-            if let Some(owner) = import_owner {
-                owner.clear_completed_intent(intent)?;
-            } else if let Some(lease) = &creation_lease {
-                lease.clear_completed_intent(intent)?;
-            } else if let Some(lease) = &existing_import_lease {
-                lease.try_clear_completed_intent(intent)?;
-            }
-        }
-        Ok(provider)
+        })
     }
 
     /// Upgrade older source-keyword text through checked maintenance. Idempotent;

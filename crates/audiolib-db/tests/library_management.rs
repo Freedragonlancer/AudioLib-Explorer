@@ -1341,7 +1341,7 @@ fn root_relocation_rejects_volume_roots_before_changing_any_paths() {
 mod local_paths {
     use super::*;
     use audiolib_core::path_repair::{MatchKind, RepairRequest};
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn request(f: &Fixture, target: &Path, whole: bool) -> RepairRequest {
         RepairRequest {
@@ -1586,6 +1586,48 @@ mod local_paths {
                 .id,
             f.ids[0]
         );
+    }
+
+    #[test]
+    fn cancelled_initialization_leaves_the_same_new_database_path_available() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("new-library.db");
+        let cancel = AtomicBool::new(false);
+        let result = SqliteProvider::create_new_local(&target, temp.path(), 10, &cancel, |phase| {
+            if matches!(phase, audiolib_db::SnapshotUpgradeProgress::Preparing) {
+                cancel.store(true, Ordering::Release);
+            }
+        });
+        assert!(matches!(result, Err(audiolib_core::Error::Cancelled)));
+        assert!(!target.exists());
+        assert!(!temp.path().join("new-library.db-wal").exists());
+        assert!(!temp.path().join("new-library.db-journal").exists());
+        assert!(!temp.path().join("new-library.db-shm").exists());
+
+        cancel.store(false, Ordering::Release);
+        let provider =
+            SqliteProvider::create_new_local(&target, temp.path(), 10, &cancel, |_| {}).unwrap();
+        assert_eq!(provider.database_path(), target.canonicalize().unwrap());
+        assert!(provider.check_library().unwrap().is_ok());
+    }
+
+    #[test]
+    fn blocked_creation_lock_can_retry_the_same_new_database_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("new-library.db");
+        let lock = temp.path().join("new-library.db.admin.lock");
+        fs::create_dir(&lock).unwrap();
+        let cancel = AtomicBool::new(false);
+        let result = SqliteProvider::create_new_local(&target, temp.path(), 10, &cancel, |_| {});
+        assert!(matches!(result, Err(audiolib_core::Error::Io(_))));
+        assert!(!target.exists());
+        assert!(lock.is_dir());
+
+        fs::remove_dir(&lock).unwrap();
+        let provider =
+            SqliteProvider::create_new_local(&target, temp.path(), 10, &cancel, |_| {}).unwrap();
+        assert_eq!(provider.database_path(), target.canonicalize().unwrap());
+        assert!(provider.check_library().unwrap().is_ok());
     }
 
     #[test]
