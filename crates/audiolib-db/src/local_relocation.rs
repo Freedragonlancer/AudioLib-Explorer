@@ -44,9 +44,12 @@ impl SqliteProvider {
         cancel: &AtomicBool,
     ) -> Result<(Self, LocalRelocationGuard)> {
         self.require_writable()?;
+        let source_scan = management::LibraryLease::acquire(&self.path)?;
+        let source_admin = management::AdministrationLease::exclusive(&self.path)?;
+        self.check_vendor_relocation_destination(path)?;
         let guard = LocalRelocationGuard {
-            _source_scan: management::LibraryLease::acquire(&self.path)?,
-            _source_admin: management::AdministrationLease::exclusive(&self.path)?,
+            _source_scan: source_scan,
+            _source_admin: source_admin,
             _destination: import_lease::ImportDestinationLease::acquire(path)?,
         };
         let destination = guard._destination.destination();

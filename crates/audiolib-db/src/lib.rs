@@ -3746,6 +3746,17 @@ fn compile_request_query(jieba: &Jieba, request: &SearchRequest) -> Result<Strin
     }
 }
 
+/// Attach relocated files to an existing directory tree when the selected root is nested in it.
+#[cfg(feature = "scanner")]
+fn indexed_ancestor_or_self<'a>(conn: &Connection, root: &'a Path) -> Result<&'a Path> {
+    for ancestor in root.ancestors() {
+        if path_identity::folder_id(conn, &folder_path_text(ancestor))?.is_some() {
+            return Ok(ancestor);
+        }
+    }
+    Ok(root)
+}
+
 #[cfg(feature = "scanner")]
 fn ensure_folder(conn: &Connection, folder: &Path, root: &Path) -> Result<i64> {
     let display = folder_path_text(folder);

@@ -1466,14 +1466,7 @@ impl SqliteProvider {
             ));
         }
         // Reuse a registered ancestor when possible so the target remains browsable in its tree.
-        let mut root = parent.to_path_buf();
-        for ancestor in parent.ancestors() {
-            let found = path_identity::folder_id(&tx, &folder_path_text(ancestor))?.is_some();
-            if found {
-                root = ancestor.to_path_buf();
-                break;
-            }
-        }
+        let root = indexed_ancestor_or_self(&tx, parent)?.to_owned();
         tx.execute(
             "UPDATE audio_files SET file_path=?2,path_key=?3 WHERE id=?1",
             params![id, display_path(&path), key],

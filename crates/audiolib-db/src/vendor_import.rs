@@ -253,6 +253,22 @@ impl SqliteProvider {
         Ok(None)
     }
 
+    /// Reject staging descendants before reserving the new filename or publishing any copy.
+    pub(crate) fn check_vendor_relocation_destination(&self, destination: &Path) -> Result<()> {
+        let source = self.vendor_root_directory(false)?;
+        if source.try_exists()? {
+            let parent = destination
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."))
+                .canonicalize()?;
+            if parent.starts_with(source.canonicalize()?) {
+                return Err(invalid("Destination is inside the source vendor directory"));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn copy_vendor_staging(&self, destination: &Path) -> Result<()> {
         let source = self.vendor_root_directory(false)?;
         let filename = destination
@@ -268,9 +284,6 @@ impl SqliteProvider {
         }
         if !source.try_exists()? {
             return Ok(());
-        }
-        if target.starts_with(&source) {
-            return Err(invalid("Destination is inside the source vendor directory"));
         }
         // Validate the owner marker, including the supported legacy layout.
         let source = self.vendor_root_directory(true)?;

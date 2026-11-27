@@ -1703,6 +1703,87 @@ mod local_paths {
     }
 
     #[test]
+    fn repair_attaches_a_new_subdirectory_to_its_indexed_ancestor() {
+        let f = fixture();
+        let root = f.temp.path().join("audio");
+        let destination = root.join("new/nested");
+        fs::create_dir_all(&destination).unwrap();
+        fs::rename(&f.paths[0], destination.join("metal.wav")).unwrap();
+        let cancel = AtomicBool::new(false);
+        let review = f
+            .provider
+            .preview_path_repair(&request(&f, &destination, false), &[], &cancel)
+            .unwrap();
+        assert_eq!(review.rows.len(), 1);
+        f.provider
+            .apply_path_repair(&review, &[(0, 0)], &[], &cancel, &mut |_| {})
+            .unwrap();
+        let roots = f.provider.folders(None).unwrap();
+        assert_eq!(roots.len(), 1);
+        let children = f.provider.folders(Some(roots[0].id)).unwrap();
+        let new = children.iter().find(|folder| folder.name == "new").unwrap();
+        let nested = f.provider.folders(Some(new.id)).unwrap();
+        assert_eq!(
+            f.provider.get_audio(f.ids[0]).unwrap().folder_id,
+            Some(nested[0].id)
+        );
+    }
+
+    #[test]
+    fn occupied_relative_target_leaves_free_alternatives_for_manual_review() {
+        let f = fixture();
+        let dest = f.temp.path().join("replacement");
+        fs::create_dir_all(&dest).unwrap();
+        let occupied = dest.join("metal.wav");
+        fs::copy(&f.paths[0], &occupied).unwrap();
+        ScanService::new(f.provider.clone())
+            .scan(
+                &dest,
+                &ScanOptions::default(),
+                &ScanCancellation::default(),
+                |_| {},
+            )
+            .unwrap();
+        let owner = f.provider.find_audio_by_path(&occupied).unwrap().unwrap();
+        fs::create_dir(dest.join("spare")).unwrap();
+        let alternate = dest.join("spare/metal.wav");
+        fs::copy(&f.paths[0], &alternate).unwrap();
+        let cancel = AtomicBool::new(false);
+        let review = f
+            .provider
+            .preview_path_repair(&request(&f, &dest, true), &[], &cancel)
+            .unwrap();
+        let (i, row) = review
+            .rows
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.id == f.ids[0])
+            .unwrap();
+        assert_eq!(row.kind, MatchKind::Ambiguous);
+        assert_eq!(row.candidates.len(), 1);
+        assert_eq!(row.candidates[0].path, alternate.canonicalize().unwrap());
+        f.provider
+            .apply_path_repair(&review, &[(i, 0)], &[], &cancel, &mut |_| {})
+            .unwrap();
+        assert_eq!(
+            f.provider
+                .find_audio_by_path(&occupied)
+                .unwrap()
+                .unwrap()
+                .id,
+            owner.id
+        );
+        assert_eq!(
+            f.provider
+                .find_audio_by_path(&alternate)
+                .unwrap()
+                .unwrap()
+                .id,
+            f.ids[0]
+        );
+    }
+
+    #[test]
     fn relocating_snapshot_carries_personal_state_and_resumable_vendor_input() {
         use audiolib_core::vendor_import::{VendorImportOptions, VendorMappingTemplate};
         use audiolib_db::local_play_history::{LocalPlayHistory, local_library_id};
@@ -1736,6 +1817,15 @@ mod local_paths {
                 ..Default::default()
             })
             .unwrap();
+        let staging = db.with_file_name("library.db.vendor-import");
+        let invalid = staging.join("reserved.db");
+        assert!(
+            f.provider
+                .prepare_local_relocation(&invalid, &data, 100, &AtomicBool::new(false))
+                .is_err()
+        );
+        assert!(!invalid.exists());
+        assert!(!staging.join(".audiolib-import-leases").exists());
         let destination = f.temp.path().join("new.db");
         let (new, guard) = f
             .provider

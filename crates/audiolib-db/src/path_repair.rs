@@ -377,35 +377,32 @@ impl SqliteProvider {
                 if file.owner == Some(row.id) {
                     continue;
                 }
-                if file.owner.is_some() {
-                    row.kind = MatchKind::Occupied;
-                } else {
+                if file.owner.is_none() {
                     row.candidates = Arc::new([file.candidate.clone()]);
                     row.kind = MatchKind::Relative;
                     let count = claims.entry(exact.clone()).or_insert(0u8);
                     *count = count.saturating_add(1);
+                    preview.rows.push(row);
+                    continue;
                 }
-            } else {
-                let group =
-                    matches.group(&conn, &name, paths, &audio.properties, &mut preview, cancel)?;
-                row.candidates = group.candidates.clone();
-                row.kind = match row.candidates.len() {
-                    0 if group.occupied => MatchKind::Occupied,
-                    0 if group.inaccessible || incomplete => MatchKind::Inaccessible,
-                    0 => MatchKind::Missing,
-                    1 if !group.inaccessible && !group.occupied && !incomplete => {
-                        MatchKind::Filename
-                    }
-                    _ => MatchKind::Ambiguous,
-                };
-                // The same set may serve thousands of identical filenames and audio formats.
-                // For conflicts it suffices to distinguish one claimant from two or more.
-                if group.uses < 2 {
-                    group.uses += 1;
-                    for c in row.candidates.iter() {
-                        let n = claims.entry(c.path.clone()).or_insert(0u8);
-                        *n = n.saturating_add(1);
-                    }
+            }
+            let group =
+                matches.group(&conn, &name, paths, &audio.properties, &mut preview, cancel)?;
+            row.candidates = group.candidates.clone();
+            row.kind = match row.candidates.len() {
+                0 if group.occupied => MatchKind::Occupied,
+                0 if group.inaccessible || incomplete => MatchKind::Inaccessible,
+                0 => MatchKind::Missing,
+                1 if !group.inaccessible && !group.occupied && !incomplete => MatchKind::Filename,
+                _ => MatchKind::Ambiguous,
+            };
+            // The same set may serve thousands of identical filenames and audio formats.
+            // For conflicts it suffices to distinguish one claimant from two or more.
+            if group.uses < 2 {
+                group.uses += 1;
+                for c in row.candidates.iter() {
+                    let n = claims.entry(c.path.clone()).or_insert(0u8);
+                    *n = n.saturating_add(1);
                 }
             }
             preview.rows.push(row);
@@ -449,6 +446,7 @@ impl SqliteProvider {
             .join(format!("before-path-repair-{}.db", uuid::Uuid::new_v4()));
         let report = self.backup_library_cancellable(&backup, cancel)?;
         let tx = conn.transaction().map_err(db_error)?;
+        let hierarchy_root = indexed_ancestor_or_self(&tx, &root)?;
         let mut ids = HashSet::new();
         let mut targets = HashSet::new();
         let mut changed_folders = HashSet::new();
@@ -497,7 +495,7 @@ impl SqliteProvider {
                 .path
                 .parent()
                 .ok_or_else(|| invalid("Candidate has no parent"))?;
-            let new_folder = ensure_folder(&tx, parent, &root)?;
+            let new_folder = ensure_folder(&tx, parent, hierarchy_root)?;
             let filename = candidate
                 .path
                 .file_name()
