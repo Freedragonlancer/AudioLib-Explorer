@@ -1,5 +1,5 @@
 # tools/test-release-stage-docker.ps1
-# Run the Docker staging coordinator against synthetic readiness receipts and Bash workers.
+# Run the release staging coordinator against synthetic readiness receipts and Bash workers.
 #Requires -Version 7.3
 param([string]$Bash)
 
@@ -34,10 +34,17 @@ function New-TestCase([string]$Name) {
     [pscustomobject]@{ Draft = $script:nextDraft; Assets = $payload; Ready = $ready; Notes = $notes; Control = $control }
 }
 
-function Set-Ready($TestCase, [string]$Architecture) {
-    $archive = "AudioLibServer-$tag-docker-linux-$Architecture.tar.gz"
+function Set-Ready($TestCase, [string]$Pair) {
+    $archive = switch ($Pair) {
+        'mac-client' { "AudioLibExplorer-$tag-macos-arm64.zip" }
+        'win-client' { "AudioLibExplorer-$tag-win-x64-portable.zip" }
+        'mac-server' { "AudioLibServer-$tag-macos-arm64.tar.gz" }
+        'win-server' { "AudioLibServer-$tag-win-x64.zip" }
+        'linux-server' { "AudioLibServer-$tag-linux-x64.tar.gz" }
+        default { "AudioLibServer-$tag-docker-linux-$Pair.tar.gz" }
+    }
     $path = Join-Path $TestCase.Assets $archive
-    [IO.File]::WriteAllText($path, "Synthetic payload for $Architecture")
+    [IO.File]::WriteAllText($path, "Synthetic payload for $Pair")
     $digest = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText("$path.sha256", "$digest  $archive" + [char]10)
     $receipt = Join-Path $TestCase.Ready "$archive.ready.json"
@@ -49,7 +56,7 @@ function Set-Ready($TestCase, [string]$Architecture) {
     [IO.File]::Move("$receipt.tmp", $receipt)
 }
 
-function Start-Coordinator($TestCase, [switch]$BlockGitCheck) {
+function Start-Coordinator($TestCase, [switch]$BlockGitCheck, [switch]$AllPairs) {
     $start = [Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })))
     $start.WorkingDirectory = $repo
     $start.UseShellExecute = $false
@@ -57,10 +64,12 @@ function Start-Coordinator($TestCase, [switch]$BlockGitCheck) {
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
     $start.Environment['AUDIOLIB_TEST_DOCKER_CONTROL'] = $TestCase.Control
+    $start.Environment['AUDIOLIB_TEST_DOCKER_DRAFT'] = [string]$TestCase.Draft
     $entry = if ($BlockGitCheck) { 'coordinator-git-gate.ps1' } else { 'release-stage-docker.ps1' }
     foreach ($argument in '-NoProfile','-File',(Join-Path $tools $entry),
         '-Tag',$tag,'-DraftId',"$($TestCase.Draft)",'-NotesFile',$TestCase.Notes,'-AssetDirectory',$TestCase.Assets,
         '-ReadyDirectory',$TestCase.Ready,'-Bash',$Bash,'-WaitSeconds','40') { $start.ArgumentList.Add($argument) }
+    if ($AllPairs) { $start.ArgumentList.Add('-AllPairs') }
     $process = [Diagnostics.Process]::Start($start)
     [pscustomobject]@{ Process = $process; Output = $process.StandardOutput.ReadToEndAsync(); Error = $process.StandardError.ReadToEndAsync() }
 }
@@ -159,7 +168,7 @@ while [ $# -gt 0 ]; do
     *) fail "Unexpected mock worker option $1" ;;
   esac
 done
-[ "$tag" = v1.2.3 ] && [[ "$draft" =~ ^[1-9][0-9]*$ ]] && [ "$resume:$independent" = 1:1 ] &&
+[ "$tag" = v1.2.3 ] && [ "$draft" = "$AUDIOLIB_TEST_DOCKER_DRAFT" ] && [ "$resume:$independent" = 1:1 ] &&
   [ $# -eq 2 ] && [ -f "$(normalize "$notes")" ] || fail 'Mock worker received wrong scope'
 [ "$mode:$timings" = upload:1 ] || [ "$mode:$timings" = status:0 ] || fail 'Incompatible status/timing scope'
 archive_path=$(normalize "$1")
@@ -168,6 +177,11 @@ archive=${archive_path##*/}
 case "$archive" in
   "AudioLibServer-$tag-docker-linux-amd64.tar.gz") arch=amd64 ;;
   "AudioLibServer-$tag-docker-linux-arm64.tar.gz") arch=arm64 ;;
+  "AudioLibExplorer-$tag-macos-arm64.zip") arch=mac-client ;;
+  "AudioLibExplorer-$tag-win-x64-portable.zip") arch=win-client ;;
+  "AudioLibServer-$tag-macos-arm64.tar.gz") arch=mac-server ;;
+  "AudioLibServer-$tag-win-x64.zip") arch=win-server ;;
+  "AudioLibServer-$tag-linux-x64.tar.gz") arch=linux-server ;;
   *) fail 'Mock worker received unrecognized archive' ;;
 esac
 [ -f "$archive_path" ] && [ "$checksum_path" = "$archive_path.sha256" ] || fail 'Mock worker received wrong asset pair'
@@ -194,8 +208,10 @@ timing() {
 }
 reset_message() {
   file=$archive
-  if [ "$scenario:$arch" = recovery:arm64 ]; then file="$archive.sha256"; fi
-  printf 'gh: Post "https://uploads.github.com/repos/example/fixture/releases/%s/assets?name=%s": write tcp 192.0.2.1:443->192.0.2.2:443: connection reset by peer\n' "$draft" "$file" >&2
+  case "$scenario:$arch" in recovery:arm64|shared-recovery:arm64) file="$archive.sha256" ;; esac
+  post_draft=$draft
+  if [ "$scenario" = wrong-draft ]; then post_draft=$((draft+1)); fi
+  printf 'gh: Post "https://uploads.github.com/repos/example/fixture/releases/%s/assets?name=%s": write tcp 192.0.2.1:443->192.0.2.2:443: connection reset by peer\n' "$post_draft" "$file" >&2
 }
 reset_upload() {
   reset_message
@@ -226,6 +242,15 @@ case "$scenario:$arch:$attempt" in
     reset_upload ;;
   recovery:*:2)
     wait_gate "retry.$arch" ;;
+  shared-recovery:amd64:1|shared-recovery:mac-server:1)
+    wait_gate "first.$arch" ;;
+  shared-recovery:arm64:1)
+    wait_gate first.arm64
+    : > "$control/archive-stored.$arch"
+    reset_upload ;;
+  shared-recovery:arm64:2)
+    [ -f "$control/archive-stored.$arch" ] || fail 'Recovery lost the already uploaded archive'
+    wait_gate retry.arm64 ;;
   persisted:*:1)
     reset_upload ;;
   persisted:*:2)
@@ -239,7 +264,7 @@ case "$scenario:$arch:$attempt" in
   reconciled:amd64:1)
     : > "$control/stored.$arch"
     reset_upload ;;
-  starter:amd64:1|conflict:amd64:1)
+  starter:amd64:1|conflict:amd64:1|wrong-draft:amd64:1)
     reset_upload ;;
   dispatch-starter:amd64:1|dispatch-conflict:amd64:1)
     wait_gate first.amd64
@@ -297,6 +322,28 @@ function git {
     $commit = & git -C $repo rev-parse HEAD
     if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the synthetic release commit.' }
 
+    $handoff = New-TestCase 'handoff'
+    $nativePairLock = Join-Path $repo ".rust-validation/release-upload/$tag/$($handoff.Draft)/AudioLibServer-$tag-macos-arm64.tar.gz.lock"
+    $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($nativePairLock))
+    $lease = [IO.File]::Open($nativePairLock, 'OpenOrCreate', 'ReadWrite', 'None')
+    try {
+        $run = Start-Coordinator $handoff -AllPairs
+        try { Assert-CoordinatorResult $run $false 'Release staging is busy.*macos-arm64' } finally { Close-Coordinator $run }
+    } finally { $lease.Dispose() }
+    $commandPath = Join-Path $handoff.Control 'command.json'
+    $stageScript = Join-Path $handoff.Control 'stage.ps1'
+    $started = (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks
+    [IO.File]::WriteAllText($stageScript, 'Write-Output "Synthetic upload started"')
+    @{
+        root = $repo; lock_path = $nativePairLock; script = $stageScript; parameters = @{}
+        upload_coordinator_pid = $PID; upload_coordinator_started = $started - 1
+    } | ConvertTo-Json | Set-Content -LiteralPath $commandPath
+    $stageOutput = & (Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })) -NoProfile -File (Join-Path $tools 'release-stage.ps1') -CommandFile $commandPath 2>&1
+    if ($LASTEXITCODE -eq 0 -or ($stageOutput -join ' ') -notmatch 'coordinator exited before its upload worker' -or
+        $stageOutput -contains 'Synthetic upload started') {
+        throw 'A delayed upload worker ran without its original coordinator.'
+    }
+
     $recovery = New-TestCase 'recovery'
     Set-Ready $recovery 'amd64'
     $run = Start-Coordinator $recovery
@@ -328,6 +375,72 @@ function git {
         $checks = @($events[($siblingFinished + 1)..($retryStarted - 1)])
         foreach ($arch in $arches) {
             if (!($checks -like "status $arch * finish")) { throw "Missing recovery pair verification for $arch before retry." }
+        }
+    } finally { Close-Coordinator $run }
+
+    $shared = New-TestCase 'shared-recovery'
+    Set-Ready $shared 'amd64'
+    $run = Start-Coordinator $shared -AllPairs
+    try {
+        $null = Wait-WorkerMarker $shared $run 'upload.amd64.1.start'
+        Set-Ready $shared 'arm64'
+        $null = Wait-WorkerMarker $shared $run 'upload.arm64.1.start'
+        Set-Ready $shared 'mac-server'
+        Start-Sleep -Milliseconds 1500
+        if (Test-WorkerMarker $shared 'upload.mac-server.1.start') {
+            throw 'A native pair bypassed the two occupied Docker slots.'
+        }
+
+        Let-WorkerFinish $shared 'first.amd64'
+        $null = Wait-WorkerMarker $shared $run 'upload.mac-server.1.start'
+        if (!(Test-WorkerMarker $shared 'upload.amd64.1.finish') -or
+            (Test-WorkerMarker $shared 'upload.arm64.1.finish')) {
+            throw 'The queued native pair did not take the freed slot while ARM64 stayed active.'
+        }
+        Let-WorkerFinish $shared 'first.arm64'
+        $null = Wait-WorkerMarker $shared $run 'upload.arm64.1.finish'
+        Set-Ready $shared 'win-client'
+        Start-Sleep -Milliseconds 1500
+        if ((Test-WorkerMarker $shared 'status.arm64.2.start') -or
+            (Test-WorkerMarker $shared 'upload.arm64.2.start') -or
+            (Test-WorkerMarker $shared 'upload.win-client.1.start') -or $run.Process.HasExited) {
+            throw 'A failed Docker POST triggered rechecks or dispatch before the native upload drained.'
+        }
+        Let-WorkerFinish $shared 'first.mac-server'
+        $null = Wait-WorkerMarker $shared $run 'upload.arm64.2.start'
+        foreach ($pair in 'mac-client','win-server','linux-server') { Set-Ready $shared $pair }
+        Start-Sleep -Milliseconds 1500
+        foreach ($pair in 'win-client','mac-client','win-server','linux-server') {
+            if (Test-WorkerMarker $shared "upload.$pair.1.start") {
+                throw "A waiting pair ($pair) bypassed single-lane recovery."
+            }
+        }
+        Let-WorkerFinish $shared 'retry.arm64'
+        Assert-CoordinatorResult $run $true 'All release pairs verified'
+        $events = @(Get-Content -LiteralPath (Join-Path $shared.Control 'events'))
+        $nativeFinished = [array]::IndexOf($events, 'upload mac-server 1 finish')
+        $retryStarted = [array]::IndexOf($events, 'upload arm64 2 start')
+        if ($nativeFinished -lt 0 -or $retryStarted -le ($nativeFinished + 1)) {
+            throw 'Missing same-draft recovery check interval after the native worker drained.'
+        }
+        $checks = @($events[($nativeFinished + 1)..($retryStarted - 1)])
+        foreach ($pair in 'amd64','arm64','mac-server') {
+            if (!($checks -like "status $pair * finish")) { throw "$pair was not rechecked before recovery." }
+        }
+        foreach ($pair in 'amd64','mac-server') {
+            if (Test-WorkerMarker $shared "upload.$pair.2.start") { throw "Recovery reposted a complete pair ($pair)." }
+        }
+        $evidence = Join-Path $repo ".rust-validation/release-upload/$tag/$($shared.Draft)"
+        $retry = Get-ChildItem -LiteralPath $evidence -Directory -Filter "stage-AudioLibServer-$tag-docker-linux-arm64.tar.gz-*" |
+            ForEach-Object {
+                $stdout = Join-Path $_.FullName 'stdout.log'
+                if (Test-Path -LiteralPath $stdout -PathType Leaf) { Get-Content -LiteralPath $stdout }
+            } |
+            Where-Object { $_ -clike 'RELEASE_UPLOAD_TIMING *' } |
+            ForEach-Object { $_.Substring('RELEASE_UPLOAD_TIMING '.Length) | ConvertFrom-Json } |
+            Where-Object exit_code -eq 0
+        if (@($retry).Count -ne 1 -or $retry.post_attempts -ne 1) {
+            throw 'Expected one POST for the missing checksum in the successful recovery.'
         }
     } finally { Close-Coordinator $run }
 
@@ -364,6 +477,7 @@ function git {
         starter = 'Remote asset is incomplete'
         conflict = 'size/SHA256 conflicts'
         mixed = 'HTTP 422'
+        'wrong-draft' = 'connection reset by peer'
         preexisting = 'Remote asset is incomplete'
     }
     foreach ($scenario in $scenarios.Keys) {
@@ -381,8 +495,8 @@ function git {
             }
             if ($scenario -eq 'preexisting') {
                 if (Test-WorkerMarker $testCase 'upload.amd64.1.start') { throw 'Preexisting starter reached POST.' }
-            } elseif ($scenario -eq 'mixed') {
-                if (Test-WorkerMarker $testCase 'status.amd64.2.start') { throw 'An earlier recovered archive reset triggered recovery for a later HTTP error.' }
+            } elseif ($scenario -in 'mixed','wrong-draft') {
+                if (Test-WorkerMarker $testCase 'status.amd64.2.start') { throw "$scenario incorrectly triggered automatic recovery." }
             } elseif ($scenario -ne 'stored' -and !(Test-WorkerMarker $testCase 'status.amd64.2.start')) {
                 throw "$scenario did not inspect the failed worker's remote pair."
             }
@@ -413,7 +527,7 @@ function git {
         }
     } finally { Close-Coordinator $run }
 
-    'Docker staging mock tests passed (readiness, live sibling drain, serial recovery, proven assets, hard conflicts during dispatch and persisted recovery).'
+    'Release staging mock tests passed (readiness, shared two-slot queue, mixed-worker drain, draft identity, serial recovery, remote conflicts and coordinator restart).'
 } finally {
     $absolute = [IO.Path]::GetFullPath($fixture)
     if (!$absolute.StartsWith((Join-Path $tempParent 'AudioLibDockerStageTest-'),[StringComparison]::Ordinal) -or

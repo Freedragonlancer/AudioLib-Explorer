@@ -80,15 +80,20 @@ function Get-AudioLibTargetDirectory([string]$Root) {
 
 # Register only a freshly selected, empty local cache. Existing explicit caches
 # retain the cleaner's separate Register/AdoptExisting ownership contract.
-function Enter-AudioLibBuildEnvironment([string]$Root) {
-    $context = [pscustomobject]@{TargetDirectory=(Get-AudioLibTargetDirectory $Root);SavedEnvironment=@{}}
+function Enter-AudioLibBuildEnvironment([string]$Root,[switch]$SeparateDebugTarget) {
+    $targetDirectory = Get-AudioLibTargetDirectory $Root
+    if ($SeparateDebugTarget) {
+        if (![IO.Path]::GetDirectoryName($targetDirectory)) { throw 'The build target must have a parent directory to select a separate Debug target.' }
+        $targetDirectory += '-debug'
+    }
+    $context = [pscustomobject]@{TargetDirectory=$targetDirectory;SavedEnvironment=@{}}
     foreach ($name in @('CARGO_TARGET_DIR','TEMP','TMP')) {
         $context.SavedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
     }
     try {
         Assert-AudioLibUnlinkedPath $context.TargetDirectory
         $windowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
-        if ($windowsHost -and !$env:CARGO_TARGET_DIR) {
+        if (($windowsHost -and !$env:CARGO_TARGET_DIR) -or $SeparateDebugTarget) {
             # Shared build leases intentionally allow concurrent Cargo starts.
             # Serialize target registration separately so no starter can read a
             # partial owner marker or mistake another starter's files for an

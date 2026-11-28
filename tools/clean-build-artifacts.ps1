@@ -253,7 +253,8 @@ try {
     $report.remaining_bytes=$report.before_bytes
     $limit=[long]($MaxGiB*1GB)
     $intermediateProofWritten=$false
-    foreach($candidate in @($report.candidates|Sort-Object last_write_utc)){
+    # OrderedDictionary keys need an explicit sort expression in PowerShell.
+    foreach($candidate in @($report.candidates|Sort-Object { $_['last_write_utc'] } -Stable)){
         if($MaxGiB -gt 0 -and $report.remaining_bytes -le $limit){$candidate.status='retained-budget';continue}
         if($Action -eq 'Plan'){$candidate.status='would-remove';$report.remaining_bytes-=$candidate.bytes;continue}
         $absolute=Get-AudioLibCanonicalPath $candidate.path

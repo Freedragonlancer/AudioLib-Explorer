@@ -26,7 +26,7 @@ param($Action,$Mode,$MaxGiB,$Root,$TargetDirectory)
 $probe = Enter-AudioLibBuildLease (Split-Path -Parent $PSScriptRoot) -Exclusive
 try {
     if ($Action -ne 'Run' -or $Mode -ne 'Intermediate' -or $MaxGiB -ne 0) { throw 'Unexpected post-check cleanup selection.' }
-    if ($TargetDirectory -and (Get-AudioLibCanonicalPath $TargetDirectory) -cne (Get-AudioLibCanonicalPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'target'))) { throw 'Cleanup selected another target directory.' }
+    if (!$TargetDirectory -or (Get-AudioLibCanonicalPath $TargetDirectory) -cne $taskExpectedTarget) { throw 'Cleanup selected another target directory.' }
     $taskState.Cleaned++
     $global:LASTEXITCODE=0
 } finally { $probe.Dispose() }
@@ -64,6 +64,8 @@ function Invoke-PipelineCase([string]$Script, [hashtable]$Parameters, [string]$F
     $taskCalls.Clear()
     $taskState.Prepared = 0
     $taskCleanedBefore = $taskState.Cleaned
+    $taskExpectedTarget = Get-AudioLibCanonicalPath (Join-Path $taskArtifacts 'target')
+    if ($Parameters.SeparateDebugTarget) { $taskExpectedTarget += '-debug' }
     if ($PSVersionTable.PSVersion -lt [version]'7.3' -and !$Parameters.ContainsKey('CleanBuildArtifacts')) { $Parameters.CleanBuildArtifacts = $false }
     $taskBeforeLocation = (Get-Location).Path
     $taskBeforeEnvironment = @{}
@@ -82,7 +84,6 @@ function Invoke-PipelineCase([string]$Script, [hashtable]$Parameters, [string]$F
         if ([string][Environment]::GetEnvironmentVariable($taskKey, 'Process') -cne [string]$taskBeforeEnvironment[$taskKey]) { throw "$Script did not restore $taskKey." }
     }
     foreach ($taskCall in $taskCalls) {
-        $taskExpectedTarget = Get-AudioLibCanonicalPath (Join-Path $taskArtifacts 'target')
         if ($taskCall.TargetDirectory -cne $taskExpectedTarget) { throw "$Script did not route Cargo to the selected absolute build directory." }
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
             ($taskCall.TempDirectory -cne (Join-Path $taskExpectedTarget 'tmp') -or $taskCall.TmpDirectory -cne $taskCall.TempDirectory)) { throw "$Script did not isolate compiler TEMP/TMP beside its Cargo output." }
@@ -342,6 +343,20 @@ try {
         if ($taskCalls.Count -or $taskState.Cleaned) { throw 'Unsupported cleanup started work.' }
     }
     Write-Host 'PASS: default cleanup follows successful checks, releases its lease, honors opt-out/defer and retains failed diagnostics; Cargo target and TEMP/TMP are restored.'
+
+    $taskReleaseArtifact = Join-Path $taskArtifacts 'target/release/deps/keep.rlib'
+    $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($taskReleaseArtifact))
+    [IO.File]::WriteAllText($taskReleaseArtifact,'release fixture')
+    $taskCleanedBefore = $taskState.Cleaned
+    $taskExpectedCleanups = if ($PSVersionTable.PSVersion -ge [version]'7.3') { 1 } else { 0 }
+    $taskDebugMarker = Join-Path $taskArtifacts 'target-debug/.audiolib-build-owner.json'
+    Invoke-PipelineCase 'check-local.ps1' @{Package=@('audiolib-db');Test='fixture';Stage='Tests';SeparateDebugTarget=$true}
+    if ($taskCalls.Count -ne 1 -or $taskCalls[0].Arguments[0] -cne 'test' -or
+        $taskState.Cleaned -ne ($taskCleanedBefore + $taskExpectedCleanups) -or !(Test-Path -LiteralPath $taskDebugMarker) -or
+        [IO.File]::ReadAllText($taskReleaseArtifact) -cne 'release fixture') {
+        throw 'Independent Debug checks did not use and clean an owned cache without touching Release.'
+    }
+    Write-Host 'PASS: pre-release Debug tests use an independently owned target for Cargo and post-check cleanup.'
 
     $env:CARGO_BUILD_TARGET = 'aarch64-apple-darwin'
     foreach ($taskWithoutAsio in @($true, $false)) {
