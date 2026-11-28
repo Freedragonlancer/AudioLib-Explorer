@@ -40,6 +40,10 @@ Match a release built with --no-default-features (for example the headless serve
 Override the repository Cargo target for Clippy/tests (for example,
 aarch64-apple-darwin or x86_64-unknown-linux-gnu). Format is target-independent.
 ASIO requires a Windows MSVC target; omitting Target retains repository defaults.
+.PARAMETER SeparateDebugTarget
+Use a registered sibling of the resolved Cargo target with the -debug suffix.
+Checks and post-check cleanup are both scoped to this sibling, so separate
+release builds can reuse their intermediates.
 .PARAMETER CleanBuildArtifacts
 After checks pass, remove compilation intermediates (default enabled, zero budget).
 Use -CleanBuildArtifacts:$false to retain caches across several development runs.
@@ -71,6 +75,7 @@ param(
     [ValidateNotNullOrEmpty()][string]$TestFilter,
     [switch]$NoDefaultFeatures,
     [ValidateNotNullOrEmpty()][string]$Target,
+    [switch]$SeparateDebugTarget,
     [switch]$CleanBuildArtifacts = $true,
     [ValidateRange(0,100000)][double]$BuildCacheLimitGiB = 0
 )
@@ -158,7 +163,7 @@ function Invoke-CargoCheck([string]$Name, [string[]]$Arguments) {
 Push-Location -LiteralPath $taskRoot
 try {
     $buildLease = Enter-AudioLibBuildLease $taskRoot
-    $buildEnvironment = Enter-AudioLibBuildEnvironment $taskRoot
+    $buildEnvironment = Enter-AudioLibBuildEnvironment $taskRoot -SeparateDebugTarget:$SeparateDebugTarget
     New-Item -ItemType Directory -Path $logs -Force | Out-Null
     if ($Stage -eq 'All') {
         Invoke-CargoCheck 'format' @('fmt', '--all', '--', '--check')

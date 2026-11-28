@@ -1,4 +1,6 @@
 /target/
+/target-debug/
+/.audiolib-target-init.lock
 /dist/
 /local_release/
 /local_release.rar

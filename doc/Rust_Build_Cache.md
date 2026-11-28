@@ -22,6 +22,8 @@ pwsh tools/check-local.ps1 -Package audiolib-db -CleanBuildArtifacts:$false
 
 `check-local.ps1` 和 release 管线的 `-BuildCacheLimitGiB` 默认 0，表示清除全部合格中间文件；设为正数则在达到该逻辑空间预算后停止。独立清理器保持原有 `Debug`/40 GiB 默认，避免改变手工维护命令的删除范围。`-CleanBuildArtifacts:$false` 可关闭入口的自动清理。自动清理要求 PowerShell 7.3+；Windows PowerShell 5.1 调用开发/客户端构建时必须关闭该开关。维护失败保留已通过的检查/交付证据，并明确报告未完成，不终止占用进程。
 
+Mac 发布前单独运行 `check-local.ps1 -SeparateDebugTarget` 时，Debug 检查与清理使用发布 target 的 `-debug` 同级目录。Mac 正式发布 target 仍按 `-BuildCacheLimitGiB 8` 维护。带预算的清理按候选目录树的 UTC 修改时间从旧到新进行。`test-build-artifacts.ps1` 以 v1.1.4 Mac 收据的目录大小和时间回归验证排序，模拟清理后保留所有非空 Release 中间目录。
+
 | 模式 | 删除范围 | 保留内容 |
 | --- | --- | --- |
 | `Intermediate`（工作流自动使用） | debug/release 的编译中间子目录和 Cargo tmp | profile 根目录最终 EXE/库/PDB、文档、归属标记、包及安装 |

@@ -113,6 +113,79 @@ foreach($name in @('debug/app.exe','release/app.exe','release/app.pdb','release/
 }
 if($intermediate.removed_bytes -le 0 -or (Test-Path -LiteralPath (Join-Path $taskTarget 'tmp')) -or (Test-Path -LiteralPath $targetTemporary)){throw 'Intermediate cleanup did not reclaim owned temporary files.'}
 Write-Host 'PASS: intermediate cleanup removes host/target compilation caches and tmp while preserving final binaries, libraries, PDBs, docs and markers.'
+function Test-MacosReceiptBudget {
+    # v1.1.4 Mac cleanup receipt, reduced to relative candidates and logical size.
+    # Use tiny files with simulated sizes so Plan and Run exercise the real
+    # inventory, sorting and removal without allocating the original 10+ GiB.
+    $receiptBuckets=@'
+aarch64-apple-darwin/debug/build,18308798,2026-11-27T16:01:12.7452354Z
+aarch64-apple-darwin/debug/deps,1448574478,2026-11-27T16:01:30.5569517Z
+aarch64-apple-darwin/debug/.fingerprint,192412,2026-11-27T16:01:30.5603428Z
+aarch64-apple-darwin/debug/incremental,745606972,2026-11-27T16:01:30.3962908Z
+aarch64-apple-darwin/debug/examples,0,2026-11-18T17:20:23.0429053Z
+aarch64-apple-darwin/release/build,705868310,2026-11-27T16:32:59.8139019Z
+aarch64-apple-darwin/release/deps,5900169514,2026-11-27T16:34:11.7623116Z
+aarch64-apple-darwin/release/.fingerprint,1995079,2026-11-27T16:34:11.7695363Z
+aarch64-apple-darwin/release/incremental,0,2026-11-18T16:49:09.0222096Z
+aarch64-apple-darwin/release/examples,0,2026-11-18T16:49:09.0221298Z
+aarch64-apple-darwin/tmp,0,2026-11-27T16:00:59.4664018Z
+debug/build,66775330,2026-11-27T16:01:08.3492336Z
+debug/deps,198201234,2026-11-18T17:20:40.8409561Z
+debug/.fingerprint,50824,2026-11-27T16:01:07.4942173Z
+debug/incremental,3505126,2026-11-27T16:01:07.1119228Z
+debug/examples,0,2026-11-18T17:20:23.0427518Z
+release/build,794570896,2026-11-27T16:32:44.9071622Z
+release/deps,796837708,2026-11-27T16:32:45.5744860Z
+release/.fingerprint,275203,2026-11-27T16:32:45.5801052Z
+release/incremental,0,2026-11-18T16:49:09.0220714Z
+release/examples,0,2026-11-18T16:49:09.0219832Z
+'@ | ConvertFrom-Csv -Header Path,Bytes,LastWriteUtc
+    $receiptTarget=Join-Path $taskRoot 'macos-receipt-target'
+    $null=Invoke-Clean @{Action='Register';TargetDirectory=$receiptTarget}
+    [IO.File]::WriteAllText((Join-Path $receiptTarget 'CACHEDIR.TAG'),$taskSignature)
+    $receiptFileSizes=@{}
+    foreach($bucket in $receiptBuckets){
+        $path=Join-Path $receiptTarget $bucket.Path
+        $null=[IO.Directory]::CreateDirectory($path)
+        $timestamp=[DateTime]::Parse($bucket.LastWriteUtc,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind)
+        if([long]$bucket.Bytes -gt 0){
+            $file=Join-Path $path 'fixture.bin'
+            [IO.File]::WriteAllText($file,'fixture')
+            [IO.File]::SetLastWriteTimeUtc($file,$timestamp)
+            $receiptFileSizes[$file]=[long]$bucket.Bytes
+        }
+        [IO.Directory]::SetLastWriteTimeUtc($path,$timestamp)
+    }
+    $finalFile=Join-Path $receiptTarget 'aarch64-apple-darwin/release/AudioLibExplorer'
+    [IO.File]::WriteAllText($finalFile,'final fixture')
+    $receiptFileSizes[$finalFile]=221700722L
+    function Get-ChildItem([string]$LiteralPath,[switch]$Force,[switch]$Recurse,[switch]$Directory,[switch]$File){
+        foreach($entry in Microsoft.PowerShell.Management\Get-ChildItem @PSBoundParameters){
+            if($receiptFileSizes.ContainsKey($entry.FullName)){
+                $entry|Add-Member -NotePropertyName Length -NotePropertyValue $receiptFileSizes[$entry.FullName] -Force
+            }
+            $entry
+        }
+    }
+    $options=@{TargetDirectory=$receiptTarget;Action='Plan';Mode='Intermediate';MaxGiB=8}
+    $plan=Invoke-Clean $options
+    $releasePaths=@($receiptBuckets|Where-Object {$_.Path -match '(^|/)release/' -and [long]$_.Bytes -gt 0}|ForEach-Object {Join-Path $receiptTarget $_.Path})
+    if($plan.before_bytes -ne 10902632606L -or $plan.remaining_bytes -ne 8421609844L -or $plan.removed_bytes -ne 0 -or !$plan.budget_met -or
+        @($plan.candidates|Where-Object {$_.path -in $releasePaths -and $_.status -ne 'retained-budget'}).Count -or
+        @($plan.candidates|Where-Object {!(Test-Path -LiteralPath $_.path)}).Count){
+        throw "8 GiB Mac cleanup plan failed to retain release dependencies (planned remainder: $($plan.remaining_bytes))."
+    }
+    $options.Action='Run'
+    $run=Invoke-Clean $options
+    if($run.status -ne 'passed' -or $run.removed_bytes -ne 2481022762L -or $run.remaining_bytes -ne $plan.remaining_bytes -or !$run.budget_met -or
+        (($run.candidates|Where-Object status -eq removed|ForEach-Object path) -join '|') -cne (($plan.candidates|Where-Object status -eq would-remove|ForEach-Object path) -join '|') -or
+        @($run.candidates|Where-Object {(Test-Path -LiteralPath $_.path) -eq ($_.status -eq 'removed')}).Count -or
+        [IO.File]::ReadAllText($finalFile) -cne 'final fixture'){
+        throw '8 GiB Mac cleanup Run disagreed with Plan or changed the final executable.'
+    }
+    Write-Host 'PASS: v1.1.4 Mac cleanup receipt consumes the 8 GiB budget oldest first and retains all nonempty Release caches.'
+}
+Test-MacosReceiptBudget
 $external=Join-Path $taskRoot 'external-target'
 New-Cache $external
 $preview=Invoke-Clean @{Action='Plan';TargetDirectory=$external}

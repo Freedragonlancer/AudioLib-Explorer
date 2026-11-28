@@ -12,6 +12,15 @@ try {
     # Survives a parent-runner interruption until this child exits. A retry
     # cannot overlap a still-running build/install from the interrupted run.
     $stageLock = [IO.File]::Open($stage.lock_path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    if ($stage.ContainsKey('upload_coordinator_pid')) {
+        # The draft coordinator checks every pair lock while opening the draft.
+        # A delayed worker must not start after its original coordinator exited
+        # and a successor already checked this still-unlocked pair.
+        $coordinator = Get-Process -Id $stage.upload_coordinator_pid -ErrorAction SilentlyContinue
+        if (!$coordinator -or $coordinator.StartTime.ToUniversalTime().Ticks -ne $stage.upload_coordinator_started) {
+            throw 'The draft coordinator exited before its upload worker acquired the pair lock.'
+        }
+    }
     if ($stage.ContainsKey('shared_stage_lock_path')) {
         . (Join-Path $PSScriptRoot 'build-cache.ps1')
         Assert-AudioLibUnlinkedPath $stage.shared_stage_lock_path

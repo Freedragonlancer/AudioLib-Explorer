@@ -1,5 +1,5 @@
 # tools/release-stage-docker.ps1
-# Stage two accepted Docker file pairs on one existing GitHub draft.
+# Coordinate accepted archive/checksum pairs on one existing GitHub draft.
 #Requires -Version 7.3
 [CmdletBinding()]
 param(
@@ -8,6 +8,7 @@ param(
     [Parameter(Mandatory)][string]$NotesFile,
     [Parameter(Mandatory)][string]$AssetDirectory,
     [Parameter(Mandatory)][string]$ReadyDirectory,
+    [switch]$AllPairs,
     [string]$Bash,
     [ValidateRange(1, 86400)][int]$WaitSeconds = 14400
 )
@@ -46,10 +47,13 @@ $commit = Get-GitObject HEAD
 $tagObject = Get-GitObject "refs/tags/$Tag"
 if ((Get-GitObject "refs/tags/$Tag^{commit}") -cne $commit) { throw 'Use the checkout for the frozen release tag.' }
 $notesHash = (Get-FileHash -LiteralPath $NotesFile).Hash
-$archives = @('amd64', 'arm64' | ForEach-Object { "AudioLibServer-$Tag-docker-linux-$_.tar.gz" })
+$dockerArchives = @('amd64', 'arm64' | ForEach-Object { "AudioLibServer-$Tag-docker-linux-$_.tar.gz" })
 $expected = & (Join-Path $PSScriptRoot 'verify-release-assets.ps1') -Tag $Tag -ListExpectedAssets
+$allArchives = @($expected | Where-Object { $_ -cnotlike '*.sha256' })
+$archives = if ($AllPairs) { $allArchives } else { $dockerArchives }
+$scope = if ($AllPairs) { 'release' } else { 'Docker' }
 foreach ($archive in $archives) {
-    if ($archive -cnotin $expected -or "$archive.sha256" -cnotin $expected) { throw "Unexpected Docker pair: $archive" }
+    if ($archive -cnotin $expected -or "$archive.sha256" -cnotin $expected) { throw "Unexpected release pair: $archive" }
 }
 
 $evidence = Join-Path $root ".rust-validation/release-upload/$Tag/$DraftId"
@@ -58,11 +62,12 @@ $null = [IO.Directory]::CreateDirectory($evidence)
 $statePath = Join-Path $evidence 'state.json'
 $lockPath = Join-Path $evidence 'coordinator.lock'
 $serialLock = Join-Path $evidence 'serial.lock'
+$coordinatorStarted = (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks
 
 function Open-UploadLock([string]$Path) {
     Assert-AudioLibUnlinkedPath $Path
     try { return [IO.File]::Open($Path, 'OpenOrCreate', 'ReadWrite', 'None') }
-    catch [IO.IOException] { throw "Docker staging is busy. Wait for the existing uploader to exit. Lock: $Path" }
+    catch [IO.IOException] { throw "Release staging is busy. Wait for the existing uploader to exit. Lock: $Path" }
 }
 
 function Save-UploadState {
@@ -112,6 +117,8 @@ function Start-PairStage($Pair, [switch]$Probe) {
     $command = @{
         root = $root
         lock_path = Join-Path $evidence "$($Pair.Archive).lock"
+        upload_coordinator_pid = $PID
+        upload_coordinator_started = $coordinatorStarted
         command = $Bash
         arguments = @('./tools/release-create.sh', $Tag, '--resume-draft', '--stage-independent',
             '--draft-id', $DraftId, '--notes-file', (Convert-BashPath $NotesFile),
@@ -175,12 +182,12 @@ function Test-InterruptedPost($Result, [string]$Archive) {
         if ($message -cne 'release-create: Cannot inspect draft identity/assets') { return $false }
     }
     $name = [regex]::Escape([uri]::EscapeDataString($timing.failed_post_asset))
-    return $Result.Stderr -match "(?im)https://uploads\.github\.com/[^""\r\n]*[?&]name=$name(?=[""&])[^\r\n]*(?:connection (?:was forcibly closed|reset)|\b(?:unexpected )?EOF\b|i/o timeout|broken pipe)"
+    return $Result.Stderr -match "(?im)https://uploads\.github\.com/[^""\r\n?]*/releases/$DraftId/assets\?(?:[^""\r\n]*&)?name=$name(?=[""&])[^\r\n]*(?:connection (?:was forcibly closed|reset)|\b(?:unexpected )?EOF\b|i/o timeout|broken pipe)"
 }
 
 function Format-StageFailure($Worker, $Result) {
     $details = @($Result.Stderr -split '\r?\n' | Where-Object { $_ -and $_ -notmatch '^Native stage exited with code \d+\.$' } | Select-Object -Last 1)
-    return "Docker staging paused for $($Worker.Archive). $details See $($Worker.Attempt)."
+    return "$scope staging paused for $($Worker.Archive). $details See $($Worker.Attempt)."
 }
 
 $active = [Collections.Generic.List[object]]::new()
@@ -188,7 +195,7 @@ $completed = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordina
 $lease = Open-UploadLock $lockPath
 try {
     # The worker keeps its own lock if the coordinator is stopped.
-    foreach ($path in @($serialLock) + @($archives | ForEach-Object { Join-Path $evidence "$_.lock" })) {
+    foreach ($path in @($serialLock) + @($allArchives | ForEach-Object { Join-Path $evidence "$_.lock" })) {
         (Open-UploadLock $path).Dispose()
     }
     Assert-AudioLibUnlinkedPath $statePath
@@ -198,17 +205,20 @@ try {
     if (Test-Path -LiteralPath $statePath) {
         $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json -AsHashtable
         foreach ($key in $identity.Keys) {
-            if ($state[$key] -cne $identity[$key]) { throw "Saved Docker staging identity differs ($key)." }
+            if ($state[$key] -cne $identity[$key]) { throw "Saved release staging identity differs ($key)." }
         }
         if ($state.mode -cnotin @('parallel', 'serial') -or $state.accepted -isnot [Collections.IDictionary] -or
-            $state.pending -isnot [array]) { throw 'Invalid saved Docker staging state.' }
+            $state.pending -isnot [array]) { throw 'Invalid saved release staging state.' }
+        if (!$AllPairs -and @($state.accepted.Keys | Where-Object { $_ -cnotin $dockerArchives }).Count) {
+            throw 'Resume this draft with -AllPairs because its saved staging state includes native archives.'
+        }
         foreach ($name in $state.accepted.Keys) {
             if ($name -cnotin $archives -or $state.accepted[$name] -cnotmatch '\A[0-9a-f]{64}\z') {
-                throw 'Invalid saved Docker acceptance identity.'
+                throw 'Invalid saved release acceptance identity.'
             }
         }
         foreach ($name in $state.pending) {
-            if ($name -cnotin $archives -or !$state.accepted.Contains($name)) { throw 'Invalid saved Docker recovery entry.' }
+            if ($name -cnotin $archives -or !$state.accepted.Contains($name)) { throw 'Invalid saved release recovery entry.' }
         }
     } else {
         $state = $identity
@@ -227,11 +237,11 @@ try {
             $result = Receive-PairStage $worker
             if ($result.Code -eq 0) {
                 $null = $completed.Add($worker.Archive)
-                Write-Host "Verified Docker pair $($worker.Archive) on draft $DraftId."
+                Write-Host "Verified $scope pair $($worker.Archive) on draft $DraftId."
             } elseif ($state.mode -ceq 'parallel' -and (Test-InterruptedPost $result $worker.Archive)) {
                 $state.pending += $worker.Archive
                 Save-UploadState
-                Write-Warning "Docker POST interrupted for $($worker.Archive). Waiting for active uploads before checking draft $DraftId."
+                Write-Warning "$scope POST interrupted for $($worker.Archive). Waiting for active uploads before checking draft $DraftId."
             } elseif (!$failure) {
                 $failure = Format-StageFailure $worker $result
             }
@@ -250,7 +260,8 @@ try {
                     elseif ($state.accepted.Contains($archive)) { throw "Missing saved acceptance receipt for $archive." }
                 }
             )
-            $pairs = @($pairs | Sort-Object @{ Expression = { $_.Archive -cnotin $state.pending } }, Ready)
+            $pairs = @($pairs | Sort-Object @{ Expression = { $_.Archive -cnotin $state.pending } },
+                @{ Expression = { $_.Archive -cnotin $dockerArchives } }, Ready)
             # A strict snapshot is only safe once our in-flight uploads have drained.
             if ($active.Count -eq 0 -and $pairs.Count -gt 0) {
                 foreach ($pair in $pairs) {
@@ -271,7 +282,7 @@ try {
                     if ($missing.Count -gt 0) { $state.mode = 'serial' }
                     $state.pending = @()
                     Save-UploadState
-                    if ($missing.Count -gt 0) { Write-Host "Switched to serial Docker staging on draft $DraftId." }
+                    if ($missing.Count -gt 0) { Write-Host "Switched to serial $scope staging on draft $DraftId." }
                 }
             }
             $limit = if ($state.mode -ceq 'parallel') { 2 } else { 1 }
@@ -283,17 +294,18 @@ try {
                 $worker = Start-PairStage $pair
                 if (!$worker) { continue staging }
                 $active.Add($worker)
-                Write-Host "Started $($state.mode) Docker staging for $($pair.Archive) on draft $DraftId."
+                Write-Host "Started $($state.mode) $scope staging for $($pair.Archive) on draft $DraftId."
                 $idle.Restart()
             }
         }
         if ($completed.Count -eq $archives.Count) { break }
         if ($active.Count -eq 0 -and $idle.Elapsed.TotalSeconds -ge $WaitSeconds) {
-            throw "Timed out waiting for accepted Docker pairs. See $evidence."
+            throw "Timed out waiting for accepted $scope pairs. See $evidence."
         }
         Start-Sleep -Milliseconds 500
     }
-    Write-Host "Both Docker pairs verified on draft $DraftId."
+    $finished = if ($AllPairs) { 'All release' } else { 'Both Docker' }
+    Write-Host "$finished pairs verified on draft $DraftId."
 } finally {
     try {
         foreach ($worker in $active) { $null = Receive-PairStage $worker }
